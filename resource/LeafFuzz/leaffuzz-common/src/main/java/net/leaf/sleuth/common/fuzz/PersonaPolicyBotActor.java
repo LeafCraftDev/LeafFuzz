@@ -794,7 +794,7 @@ public final class PersonaPolicyBotActor {
             }
         }
 
-        String playerName = strings.getOrDefault("player_name", strings.getOrDefault("id", "LeafBot0"));
+        String playerName = strings.getOrDefault("player_name", strings.getOrDefault("id", "LF_Bot0"));
         UUID accountId;
         try {
             String rawUuid = strings.get("account_id");
@@ -904,13 +904,67 @@ public final class PersonaPolicyBotActor {
     }
 
     public String actorName() {
-        String base = persona.playerName().replaceAll("[^a-zA-Z0-9_]", "");
-        if (base.isEmpty()) {
-            base = "FuzzBot";
+        return actorName(0);
+    }
+
+    /**
+     * Formats a Minecraft-valid ({@code <= 16} chars, {@code [a-zA-Z0-9_]}) bot username
+     * by abbreviating the persona stem before attaching the permission tier suffix
+     * ({@code _p} or {@code _op}) and optional swarm slot suffix ({@code _<botIndex>}).
+     *
+     * @param botIndex swarm slot index ({@code <= 0} omits the index suffix)
+     * @return abbreviated username guaranteed to fit within 16 characters without cutting off suffixes
+     */
+    public String actorName(int botIndex) {
+        String tierSuffix = "op".equals(permissionTier) ? "_op" : "_p";
+        String indexSuffix = botIndex > 0 ? ("_" + botIndex) : "";
+        String suffix = tierSuffix + indexSuffix;
+        if (suffix.length() >= 15) {
+            suffix = suffix.substring(0, 15);
         }
-        String suffix = "op".equals(permissionTier) ? "_op" : "_p";
-        int maxBase = Math.max(1, 16 - suffix.length());
-        return (base.length() > maxBase ? base.substring(0, maxBase) : base) + suffix;
+        int maxStem = Math.max(1, 16 - suffix.length());
+        String stem = abbreviateStem(persona.playerName(), maxStem);
+        return stem + suffix;
+    }
+
+    static String abbreviateStem(String rawName, int maxStem) {
+        String cleaned = rawName == null ? "" : rawName.replaceAll("[^a-zA-Z0-9_]", "");
+        while (cleaned.startsWith("_")) {
+            cleaned = cleaned.substring(1);
+        }
+        while (cleaned.endsWith("_")) {
+            cleaned = cleaned.substring(0, cleaned.length() - 1);
+        }
+        if (cleaned.isEmpty()) {
+            cleaned = "LF_Bot";
+        }
+        if (cleaned.length() <= maxStem) {
+            return cleaned;
+        }
+        String compact = cleaned
+                .replaceFirst("^(?i)LeafFuzz_?", "LF_")
+                .replaceFirst("^(?i)LeafSleuth_?", "LS_")
+                .replaceFirst("^(?i)Leaf_?", "LF_")
+                .replaceFirst("^(?i)Fuzz_?", "FZ_")
+                .replaceAll("_+", "_");
+        if (compact.length() > maxStem) {
+            StringBuilder sb = new StringBuilder(compact);
+            for (int i = sb.length() - 1; i >= 1 && sb.length() > maxStem; i--) {
+                char c = sb.charAt(i);
+                char prev = sb.charAt(i - 1);
+                if ((c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u') && prev != '_') {
+                    sb.deleteCharAt(i);
+                }
+            }
+            compact = sb.toString();
+        }
+        if (compact.length() > maxStem) {
+            compact = compact.substring(0, maxStem);
+        }
+        while (compact.length() > 1 && compact.endsWith("_")) {
+            compact = compact.substring(0, compact.length() - 1);
+        }
+        return compact;
     }
 
     public String permissionTier() {
@@ -970,42 +1024,42 @@ public final class PersonaPolicyBotActor {
     private static List<PersonaProfile> buildDefaultCatalog() {
         return List.of(
                 createBuiltinPersona(
-                        0, "LeafExplorer", 0.065, 1.2, 85.0, 0.85, 0.70, 0.35,
+                        0, "LF_Explr", 0.065, 1.2, 85.0, 0.85, 0.70, 0.35,
                         List.of(0, 1, 2), List.of("COMMAND_CHAT", "MINING", "BUILDING"),
                         16, -12, "explorer_wander", "explorer"
                 ),
                 createBuiltinPersona(
-                        1, "LeafHomesteader", 0.105, 2.3, 140.0, 0.20, 0.10, 0.05,
+                        1, "LF_Stead", 0.105, 2.3, 140.0, 0.20, 0.10, 0.05,
                         List.of(3, 4, 5), List.of("BUILDING", "CONTAINER_SORT", "COMMAND_CHAT"),
                         32, -24, "homesteader_reroll", "house"
                 ),
                 createBuiltinPersona(
-                        2, "LeafMiner", 0.165, 4.3, 225.0, 0.65, 0.45, 0.20,
+                        2, "LF_Miner", 0.165, 4.3, 225.0, 0.65, 0.45, 0.20,
                         List.of(6, 7, 8), List.of("MINING", "CRAFTING", "BUILDING"),
                         48, -36, "chunk_border_thrash", "mineshaft"
                 ),
                 createBuiltinPersona(
-                        3, "LeafCrafter", 0.255, 8.0, 355.0, 0.92, 0.82, 0.55,
+                        3, "LF_Craft", 0.255, 8.0, 355.0, 0.92, 0.82, 0.55,
                         List.of(0, 4, 8), List.of("CRAFTING", "CONTAINER_SORT", "MINING"),
                         64, -48, "window_click", "shop"
                 ),
                 createBuiltinPersona(
-                        4, "LeafSorter", 0.375, 14.5, 540.0, 0.12, 0.05, 0.02,
+                        4, "LF_Sort", 0.375, 14.5, 540.0, 0.12, 0.05, 0.02,
                         List.of(1, 5, 6), List.of("CONTAINER_SORT", "BUILDING", "COMBAT"),
                         80, -60, "window_click", "villager"
                 ),
                 createBuiltinPersona(
-                        5, "LeafRunner", 0.082, 1.7, 110.0, 0.75, 0.58, 0.28,
+                        5, "LF_Run", 0.082, 1.7, 110.0, 0.75, 0.58, 0.28,
                         List.of(2, 3, 7), List.of("COMMAND_CHAT", "MINING", "CONTAINER_SORT"),
                         96, -72, "burst_swarm", "caving"
                 ),
                 createBuiltinPersona(
-                        6, "LeafRedstoner", 0.132, 3.2, 178.0, 0.30, 0.18, 0.08,
+                        6, "LF_Rdstn", 0.132, 3.2, 178.0, 0.30, 0.18, 0.08,
                         List.of(2, 1, 0), List.of("CRAFTING", "BUILDING", "AFK"),
                         112, -84, "repeat", "machine"
                 ),
                 createBuiltinPersona(
-                        7, "LeafDelver", 0.205, 5.8, 280.0, 0.88, 0.76, 0.48,
+                        7, "LF_Delvr", 0.205, 5.8, 280.0, 0.88, 0.76, 0.48,
                         List.of(5, 4, 3), List.of("COMBAT", "MINING", "COMMAND_CHAT"),
                         128, -96, "explorer_wander", "diamond"
                 )

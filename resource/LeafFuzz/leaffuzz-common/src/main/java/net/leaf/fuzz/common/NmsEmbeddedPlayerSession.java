@@ -172,16 +172,7 @@ public final class NmsEmbeddedPlayerSession {
             Class<?> embeddedChannelCls = Class.forName("io.netty.channel.embedded.EmbeddedChannel", true, cl);
             Class<?> channelPipelineCls = Class.forName("io.netty.channel.ChannelPipeline", true, cl);
 
-            String baseName = bot.actorName() != null
-                    ? bot.actorName().replaceAll("[^a-zA-Z0-9_]", "")
-                    : "FuzzBot";
-            if (baseName.length() > 11) {
-                baseName = baseName.substring(0, 11);
-            }
-            String safeName = (botIndex <= 0) ? baseName : (baseName + "_" + botIndex);
-            if (safeName.length() > 16) {
-                safeName = safeName.substring(0, 16);
-            }
+            String safeName = bot.actorName(botIndex);
             UUID botUuid = (botIndex <= 0)
                     ? bot.actorUuid()
                     : UUID.nameUUIDFromBytes(

@@ -183,3 +183,21 @@ jobs:
             ${{ steps.artifact.outputs.jar }}.sha256
             ${{ steps.artifact.outputs.jar }}.sha512
             ${{ steps.artifact.outputs.asc }}
+
+      - name: Publish release jar and status update to Discord (#releases)
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+          VERSION: ${{ steps.version.outputs.version }}
+          JAR_FILE: ${{ steps.artifact.outputs.jar }}
+        run: |
+          if [ -z "$DISCORD_BOT_TOKEN" ] || [ -z "$DISCORD_GUILD_ID" ]; then
+            echo "DISCORD_BOT_TOKEN / DISCORD_GUILD_ID not set; deferring #releases post to discord_support_bot.py Option B poller."
+            exit 0
+          fi
+          python3 discord-support-bot/discord_support_bot.py \
+            --publish-release \
+            --project leaffuzz \
+            --release-version "$VERSION" \
+            --release-jar "$JAR_FILE" \
+            --release-notes-file release-notes-fuzz.md

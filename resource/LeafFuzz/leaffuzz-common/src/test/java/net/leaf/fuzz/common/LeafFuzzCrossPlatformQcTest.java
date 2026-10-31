@@ -595,7 +595,21 @@ class LeafFuzzCrossPlatformQcTest {
 
         // Verify directed manipulation: command alias/self expansion + chunk_border_thrash + quit_lt1s
         String cmd = bot.prepareCommandForDispatch("/targetcmd {self} 64");
-        assertEquals("targetcmd LeafExplorer 64", cmd);
+        assertEquals("targetcmd LF_Explr 64", cmd);
+        for (PersonaProfile profile : builtins) {
+            PersonaPolicyBotActor pBot = new PersonaPolicyBotActor(profile, "default", 1);
+            PersonaPolicyBotActor opBot = new PersonaPolicyBotActor(profile, "op", 1);
+            assertTrue(pBot.actorName(0).endsWith("_p") && pBot.actorName(0).length() <= 16);
+            assertTrue(opBot.actorName(0).endsWith("_op") && opBot.actorName(0).length() <= 16);
+            assertTrue(opBot.actorName(24).endsWith("_op_24") && opBot.actorName(24).length() <= 16);
+        }
+        PersonaProfile longCustom = PersonaPolicyBotActor.fromJsonLine(
+                "{\"schema\":\"sleuth_persona_v1\",\"player_name\":\"LeafHomesteaderExtra\",\"expected_solver\":\"HUMAN_QUANTIZED_GCD\"}"
+        );
+        PersonaPolicyBotActor customBot = new PersonaPolicyBotActor(longCustom, "op", 7);
+        assertTrue(customBot.actorName(12).startsWith("LF_"));
+        assertTrue(customBot.actorName(12).endsWith("_op_12"));
+        assertTrue(customBot.actorName(12).length() <= 16);
         int chunkXBefore = bot.x() >> 4;
         BotStepRecord borderStep = bot.performFollowUpBehavior("chunk_border_thrash");
         assertTrue((borderStep.x() >> 4) != chunkXBefore, "chunk_border_thrash must cross a 16-block chunk boundary");

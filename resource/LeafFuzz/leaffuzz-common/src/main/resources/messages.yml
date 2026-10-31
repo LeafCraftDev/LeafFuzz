@@ -1,0 +1,21 @@
+# LeafFuzz Configurable Operator Feedback Messages
+# Chat and console prefix prepended to /fuzz replies.
+prefix: "&8[&2LeafFuzz&8] &r"
+
+# Sent when a caller lacks leaffuzz.admin.
+noPermission: "&cYou do not have permission to run this LeafFuzz command."
+
+# Sent when a name=value parameter fails validation.
+badParameter: "&cInvalid parameter '[param]': '[value]'."
+
+# Sent when an unknown subcommand or bare positional token is supplied.
+invalidCommand: "&cUnknown subcommand '[arg]'. Use /fuzz help."
+
+# Sent when /fuzz check or /fuzz leaks snapshot is invoked while another pass is already active.
+busy: "&eA diagnostic snapshot or fuzz pass is already running; please wait."
+
+# Sent after /fuzz reload validates and reloads config.yml and messages.yml.
+reloadSuccess: "&aLeafFuzz configuration and messages reloaded."
+
+# Sent when config.yml fails validation during /fuzz reload.
+reloadFailed: "&cLeafFuzz reload failed: [errors]"

@@ -1,0 +1,66 @@
+# LeafFuzz - Cross-Platform In-JVM QC, Fuzzing & Memory-Leak Screener
+# Works across Paper, Spigot, Folia, Fabric, and NeoForge.
+check:
+  # Default number of UCB1 synthetic persona bot episodes executed when episodes=<n> is omitted from /fuzz check.
+  # @type: integer
+  # @range: 1..100000
+  defaultEpisodes: 250
+
+  # Default concurrent player survival roster size (1..500, or "auto" / "ramp" to progressively ramp concurrent players until instability) dispersed across an Archimedean spiral when players= is omitted from /fuzz check.
+  # @type: string
+  defaultPlayers: 1
+
+  # Main-thread tick duration threshold in milliseconds (>= 10.0) above which LogAndStallSignatureOracle captures a slow-tick stack trace (stall:) outside JVM GC pause windows.
+  # @type: number
+  # @range: 10.0..10000.0
+  slowTickThresholdMs: 100.0
+
+  # Safety guard requiring a .bench-disposable marker file for whole-server sweeps (/fuzz check target=all).
+  # @type: boolean
+  requireDisposableForAll: true
+
+  # Additional command prefixes excluded from Stage 2 fuzzing alongside the built-in DEFAULT_DENYLIST (stop, restart, op, deop, ban, kick, reload, whitelist, save-all).
+  # @type: list
+  extraDenylist: []
+
+campaign:
+  # Multi-boot campaign restart strategy ("AUTO", "NONE", "SPIGOT_RESTART", "SUPERVISOR_STOP").
+  # @type: string
+  # @options: [AUTO, NONE, SPIGOT_RESTART, SUPERVISOR_STOP]
+  restartStrategy: "AUTO"
+
+  # Maximum crash/restart retries (1..20) before FuzzCampaignStateStore halts or isolates a crashing archive.
+  # @type: integer
+  # @range: 1..20
+  maxRestartRetries: 3
+
+llmAudit:
+  # Enables optional AST-grounded root-cause explanations and advisory Jminor causal claim auditing via LlmCausalChainAuditor. Makes zero network calls when false.
+  # @type: boolean
+  llmAuditEnabled: false
+
+  # LLM provider identifier ("OFF", "GEMINI", "OPENAI_COMPATIBLE", "ANTHROPIC", or "OLLAMA").
+  # @type: string
+  # @options: [OFF, GEMINI, OPENAI_COMPATIBLE, ANTHROPIC, OLLAMA]
+  llmProvider: "OFF"
+
+  # Model identifier sent to the configured provider.
+  # @type: string
+  llmModel: "gemini-2.5-flash"
+
+  # Custom HTTP endpoint URL, or empty to use the provider's default endpoint (http://127.0.0.1:11434/v1/chat/completions for OLLAMA).
+  # @type: string
+  llmEndpoint: ""
+
+  # Environment variable name holding the provider API key (never stored in plaintext in reports/).
+  # @type: string
+  llmApiKeyEnv: "GEMINI_API_KEY"
+
+  # When llmAudit.llmAuditEnabled is true, attaches closed-world verified Class#method root-cause explanations to proven Stage 2/3/5 findings without altering pass/fail verdicts.
+  # @type: boolean
+  explainFuzzFaults: true
+
+  # Maximum number of Jminor causal chains or findings sent to the LLM per target (1..32).
+  # @type: integer
+  # @range: 1..32
+  maxChainsPerTarget: 6
