@@ -1,6 +1,6 @@
-# Contributing to RTP
+# Contributing to LeafFuzz
 
-Thank you for your interest in contributing to the RTP plugin! To ensure a smooth workflow and safe changes, please adhere to the following guidelines.
+Thank you for your interest in contributing to the LeafFuzz plugin! To ensure a smooth workflow and safe changes, please adhere to the following guidelines.
 
 ## Contributor License Agreement
 
@@ -53,8 +53,8 @@ More detailed instructions can be found here - [`docs/FOR_CONTRIBUTORS.md`](docs
 
 1. **Clone the repository**:
    ```sh
-   git clone https://github.com/DailyStruggle/RTP.git
-   cd RTP
+   git clone https://github.com/LeafCraftDev/LeafFuzz.git
+   cd LeafFuzz
    ```
 2. **Build the project**:
    Use the provided Gradle wrapper to compile and build the plugin.
@@ -84,11 +84,11 @@ We use JUnit for testing and Jacoco for coverage reports.
 ### Making Safe Changes
 1. **Target the correct module**: If you are fixing a platform-specific issue (e.g., asynchronous chunk loading on Paper), apply changes in the respective adapter module (like `rtp-paper`). If it's a general logic issue, apply it to `rtp-core`.
 2. **Use the API**: If your change could be implemented via `rtp-api` without modifying core code, consider writing an addon instead.
-3. **Keep performance in mind**: RTP pre-calculates many teleports asynchronously to avoid server lag. Ensure that any new geometry or validation checks are thread-safe and performant.
+3. **Keep performance in mind**: LeafFuzz pre-calculates many teleports asynchronously to avoid server lag. Ensure that any new geometry or validation checks are thread-safe and performant.
 
 ## Adding or Changing Requirements
 
-RTP uses a structured requirements workflow enforced by CI. If you add or modify a requirement, all four steps below must be completed **in the same commit** or the pipeline will fail.
+LeafFuzz uses a structured requirements workflow enforced by CI. If you add or modify a requirement, all four steps below must be completed **in the same commit** or the pipeline will fail.
 
 1. **Add the requirement** to the correct `docs/REQUIREMENTS.md` file (or the relevant submodule `REQUIREMENTS.md`) with the next sequential ID in its category (e.g., `REQ-CORE-F-008`). Format:
    ```
@@ -107,13 +107,13 @@ RTP uses a structured requirements workflow enforced by CI. If you add or modify
 
 The CI `Traceability Check` stage runs `scripts/check_traceability.sh` before the build and will fail with a list of untraced IDs if step 2 is skipped.
 
-For the full ID scheme and category reference, see [REQUIREMENTS.md](resource/LeafRTP/docs/dev/REQUIREMENTS.md).
-For term definitions used in requirements, see [GLOSSARY.md](resource/LeafRTP/docs/dev/GLOSSARY.md).
-For actor and stakeholder context, see [STAKEHOLDERS.md](resource/LeafRTP/docs/dev/STAKEHOLDERS.md).
+For the full ID scheme and category reference, see [REQUIREMENTS.md](resource/LeafFuzz/docs/dev/REQUIREMENTS.md).
+For term definitions used in requirements, see [GLOSSARY.md](resource/LeafFuzz/docs/dev/GLOSSARY.md).
+For actor and stakeholder context, see [STAKEHOLDERS.md](resource/LeafFuzz/docs/dev/STAKEHOLDERS.md).
 
 ## Pull Requests
 
-Pull requests are the standard mechanism for contributing changes to RTP. For the complete operational guide covering architecture gates, CI pipeline anatomy, and review workflows, see [`docs/dev/PULL_REQUEST_PROCESS.md`](docs/dev/PULL_REQUEST_PROCESS.md).
+Pull requests are the standard mechanism for contributing changes to LeafFuzz. For the complete operational guide covering architecture gates, CI pipeline anatomy, and review workflows, see [`docs/dev/PULL_REQUEST_PROCESS.md`](docs/dev/PULL_REQUEST_PROCESS.md).
 
 ### Pre-PR Local Verification
 
@@ -167,7 +167,7 @@ A PR is ready to merge when **all** of the following are true:
 
 ### Semantic Versioning Policy
 
-RTP follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version number is `MAJOR.MINOR.PATCH`:
+LeafFuzz follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version number is `MAJOR.MINOR.PATCH`:
 
 | Change type | Version bump | Example |
 |-------------|-------------|---------|

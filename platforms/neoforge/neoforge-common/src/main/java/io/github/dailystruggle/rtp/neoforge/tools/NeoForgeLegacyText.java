@@ -10,10 +10,12 @@ import net.minecraft.network.chat.TextColor;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import io.github.dailystruggle.rtp.common.RTP;
+import io.github.dailystruggle.server.api.ServerAccessor;
+import io.github.dailystruggle.server.api.ServerAccessors;
 
 /**
  * NeoForge counterpart to rtp-spigot's {@code SendMessage.Hex2Color} +
@@ -250,7 +252,7 @@ public final class NeoForgeLegacyText {
     private static String normalise(String raw) {
         // Expand MiniMessage <tag> color/format markup into legacy &-codes so
         // Adventure-less NeoForge still honors MiniMessage colors.
-        raw = io.github.dailystruggle.rtp.common.tools.MiniMessageColorExpander.expand(raw);
+        raw = io.github.dailystruggle.server.api.MiniMessageColorExpander.expand(raw);
         Matcher m = HEX_PATTERN.matcher(raw);
         StringBuilder sb = new StringBuilder(raw.length());
         int last = 0;
@@ -415,6 +417,20 @@ public final class NeoForgeLegacyText {
     private static volatile boolean HOVER_BUILD_FAILURE_LOGGED;
     private static volatile boolean CLICK_BUILD_FAILURE_LOGGED;
 
+    private static final Logger LOGGER = Logger.getLogger(NeoForgeLegacyText.class.getName());
+
+    private static void logInternal(Level level, String msg, Throwable t) {
+        ServerAccessor acc = ServerAccessors.get();
+        if (acc != null) {
+            if (t != null) acc.log(level, msg, t);
+            else acc.log(level, msg);
+        } else if (t != null) {
+            LOGGER.log(level, msg, t);
+        } else {
+            LOGGER.log(level, msg);
+        }
+    }
+
     private static void logProbeResults() {
         synchronized (NeoForgeLegacyText.class) {
             if (PROBE_LOGGED) return;
@@ -424,7 +440,7 @@ public final class NeoForgeLegacyText {
                     PROBE_LOGGED = false;
                     return;
                 }
-                RTP.log(Level.FINE,
+                logInternal(Level.FINE,
                         "[RTP] NeoForgeLegacyText probe results: "
                                 + "HOVER_CTOR_LEGACY=" + (HOVER_CTOR_LEGACY != null)
                                 + ", HOVER_CTOR_SHOWTEXT=" + (HOVER_CTOR_SHOWTEXT != null)
@@ -432,7 +448,8 @@ public final class NeoForgeLegacyText {
                                 + ", CLICK_CTOR_SUGGEST=" + (CLICK_CTOR_SUGGEST != null)
                                 + ", CLICK_CTOR_RUN=" + (CLICK_CTOR_RUN != null)
                                 + " (HoverEvent class=" + HoverEvent.class.getName()
-                                + ", ClickEvent class=" + ClickEvent.class.getName() + ")");
+                                + ", ClickEvent class=" + ClickEvent.class.getName() + ")",
+                        null);
             } catch (Throwable ignored) { /* best-effort */ }
         }
     }
@@ -442,7 +459,7 @@ public final class NeoForgeLegacyText {
         if (DECORATION_FAILURE_LOGGED) return;
         DECORATION_FAILURE_LOGGED = true;
         try {
-            RTP.log(Level.WARNING,
+            logInternal(Level.WARNING,
                     "[RTP] NeoForgeLegacyText.parseInteractive: hover/click decoration "
                             + "failed on this MC version (hasHover=" + hasHover
                             + ", hasClick=" + hasClick + ", clickKind=" + clickKind
@@ -455,7 +472,7 @@ public final class NeoForgeLegacyText {
         if (HOVER_BUILD_FAILURE_LOGGED) return;
         HOVER_BUILD_FAILURE_LOGGED = true;
         try {
-            RTP.log(Level.WARNING,
+            logInternal(Level.WARNING,
                     "[RTP] NeoForgeLegacyText.buildShowTextHover: reflective ctor invoke "
                             + "failed (HOVER_CTOR_LEGACY=" + (HOVER_CTOR_LEGACY != null)
                             + ", HOVER_CTOR_SHOWTEXT=" + (HOVER_CTOR_SHOWTEXT != null)
@@ -467,7 +484,7 @@ public final class NeoForgeLegacyText {
         if (CLICK_BUILD_FAILURE_LOGGED) return;
         CLICK_BUILD_FAILURE_LOGGED = true;
         try {
-            RTP.log(Level.WARNING,
+            logInternal(Level.WARNING,
                     "[RTP] NeoForgeLegacyText.buildClick: reflective ctor invoke failed "
                             + "(kind=" + kind
                             + ", CLICK_CTOR_LEGACY=" + (CLICK_CTOR_LEGACY != null)

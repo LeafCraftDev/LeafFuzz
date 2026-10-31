@@ -1,5 +1,7 @@
 package io.github.dailystruggle.rtp.fabric.v26_1_R1;
 
+import io.github.dailystruggle.rtp.anvil.AnvilChunkView;
+import io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer;
 import io.github.dailystruggle.rtp.api.world.RTPChunk;
 import io.github.dailystruggle.rtp.api.world.RTPWorld;
 import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
@@ -13,17 +15,16 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * MC 26.1.2 RTPChunk wrapper (live mode only).
+ * MC 26.1.2 RTPChunk wrapper (dual-mode: live {@link ChunkAccess} and ADR-016 {@link AnvilChunkView}).
  *
  * <p>Lives in the v26_1_R1 module so its compiled bytecode references Mojang
  * names (e.g. {@code net.minecraft.world.level.chunk.ChunkAccess}) rather than
  * Loom-remapped intermediary aliases that don't exist on a deobfuscated 26.1.2
- * runtime. This is the live-chunk subset of common's {@code FabricRTPChunk};
- * the anvil-mode constructor is omitted because v26 anvil-prefilter integration
- * is a follow-up phase (see bring-up checklist).
+ * runtime.
  */
 public final class V26_1_R1FabricRTPChunk extends RTPChunk<ChunkAccess> {
 
@@ -31,6 +32,8 @@ public final class V26_1_R1FabricRTPChunk extends RTPChunk<ChunkAccess> {
     private final UUID worldId;
     private final int cx;
     private final int cz;
+    private final AnvilChunkView anvilView;
+    private final Set<String> reconciledUnsafe;
 
     public V26_1_R1FabricRTPChunk(ChunkAccess chunk, ServerLevel level, UUID worldId) {
         super(chunk);
@@ -40,6 +43,32 @@ public final class V26_1_R1FabricRTPChunk extends RTPChunk<ChunkAccess> {
         // ChunkPos is a record on MC 26.1.2; record component accessors are x()/z().
         this.cx = pos.x();
         this.cz = pos.z();
+        this.anvilView = null;
+        this.reconciledUnsafe = null;
+    }
+
+    public V26_1_R1FabricRTPChunk(
+            AnvilChunkView view, int cx, int cz, UUID worldId, Set<String> reconciledUnsafe) {
+        super(null);
+        if (view == null) {
+            throw new IllegalArgumentException(
+                    "AnvilChunkView must be non-null for Anvil-backed chunks");
+        }
+        this.level = null;
+        this.worldId = worldId;
+        this.cx = cx;
+        this.cz = cz;
+        this.anvilView = view;
+        this.reconciledUnsafe = reconciledUnsafe;
+    }
+
+    public boolean isAnvilBacked() {
+        return anvilView != null;
+    }
+
+    @Override
+    public boolean isSelfContained() {
+        return anvilView != null;
     }
 
     @Override public int x() { return cx; }
@@ -53,6 +82,7 @@ public final class V26_1_R1FabricRTPChunk extends RTPChunk<ChunkAccess> {
 
     @Override
     public boolean isLoaded() {
+        if (anvilView != null) return false;
         try {
             return level != null && level.getChunkSource().hasChunk(cx, cz);
         } catch (Throwable ignored) {
@@ -62,6 +92,7 @@ public final class V26_1_R1FabricRTPChunk extends RTPChunk<ChunkAccess> {
 
     @Override
     public void keep(boolean keep) {
+        if (anvilView != null) return;
         // Route via the world wrapper's ref-counted ticket map.
         RTPWorld<?> w = getWorld();
         if (w == null) return;
@@ -78,6 +109,10 @@ public final class V26_1_R1FabricRTPChunk extends RTPChunk<ChunkAccess> {
 
     @Override
     public String materialNameAt(int x, int y, int z) {
+        if (anvilView != null) {
+            String id = anvilView.blockIdAt(x & 0xF, y, z & 0xF);
+            return (id != null) ? id.toUpperCase(Locale.ROOT) : "AIR";
+        }
         if (chunk == null) return "";
         try {
             BlockState state = chunk.getBlockState(new BlockPos(
@@ -89,6 +124,18 @@ public final class V26_1_R1FabricRTPChunk extends RTPChunk<ChunkAccess> {
         } catch (Throwable t) {
             return "";
         }
+    }
+
+    @Override
+    public String getBiome(int x, int y, int z) {
+        if (anvilView != null) {
+            String id = anvilView.getBiomeAt(x & 0xF, y, z & 0xF);
+            if (id != null) {
+                String normalized = PaletteIdentifierNormalizer.normalize(id);
+                return (normalized != null && !normalized.isEmpty()) ? normalized : id;
+            }
+        }
+        return super.getBiome(x, y, z);
     }
 
     public ServerLevel level() { return level; }

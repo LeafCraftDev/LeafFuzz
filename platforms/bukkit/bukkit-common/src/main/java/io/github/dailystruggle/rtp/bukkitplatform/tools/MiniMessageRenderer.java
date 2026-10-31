@@ -32,7 +32,7 @@ import net.md_5.bungee.chat.ComponentSerializer;
  * MiniMessage fidelity (named/hex colours, gradients, decorations, hover, click)
  * while reusing the existing transport.
  */
-final class MiniMessageRenderer {
+public final class MiniMessageRenderer {
   private static final MiniMessage MINI_MESSAGE = MiniMessage.miniMessage();
 
   private MiniMessageRenderer() {}
@@ -44,7 +44,7 @@ final class MiniMessageRenderer {
    *     all placeholders already resolved
    * @return the rendered components, suitable for {@code spigot().sendMessage}
    */
-  static BaseComponent[] render(String miniMessageText) {
+  public static BaseComponent[] render(String miniMessageText) {
     Component component = MINI_MESSAGE.deserialize(legacyToMiniMessage(miniMessageText));
     String json = GsonComponentSerializer.gson().serialize(component);
     return ComponentSerializer.parse(json);
@@ -58,7 +58,7 @@ final class MiniMessageRenderer {
    * the raw codes literally. MiniMessage {@code <tag>} markup already present in the
    * text is left untouched.
    */
-  static String legacyToMiniMessage(String text) {
-    return io.github.dailystruggle.rtp.api.util.LegacyToMiniMessageNormalizer.translate(text);
+  public static String legacyToMiniMessage(String text) {
+    return io.github.dailystruggle.server.api.LegacyToMiniMessageNormalizer.translate(text);
   }
 }

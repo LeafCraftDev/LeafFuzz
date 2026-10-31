@@ -1,0 +1,17 @@
+// effects-api-ADR-003 (amended 2026-10-24 by ADR-116) — platform-neutral effects SPI.
+//
+// This module hosts only the platform-neutral effectsapi/common package.
+// Platform-specific effect carriers live in their respective platform modules:
+//   - Bukkit   : :rtp-bukkit:rtp-bukkit-common (io.github.dailystruggle.effectsapi.bukkit)
+//   - Fabric   : :rtp-fabric:rtp-fabric-common (io.github.dailystruggle.rtp.fabric.effects)
+//   - NeoForge : :rtp-neoforge:rtp-neoforge-common (rtp.neoforge.effects.local)
+// No Loom or platform jars here, so effects-api builds as a plain Java 17 library (ADR-113, ADR-116).
+
+dependencies {
+    // --- neutral server accessor seam (ADR-116) ---
+    api project(':server-api')
+
+    // --- pre-existing ---
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+    testCompileOnly 'org.jetbrains:annotations:24.1.0'
+}

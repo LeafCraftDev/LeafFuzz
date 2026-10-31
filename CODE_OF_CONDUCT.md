@@ -3,7 +3,7 @@
 ## Our Pledge
 
 We as members, contributors, and maintainers pledge to make participation in
-the RTP project and its community a harassment-free experience for everyone,
+the LeafFuzz project and its community a harassment-free experience for everyone,
 regardless of age, body size, visible or invisible disability, ethnicity, sex
 characteristics, gender identity and expression, level of experience,
 education, socio-economic status, nationality, personal appearance, race,
@@ -43,7 +43,7 @@ Examples of unacceptable behavior:
 ## Scope
 
 This Code of Conduct applies within all community spaces operated by or on
-behalf of the RTP project, including:
+behalf of the LeafFuzz project, including:
 
 - The GitHub repository (issues, pull requests, discussions, commits,
   code review).
@@ -71,7 +71,7 @@ moderation decisions when appropriate.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the project maintainers by opening a
-[private security advisory](https://github.com/DailyStruggle/RTP/security/advisories/new)
+[private security advisory](https://github.com/LeafCraftDev/LeafFuzz/security/advisories/new)
 with `[CoC]` in the title, or by direct message via the contact method
 listed on the maintainer's GitHub profile.
 

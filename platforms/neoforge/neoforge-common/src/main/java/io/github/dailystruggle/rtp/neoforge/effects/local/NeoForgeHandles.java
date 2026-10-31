@@ -6,8 +6,6 @@ import io.github.dailystruggle.effectsapi.common.spi.EffectTarget;
 import io.github.dailystruggle.effectsapi.common.spi.HandleProvider;
 import io.github.dailystruggle.effectsapi.common.spi.LocationHandle;
 import io.github.dailystruggle.effectsapi.common.spi.PlayerHandle;
-import io.github.dailystruggle.rtp.common.RTP;
-import io.github.dailystruggle.rtp.neoforge.player.NeoForgeRTPPlayer;
 import io.github.dailystruggle.rtp.neoforge.tools.NeoForgeResourceIds;
 import io.github.dailystruggle.server.api.ServerAccessors;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -28,6 +26,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * NeoForge implementation of {@link PlayerHandle} and {@link LocationHandle}
@@ -64,6 +63,20 @@ public final class NeoForgeHandles implements HandleProvider {
         cachedServer = server;
     }
 
+    private static final Logger LOGGER = Logger.getLogger(NeoForgeHandles.class.getName());
+
+    private static void logInternal(Level level, String msg, @Nullable Throwable t) {
+        var acc = ServerAccessors.get();
+        if (acc != null) {
+            if (t != null) acc.log(level, msg, t);
+            else acc.log(level, msg);
+        } else if (t != null) {
+            LOGGER.log(level, msg, t);
+        } else {
+            LOGGER.log(level, msg);
+        }
+    }
+
     /**
      * Effect scheduler chokepoint: enqueues {@code task} on the server tick
      * thread via {@link MinecraftServer#execute} (S-005: never blocks, no chunk
@@ -72,7 +85,7 @@ public final class NeoForgeHandles implements HandleProvider {
     public static void execute(@NotNull Runnable task) {
         MinecraftServer server = cachedServer;
         if (server == null) {
-            RTP.log(Level.FINER, "[RTP][NeoForge] effect scheduled with no bound server; task dropped.");
+            logInternal(Level.FINER, "[RTP][NeoForge] effect scheduled with no bound server; task dropped.", null);
             return;
         }
         server.execute(task);
@@ -358,7 +371,7 @@ public final class NeoForgeHandles implements HandleProvider {
 
     /** Dimension id ({@code namespace:path}) of the player's level, or {@code "unknown"}. */
     static @NotNull String worldNameOf(@NotNull ServerPlayer player) {
-        ServerLevel level = NeoForgeRTPPlayer.resolveServerLevel(player);
+        ServerLevel level = (ServerLevel) player.level();
         String id = level == null ? null : NeoForgeResourceIds.locationString(level.dimension());
         return id != null ? id : "unknown";
     }
@@ -367,7 +380,7 @@ public final class NeoForgeHandles implements HandleProvider {
     static @Nullable MinecraftServer serverOf(@NotNull ServerPlayer player) {
         MinecraftServer server = cachedServer;
         if (server != null) return server;
-        ServerLevel level = NeoForgeRTPPlayer.resolveServerLevel(player);
+        ServerLevel level = (ServerLevel) player.level();
         return level == null ? null : level.getServer();
     }
 
@@ -380,19 +393,19 @@ public final class NeoForgeHandles implements HandleProvider {
             player.kill();
             return;
         } catch (LinkageError drift) {
-            RTP.log(Level.FINE, "[RTP][NeoForge] Entity#kill() unavailable on this runtime: " + drift);
+            logInternal(Level.FINE, "[RTP][NeoForge] Entity#kill() unavailable on this runtime: " + drift, null);
         }
-        ServerLevel level = NeoForgeRTPPlayer.resolveServerLevel(player);
+        ServerLevel level = (ServerLevel) player.level();
         if (level != null) {
             try {
                 player.getClass().getMethod("kill", ServerLevel.class).invoke(player, level);
                 return;
             } catch (ReflectiveOperationException | RuntimeException e) {
-                RTP.log(Level.FINE, "[RTP][NeoForge] reflective kill(ServerLevel) failed: " + e);
+                logInternal(Level.FINE, "[RTP][NeoForge] reflective kill(ServerLevel) failed: " + e, null);
             }
         }
         if (server == null) {
-            RTP.log(Level.WARNING, "[RTP][NeoForge] DEATH effect dropped for " + player.getUUID() + " (no server bound)");
+            logInternal(Level.WARNING, "[RTP][NeoForge] DEATH effect dropped for " + player.getUUID() + " (no server bound)", null);
             return;
         }
         server.getCommands().performPrefixedCommand(
@@ -409,7 +422,7 @@ public final class NeoForgeHandles implements HandleProvider {
                 }
             }
         }
-        ServerLevel own = NeoForgeRTPPlayer.resolveServerLevel(player);
+        ServerLevel own = (ServerLevel) player.level();
         return own == null ? null : own.dimension();
     }
 
@@ -514,7 +527,7 @@ public final class NeoForgeHandles implements HandleProvider {
 
         @Override
         public @NotNull String name() {
-            return NeoForgeRTPPlayer.resolveName(player);
+            return player.getScoreboardName();
         }
 
         @Override
@@ -574,18 +587,17 @@ public final class NeoForgeHandles implements HandleProvider {
         public void performCommand(@NotNull String command) {
             MinecraftServer server = serverOf(player);
             if (server == null) {
-                RTP.log(Level.WARNING, "[RTP][NeoForge] player command effect dropped (no server): " + command);
+                logInternal(Level.WARNING, "[RTP][NeoForge] player command effect dropped (no server): " + command, null);
                 return;
             }
-            // NeoForgeRTPPlayer builds the CommandSourceStack with drift fallbacks.
-            NeoForgeRTPPlayer sender = new NeoForgeRTPPlayer(player);
-            server.execute(() -> sender.performCommand(null, command));
+            String clean = command.startsWith("/") ? command.substring(1) : command;
+            server.execute(() -> server.getCommands().performPrefixedCommand(player.createCommandSourceStack(), clean));
         }
 
         @Override
         public void spawnFirework(Map<String, Object> data) {
             onServer("FIREWORK", () -> {
-                ServerLevel level = NeoForgeRTPPlayer.resolveServerLevel(player);
+                ServerLevel level = resolvePlayerServerLevel(player);
                 spawnFireworkAt(level, player.getX(), player.getY(), player.getZ(), data);
             });
         }
@@ -599,17 +611,13 @@ public final class NeoForgeHandles implements HandleProvider {
         public void startGlide(int relativeLift, int maxY, int landingTimeoutTicks,
                                boolean allowFireworks, boolean placeOnShutdown, String platformMaterial) {
             onServer("GLIDE", () -> {
-                ServerLevel level = NeoForgeRTPPlayer.resolveServerLevel(player);
+                ServerLevel level = resolvePlayerServerLevel(player);
                 if (level == null) {
-                    RTP.log(Level.WARNING, "[RTP][NeoForge] GLIDE dropped for " + player.getUUID() + " (no level)");
+                    logInternal(Level.WARNING, "[RTP][NeoForge] GLIDE dropped for " + player.getUUID() + " (no level)", null);
                     return;
                 }
                 double toY = Math.min(player.getY() + relativeLift, maxY);
-                if (!NeoForgeRTPPlayer.performTeleport(player, level, player.getX(), toY, player.getZ(),
-                        player.getYRot(), player.getXRot())) {
-                    RTP.log(Level.WARNING, "[RTP][NeoForge] GLIDE lift failed for " + player.getUUID());
-                    return;
-                }
+                player.teleportTo( player.getX(), toY, player.getZ());
                 player.startFallFlying();
                 GlideKeepAlive.track(new NeoForgeGlider(player), landingTimeoutTicks);
             });
@@ -626,7 +634,7 @@ public final class NeoForgeHandles implements HandleProvider {
         public void dropExperience(@Nullable LocationHandle dropLocation) {
             onServer("DROP_EXP", () -> {
                 int points = Math.min(player.experienceLevel * 7, 100);
-                ServerLevel level = NeoForgeRTPPlayer.resolveServerLevel(player);
+                ServerLevel level = resolvePlayerServerLevel(player);
                 if (points > 0 && level != null) {
                     Vec3 pos = dropLocation != null
                             ? new Vec3(dropLocation.doubleX(), dropLocation.doubleY(), dropLocation.doubleZ())
@@ -645,7 +653,7 @@ public final class NeoForgeHandles implements HandleProvider {
                 try {
                     action.run();
                 } catch (RuntimeException | LinkageError t) {
-                    RTP.log(Level.WARNING, "[RTP][NeoForge] " + effect + " effect failed for " + player.getUUID(), t);
+                    logInternal(Level.WARNING, "[RTP][NeoForge] " + effect + " effect failed for " + player.getUUID(), t);
                 }
             };
             // The running server is borrowed, never owned here.
@@ -678,12 +686,12 @@ public final class NeoForgeHandles implements HandleProvider {
                                 }
                             }
                         } catch (Throwable t) {
-                            RTP.log(Level.FINE, "[RTP][NeoForge] DEATH respawn point not set: " + t);
+                            logInternal(Level.FINE, "[RTP][NeoForge] DEATH respawn point not set: " + t, null);
                         }
                     }
                     killPlayer(player, server);
                 } catch (Throwable t) {
-                    RTP.log(Level.WARNING, "[RTP][NeoForge] DEATH effect failed for " + player.getUUID(), t);
+                    logInternal(Level.WARNING, "[RTP][NeoForge] DEATH effect failed for " + player.getUUID(), t);
                 }
             };
             if (server != null) {

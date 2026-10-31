@@ -37,9 +37,9 @@
 
 ## Documentation
 
-- [**Storefront Overview (`FRONT_PAGE.md`)**](docs/publishing/FRONT_PAGE.md)
-- [**Commands & Permissions Reference (`COMMANDS.md`)**](docs/admin/COMMANDS.md)
-- [**Configuration Reference (`CONFIGURATION.md`)**](docs/admin/CONFIGURATION.md)
-- [**BIT Diagnostic Codes (`BIT_CODES.md`)**](docs/dev/BIT_CODES.md)
-- [**Architecture Decision Records (`docs/adr/README.md`)**](docs/adr/README.md)
-- [**Changelog (`CHANGELOG.md`)**](CHANGELOG.md)
+- [**Storefront Overview (`FRONT_PAGE.md`)**](resource/LeafFuzz/docs/publishing/FRONT_PAGE.md)
+- [**Commands & Permissions Reference (`COMMANDS.md`)**](resource/LeafFuzz/docs/admin/COMMANDS.md)
+- [**Configuration Reference (`CONFIGURATION.md`)**](resource/LeafFuzz/docs/admin/CONFIGURATION.md)
+- [**BIT Diagnostic Codes (`BIT_CODES.md`)**](resource/LeafFuzz/docs/dev/BIT_CODES.md)
+- [**Architecture Decision Records (`docs/adr/README.md`)**](resource/LeafFuzz/docs/adr/README.md)
+- [**Changelog (`CHANGELOG.md`)**](resource/LeafFuzz/CHANGELOG.md)

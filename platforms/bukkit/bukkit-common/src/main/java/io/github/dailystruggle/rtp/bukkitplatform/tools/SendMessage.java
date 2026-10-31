@@ -8,7 +8,7 @@ import io.github.dailystruggle.rtp.common.bit.PlatformHookBitComponent;
 import io.github.dailystruggle.rtp.common.configuration.ActiveConfigs;
 import io.github.dailystruggle.rtp.common.configuration.ConfigParser;
 import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
-import io.github.dailystruggle.rtp.common.tools.GradientExpander;
+import io.github.dailystruggle.server.api.GradientExpander;
 import io.github.dailystruggle.rtp.common.placeholders.PlaceholderProvider;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;

@@ -1,0 +1,45 @@
+// maps-api — runtime cartography SPI. Pure-Java module: no Bukkit / Fabric /
+// Loom dependency. Concrete platform bindings (BukkitMapBinding,
+// FoliaMapBinding, FabricMapBinding) land in Stage 2/3 inside their
+// respective platform adapters per ADR-046 and maps-api-ADR-001.
+//
+// Shape mirrors rtp-api: java-library, JUnit Jupiter + Mockito inherited
+// from the root subprojects {} block, ArchUnit added locally for the
+// REQ-RTP-MAP-002 no-chunk-I/O package-boundary rule (ReqRtpMap002NoChunkIoTest).
+plugins {
+    id 'java-library'
+}
+
+dependencies {
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+
+    // spigot-api - compileOnly for the mapsapi.bukkit subpackage which hosts
+    // BukkitMapBinding (the only file in this module permitted to import
+    // org.bukkit.*; see CHECKLIST-maps-api.md Stage 2.1 / maps-api-ADR-001).
+    // Pulled at the same coordinate as rtp-bukkit-common; not transitive.
+    compileOnly 'org.spigotmc:spigot-api:1.20.1-R0.1-SNAPSHOT'
+
+    // ArchUnit — bytecode-level enforcement of the REQ-RTP-MAP-002 contract
+    // (no chunk I/O, no .get() / .join(), no platform imports under
+    // mapsapi.render). Same artifact + version as rtp-core, rtp-anvil,
+    // rtp-bukkit-common, rtp-folia-common.
+    testImplementation 'com.tngtech.archunit:archunit-junit5:1.3.0'
+
+    // MockBukkit - in-process Bukkit server fixture for BukkitMapBindingTest
+    // (CHECKLIST-maps-api.md Stage 2.9). Same coordinate as rtp-bukkit-common.
+    // Transitively brings paper-api:1.20.6 which provides the Bukkit API on
+    // the test classpath. Do NOT add spigot-api here as well: its older
+    // SimpleCommandMap signature conflicts with MockBukkit's expectations
+    // and breaks ServerMock construction with NoSuchMethodError.
+    testImplementation 'com.github.seeseemelk:MockBukkit-v1.20:3.93.2'
+}
+
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
+
+javadoc {
+    options.encoding = 'UTF-8'
+    options.addStringOption('Xdoclint:syntax,html', '-quiet')
+}

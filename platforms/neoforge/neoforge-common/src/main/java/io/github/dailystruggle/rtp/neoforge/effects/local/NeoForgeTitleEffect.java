@@ -1,7 +1,7 @@
 package io.github.dailystruggle.rtp.neoforge.effects.local;
 
 import io.github.dailystruggle.effectsapi.common.Effect;
-import io.github.dailystruggle.rtp.common.RTP;
+import io.github.dailystruggle.server.api.ServerAccessors;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
@@ -10,6 +10,7 @@ import net.minecraft.server.level.ServerPlayer;
 
 import java.util.EnumMap;
 import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * NeoForge TITLE effect (effects-api-ADR-003), compiled Mojmap in
@@ -93,9 +94,12 @@ public class NeoForgeTitleEffect extends Effect<NeoForgeTitleKeys> {
             if (WARNED) return;
             WARNED = true;
         }
-        RTP.log(Level.WARNING, "[RTP][NeoForge] TITLE effect could not be delivered: "
+        var acc = ServerAccessors.get();
+        String msg = "[RTP][NeoForge] TITLE effect could not be delivered: "
                 + (reason == null ? "player connection unavailable" : reason)
-                + " (cosmetic; teleport unaffected).");
+                + " (cosmetic; teleport unaffected).";
+        if (acc != null) acc.log(Level.WARNING, msg);
+        else Logger.getLogger(NeoForgeTitleEffect.class.getName()).log(Level.WARNING, msg);
     }
 
     @Override

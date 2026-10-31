@@ -38,6 +38,20 @@ java {
     }
 }
 
+def hasRtpCore = findProject(':rtp-api') != null && findProject(':rtp-core') != null
+
+if (!hasRtpCore) {
+    sourceSets {
+        main {
+            java {
+                include 'io/github/dailystruggle/rtp/fabric/unobf/player/FabricDefaultPermissionsUnobf.java'
+                include 'io/github/dailystruggle/rtp/fabric/unobf/server/FabricModServerAccessor.java'
+                include 'io/github/dailystruggle/rtp/fabric/unobf/tools/FabricLegacyText.java'
+            }
+        }
+    }
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${minecraftVersion}"
     // No `mappings` line - 26.1+ ships deobfuscated.
@@ -45,20 +59,26 @@ dependencies {
     implementation "net.fabricmc.fabric-api:fabric-api:${fabricApiVersion}"
     compileOnly "me.lucko:fabric-permissions-api:${permissionsApiVersion}"
 
-    api "io.github.dailystruggle:server-api:${rootProject.version}"
-    api "io.github.dailystruggle:commands-api:${rootProject.version}"
-    api project(':rtp-api')
-    api project(':rtp-core')
-    api "io.github.dailystruggle:anvil-api:${rootProject.version}"
+    api project(':server-api')
+    api project(':commands-api')
+    if (hasRtpCore) {
+        api project(':rtp-api')
+        api project(':rtp-core')
+    }
+    if (findProject(':anvil-api') != null) {
+        api project(':anvil-api')
+    }
     // Compile-only against fabric-common so the unobf carrier can reuse
     // platform-neutral types (interfaces, base classes that don't name NM)
     // without dragging intermediary bytecode into the unobf jar.
-    compileOnly project(':fabric:fabric-common')
+    if (findProject(':fabric:fabric-common') != null) {
+        compileOnly project(':fabric:fabric-common')
+    }
     // Compile-only against effects-api so FabricEffectsHandlerUnobf can name
     // the unobf carrier (effectsapi.fabric_unobf.*). The unobf source set
     // from effects-api-ADR-006 is the actual artifact consumed at runtime;
     // see that ADR for the source-set wiring.
-    compileOnly "io.github.dailystruggle:effects-api:${rootProject.version}"
+    compileOnly project(':effects-api')
     // Names effectsapi.fabric_unobf.FabricEffectRuntimeUnobf and
     // effectsapi.fabric_unobf.FabricEffectsInitializer from FabricEffectsHandlerUnobf.
     compileOnly project(':effects-api:effects-api-fabric-unobf')

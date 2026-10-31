@@ -1082,9 +1082,11 @@ tasks.register('jacocoServerReport', JacocoReport) {
 
     sourceDirectories.from = files(serverProjects.collect { it.sourceSets.main.allSource.srcDirs })
 
+    def rtpPluginProject = findProject(':rtp-plugin')
+    def pluginJar = rtpPluginProject != null ? fileTree(dir: rtpPluginProject.layout.buildDirectory.dir('libs')).matching {
         include 'LeafRTP-Pro-*.jar'
         exclude '*-dev.jar'
-    }
+    } : files()
     def addonClassTrees = serverProjects.findAll { it.path.startsWith(':addons') }.collect {
         it.fileTree(dir: it.layout.buildDirectory, includes: ['classes/java/main/**', 'classes/kotlin/main/**'])
     }

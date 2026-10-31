@@ -1,0 +1,288 @@
+package io.github.dailystruggle.effectsapi;
+
+import io.github.dailystruggle.effectsapi.common.EffectFactory;
+import io.github.dailystruggle.effectsapi.common.effects.CommandEffect;
+import io.github.dailystruggle.effectsapi.common.spi.LocationHandle;
+import io.github.dailystruggle.effectsapi.common.spi.PlayerHandle;
+import io.github.dailystruggle.effectsapi.common.spi.ValueCoercer;
+import io.github.dailystruggle.server.api.ServerAccessor;
+import io.github.dailystruggle.server.api.ServerAccessors;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.logging.Level;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class CommandEffectTest {
+
+    private final List<String> consoleCommandsRun = new ArrayList<>();
+    private final List<String> playerCommandsRun = new ArrayList<>();
+
+    private final UUID testUuid = UUID.randomUUID();
+
+    private final PlayerHandle testPlayer = new PlayerHandle() {
+        @Override public @NotNull UUID uuid() { return testUuid; }
+        @Override public @NotNull String name() { return "TestPlayer"; }
+        @Override public void playSound(Object type, float volume, float pitch, double dx, double dy, double dz) {}
+        @Override public void spawnParticle(Object type, int count, double dx, double dy, double dz, double speed) {}
+        @Override public void applyPotionEffect(Object type, int duration, int amplifier, boolean ambient, boolean particles, boolean icon) {}
+        @Override public void sendTitle(String title, String subtitle, int fadeIn, int stay, int fadeOut) {}
+        @Override public void playNote(Object instrument, int tone) {}
+        @Override public void setGliding(boolean gliding) {}
+        @Override public void spawnFirework(Map<String, Object> data) {}
+        @Override public void startGlide(int relativeLift, int maxY, int landingTimeoutTicks, boolean allowFireworks, boolean placeOnShutdown, String platformMaterial) {}
+        @Override public void performCommand(@NotNull String command) {
+            playerCommandsRun.add(command);
+        }
+    };
+
+    @BeforeEach
+    void setup() {
+        consoleCommandsRun.clear();
+        playerCommandsRun.clear();
+
+        EffectFactory.setCoercer(ValueCoercer.DEFAULT);
+
+        ServerAccessors.setEffectAccessor(new ServerAccessor() {
+            @Override public String getServerVersion() { return "test"; }
+            @Override public String getPlatform() { return "test"; }
+            @Override public Integer getServerIntVersion() { return 21; }
+            @Override public void log(Level level, String message) {}
+            @Override public void log(Level level, String message, Throwable throwable) {}
+
+            @Override
+            public @Nullable Object wrapEffectPlayer(Object player) {
+                if (player instanceof PlayerHandle ph) return ph;
+                return null;
+            }
+
+            @Override
+            public @Nullable Object wrapEffectLocation(Object location) {
+                return null;
+            }
+
+            @Override
+            public void dispatchConsoleCommand(String command) {
+                consoleCommandsRun.add(command);
+            }
+        });
+
+        EffectFactory.addEffect("COMMAND", new CommandEffect());
+    }
+
+    @Test
+    void testCommandParseAndRunConsole() {
+        CommandEffect effect = (CommandEffect) EffectFactory.buildEffect("COMMAND");
+        if (effect == null) {
+            fail("EffectFactory.buildEffect(\"COMMAND\") returned null");
+        }
+        effect.setData("CONSOLE", "say", "Hello", "[player]!");
+        effect.setTarget(testPlayer);
+        effect.run();
+
+        assertEquals(1, consoleCommandsRun.size());
+        assertEquals("say Hello TestPlayer!", consoleCommandsRun.get(0));
+        assertTrue(playerCommandsRun.isEmpty());
+    }
+
+    @Test
+    void testCommandParseAndRunPlayer() {
+        CommandEffect effect = (CommandEffect) EffectFactory.buildEffect("COMMAND");
+        assertNotNull(effect);
+        effect.setData("PLAYER", "spawn");
+        effect.setTarget(testPlayer);
+        effect.run();
+
+        assertTrue(consoleCommandsRun.isEmpty());
+        assertEquals(1, playerCommandsRun.size());
+        assertEquals("spawn", playerCommandsRun.get(0));
+    }
+
+    @Test
+    void testCommandWithQuotesAndEscapes() {
+        CommandEffect effect = (CommandEffect) EffectFactory.buildEffect("COMMAND");
+        assertNotNull(effect);
+        effect.setData("CONSOLE", "\"broadcast", "Player\\", "[player]\\", "joined\"");
+        effect.setTarget(testPlayer);
+        effect.run();
+
+        assertEquals(1, consoleCommandsRun.size());
+        assertEquals("broadcast Player TestPlayer joined", consoleCommandsRun.get(0));
+    }
+
+    @Test
+    void testPlaceholderUuidAndPlayer() {
+        CommandEffect effect = new CommandEffect();
+        effect.setData("CONSOLE", "give", "{uuid}", "diamond", "1");
+        effect.setTarget(testPlayer);
+        effect.run();
+
+        assertEquals(1, consoleCommandsRun.size());
+        assertEquals("give " + testUuid + " diamond 1", consoleCommandsRun.get(0));
+    }
+
+    @Test
+    void testToPermission() {
+        CommandEffect effect = new CommandEffect();
+        effect.setData("CONSOLE", "say", "hello", "world");
+        String perm = effect.toPermission();
+        assertEquals("console.say\\ hello\\ world", perm);
+    }
+
+    @Test
+    void testAllPlaceholdersWithLocation() {
+        LocationHandle locHandle = new LocationHandle() {
+            @Override public int x() { return 100; }
+            @Override public int y() { return 64; }
+            @Override public int z() { return -200; }
+            @Override public double doubleX() { return 100.5; }
+            @Override public double doubleY() { return 64.0; }
+            @Override public double doubleZ() { return -200.5; }
+            @Override public @NotNull String worldName() { return "world_nether"; }
+            @Override public @NotNull Object platformLocation() { return this; }
+            @Override public void playSound(Object type, float volume, float pitch) {}
+            @Override public void spawnParticle(Object type, int count, double dx, double dy, double dz, double speed) {}
+            @Override public void spawnFirework(Map<String, Object> data) {}
+            @Override public void playNote(Object instrument, int tone) {}
+        };
+
+        ServerAccessors.setEffectAccessor(new ServerAccessor() {
+            @Override public String getServerVersion() { return "test"; }
+            @Override public String getPlatform() { return "test"; }
+            @Override public Integer getServerIntVersion() { return 21; }
+            @Override public void log(Level level, String message) {}
+            @Override public void log(Level level, String message, Throwable throwable) {}
+
+            @Override
+            public @Nullable Object wrapEffectPlayer(Object player) {
+                if (player instanceof PlayerHandle ph) return ph;
+                return null;
+            }
+
+            @Override
+            public @Nullable Object wrapEffectLocation(Object location) {
+                if (location instanceof LocationHandle lh) return lh;
+                return locHandle;
+            }
+
+            @Override
+            public void dispatchConsoleCommand(String command) {
+                consoleCommandsRun.add(command);
+            }
+        });
+
+        CommandEffect effect = new CommandEffect();
+        effect.setData("CONSOLE", "say", "Player", "[player]", "{uuid}", "at", "[world]", "[x]", "[y]", "[z]");
+        effect.setTarget(testPlayer);
+        effect.run();
+
+        assertEquals(1, consoleCommandsRun.size());
+        assertEquals("say Player TestPlayer " + testUuid + " at world_nether 100 64 -200", consoleCommandsRun.get(0));
+
+        // Test curly bracket variants
+        consoleCommandsRun.clear();
+        CommandEffect effect2 = new CommandEffect();
+        effect2.setData("CONSOLE", "msg", "{player}", "Welcome to {world} ({x}, {y}, {z})");
+        effect2.setTarget(testPlayer);
+        effect2.run();
+
+        assertEquals(1, consoleCommandsRun.size());
+        assertEquals("msg TestPlayer Welcome to world_nether (100, 64, -200)", consoleCommandsRun.get(0));
+    }
+
+    @Test
+    void testMultipleCommandEffectsInOneStage() {
+        List<String> nodes = List.of(
+                "rtp.effect.postteleport.COMMAND.CONSOLE.say a",
+                "rtp.effect.postteleport.COMMAND.PLAYER.me b"
+        );
+        List<io.github.dailystruggle.effectsapi.common.Effect<?>> effects =
+                EffectFactory.buildEffects("rtp.effect.postteleport", nodes);
+        assertEquals(2, effects.size());
+
+        for (var effect : effects) {
+            effect.setTarget(testPlayer);
+            effect.run();
+        }
+
+        assertEquals(1, consoleCommandsRun.size(), "console command should run once");
+        assertEquals("say a", consoleCommandsRun.get(0));
+        assertEquals(1, playerCommandsRun.size(), "player command should run once");
+        assertEquals("me b", playerCommandsRun.get(0));
+    }
+
+    @Test
+    void testSpaceSyntaxCommandEffect() {
+        List<String> nodes = List.of(
+                "rtp.effect.postteleport.COMMAND CONSOLE say hi",
+                "rtp.effect.postteleport.COMMAND PLAYER me hi"
+        );
+        List<io.github.dailystruggle.effectsapi.common.Effect<?>> effects =
+                EffectFactory.buildEffects("rtp.effect.postteleport", nodes);
+        assertEquals(2, effects.size());
+
+        for (var effect : effects) {
+            effect.setTarget(testPlayer);
+            effect.run();
+        }
+
+        assertEquals(1, consoleCommandsRun.size());
+        assertEquals("say hi", consoleCommandsRun.get(0));
+        assertEquals(1, playerCommandsRun.size());
+        assertEquals("me hi", playerCommandsRun.get(0));
+    }
+
+    @Test
+    void testEscapedDotsInCommandEffect() {
+        CommandEffect effect = new CommandEffect();
+        effect.setData("CONSOLE", "say", "a.b");
+        String perm = effect.toPermission();
+        assertEquals("console.say\\ a\\.b", perm);
+
+        List<String> nodes = List.of("rtp.effect.postteleport.COMMAND." + perm);
+        List<io.github.dailystruggle.effectsapi.common.Effect<?>> effects =
+                EffectFactory.buildEffects("rtp.effect.postteleport", nodes);
+        assertEquals(1, effects.size());
+
+        effects.get(0).setTarget(testPlayer);
+        effects.get(0).run();
+
+        assertEquals(1, consoleCommandsRun.size());
+        assertEquals("say a.b", consoleCommandsRun.get(0));
+    }
+
+    @Test
+    void testUnknownEffectTypeWarnsOnce() {
+        EffectFactory.clearWarnedUnknownTypes();
+        List<String> warnings = new ArrayList<>();
+        io.github.dailystruggle.effectsapi.common.Effect.setDefaultWarn(warnings::add);
+
+        try {
+            List<String> nodes = List.of(
+                    "rtp.effect.postteleport.NON_EXISTENT_EFFECT.arg1",
+                    "rtp.effect.postteleport.NON_EXISTENT_EFFECT.arg2"
+            );
+            List<io.github.dailystruggle.effectsapi.common.Effect<?>> effects =
+                    EffectFactory.buildEffects("rtp.effect.postteleport", nodes);
+            assertTrue(effects.isEmpty());
+            assertEquals(1, warnings.size(), "should warn once for unknown effect type");
+            assertTrue(warnings.get(0).contains("NON_EXISTENT_EFFECT"));
+
+            EffectFactory.buildEffects("rtp.effect.postteleport", nodes);
+            assertEquals(1, warnings.size(), "repeated unknown effect type remains deduplicated before clear");
+
+            EffectFactory.clearWarnedUnknownTypes();
+            EffectFactory.buildEffects("rtp.effect.postteleport", nodes);
+            assertEquals(2, warnings.size(), "clearWarnedUnknownTypes() re-enables warning on reload");
+        } finally {
+            io.github.dailystruggle.effectsapi.common.Effect.setDefaultWarn(null);
+        }
+    }
+}

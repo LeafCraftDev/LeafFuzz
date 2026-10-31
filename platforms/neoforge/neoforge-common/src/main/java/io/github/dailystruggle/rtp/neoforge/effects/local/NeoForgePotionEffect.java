@@ -1,7 +1,7 @@
 package io.github.dailystruggle.rtp.neoforge.effects.local;
 
 import io.github.dailystruggle.effectsapi.common.Effect;
-import io.github.dailystruggle.rtp.common.RTP;
+import io.github.dailystruggle.server.api.ServerAccessors;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerPlayer;
@@ -11,6 +11,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.EnumMap;
 import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * NeoForge POTION effect (effects-api-ADR-003), compiled Mojmap in
@@ -111,8 +112,11 @@ public class NeoForgePotionEffect extends Effect<NeoForgePotionKeys> {
             if (WARNED) return;
             WARNED = true;
         }
-        RTP.log(Level.WARNING, "[RTP][NeoForge] POTION effect could not be delivered: "
-                + reason + " (cosmetic; teleport unaffected).");
+        var acc = ServerAccessors.get();
+        String msg = "[RTP][NeoForge] POTION effect could not be delivered: "
+                + reason + " (cosmetic; teleport unaffected).";
+        if (acc != null) acc.log(Level.WARNING, msg);
+        else Logger.getLogger(NeoForgePotionEffect.class.getName()).log(Level.WARNING, msg);
     }
 
     // ---- MobEffectInstance(Holder<MobEffect>|MobEffect, int, int, bool, bool, bool) ----

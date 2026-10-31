@@ -1,6 +1,6 @@
-# Getting Support for RTP
+# Getting Support for LeafFuzz
 
-RTP is maintained by a single developer in their spare time. Please read this
+LeafFuzz is maintained by a single developer in their spare time. Please read this
 page **before** opening an issue or pinging in chat — it tells you where your
 question belongs and how to ask it so you actually get a useful answer.
 
@@ -10,21 +10,21 @@ question belongs and how to ask it so you actually get a useful answer.
 
 Check these first. Most questions are already answered:
 
-1. **Documentation site** (searchable) — <https://dailystruggle.github.io/RTP/>.
-   The same pages ship inside the jar (unpacked to `plugins/RTP/docs/`, or `config/rtp/docs/` on Fabric / NeoForge) and live in this
+1. **Documentation site** (searchable) — <https://dailystruggle.github.io/LeafFuzz/>.
+   The same pages ship inside the jar (unpacked to `plugins/LeafFuzz/docs/`, or `config/rtp/docs/` on Fabric / NeoForge) and live in this
    repo under [`docs/`](docs/). They replace the old GitHub Wiki.
-2. **Server-admin docs** — <https://dailystruggle.github.io/RTP/FOR_SERVER_ADMINS/>
-   ([`docs/FOR_SERVER_ADMINS.md`](resource/LeafRTP/docs/FOR_SERVER_ADMINS.md)) and the rest of
-   [`docs/admin/`](resource/LeafRTP/docs/admin/).
-3. **FAQ** — <https://dailystruggle.github.io/RTP/admin/FAQ/>
-   ([`docs/admin/FAQ.md`](resource/LeafRTP/docs/admin/FAQ.md))
-4. **Commands reference** — <https://dailystruggle.github.io/RTP/admin/COMMANDS/>
-   ([`docs/admin/COMMANDS.md`](resource/LeafRTP/docs/admin/COMMANDS.md))
+2. **Server-admin docs** — <https://dailystruggle.github.io/LeafFuzz/FOR_SERVER_ADMINS/>
+   ([`docs/FOR_SERVER_ADMINS.md`](resource/LeafFuzz/docs/FOR_SERVER_ADMINS.md)) and the rest of
+   [`docs/admin/`](resource/LeafFuzz/docs/admin/).
+3. **FAQ** — <https://dailystruggle.github.io/LeafFuzz/admin/FAQ/>
+   ([`docs/admin/FAQ.md`](resource/LeafFuzz/docs/admin/FAQ.md))
+4. **Commands reference** — <https://dailystruggle.github.io/LeafFuzz/admin/COMMANDS/>
+   ([`docs/admin/COMMANDS.md`](resource/LeafFuzz/docs/admin/COMMANDS.md))
 5. **Resource page** — <https://www.spigotmc.org/resources/leafrtp.94812/>
 6. **Existing issues** — search **open *and* closed** issues; your problem has
    probably been reported.
 7. **Update first** — confirm the problem reproduces on the latest release
-   (`/rtp version`). Old builds do not get support.
+   (`/fuzz test`). Old builds do not get support.
 
 ---
 
@@ -32,16 +32,16 @@ Check these first. Most questions are already answered:
 
 | Intent | Channel |
 |---|---|
-| "How do I configure / use X?" (not a bug) | [GitHub Discussions](https://github.com/DailyStruggle/RTP/discussions) or the `#support` Forum in the `LeafCraft Plugin Support` Discord |
+| "How do I configure / use X?" (not a bug) | [GitHub Discussions](https://github.com/LeafCraftDev/LeafFuzz/discussions) or the `#support` Forum in the `LeafCraft Plugin Support` Discord |
 | Community discussion | SpigotMC resource discussion thread or `#general` in `LeafCraft Plugin Support` |
-| Suspected bug (crash, stack trace, broken behavior) | [New bug report](https://github.com/DailyStruggle/RTP/issues/new?template=bug_report.md) or `#support` Forum thread (with `/rtp version`, `/version`, `/rtp test`, and an `mclo.gs` log) |
-| LeafRTP Pro priority support | BuiltByBit ticket or `#support` Forum thread with the `@Pro Supporter` role (`💎 Pro Priority`) |
+| Suspected bug (crash, stack trace, broken behavior) | [New bug report](https://github.com/LeafCraftDev/LeafFuzz/issues/new?template=bug_report.md) or `#support` Forum thread (with `/fuzz test`, `/version`, `/fuzz test`, and an `mclo.gs` log) |
+| LeafFuzz priority support | BuiltByBit ticket or `#support` Forum thread with the `@Pro Supporter` role (`💎 Pro Priority`) |
 | Feature idea | Open a **Discussion** first; issues only after triage |
-| **Security vulnerability** | **Do not open a public issue.** See [`SECURITY.md`](SECURITY.md) and use [private advisories](https://github.com/DailyStruggle/RTP/security/advisories/new) |
-| Addon development help | [Addon developer guide](https://dailystruggle.github.io/RTP/FOR_ADDON_DEVELOPERS/) first, then [GitHub Discussions](https://github.com/DailyStruggle/RTP/discussions) or `#development` in `LeafCraft Plugin Support` |
+| **Security vulnerability** | **Do not open a public issue.** See [`SECURITY.md`](SECURITY.md) and use [private advisories](https://github.com/LeafCraftDev/LeafFuzz/security/advisories/new) |
+| Addon development help | [Addon developer guide](https://dailystruggle.github.io/LeafFuzz/FOR_ADDON_DEVELOPERS/) first, then [GitHub Discussions](https://github.com/LeafCraftDev/LeafFuzz/discussions) or `#development` in `LeafCraft Plugin Support` |
 
 **Do not** use the GitHub issue tracker for questions, "how do I" requests, or
-plugin-conflict debugging without first reproducing with RTP alone. Those
+plugin-conflict debugging without first reproducing with LeafFuzz alone. Those
 will be closed and redirected to GitHub Discussions.
 
 ---
@@ -53,7 +53,7 @@ A report without the following will be closed without a reply:
 - **Platform** — Spigot, Paper, Folia, Fabric, or NeoForge (choose one; write "I'm not sure"
   only if you genuinely don't know and then attach `/version` output).
 - **Server version** — full output of `/version`.
-- **RTP version** — output of `/rtp version`.
+- **LeafFuzz version** — output of `/fuzz test`.
 - **Java version** — output of `java -version` on the server host.
 - **Full `latest.log`** — uploaded to <https://mclo.gs/> or a pastebin.
   Screenshots of console text are not acceptable; the text must be searchable.
@@ -62,7 +62,7 @@ A report without the following will be closed without a reply:
 - **Expected vs. actual behavior** — one sentence each.
 - **Config diff** — if you changed `config.yml` / `regions/*.yml` /
   `messages.yml`, show the diff from default.
-- **Other plugins** — list them, and ideally reproduce with RTP alone.
+- **Other plugins** — list them, and ideally reproduce with LeafFuzz alone.
 
 The [`bug_report.md`](.github/ISSUE_TEMPLATE/bug_report.md) template walks
 you through all of the above. Use it.
@@ -81,25 +81,25 @@ Bug fixes and patches are released according to the following support tiers:
 
 **Minecraft versions:** bug reports are accepted for Minecraft **1.21.11 through
 the latest release**, on Spigot, Paper, Folia, Fabric and NeoForge. Older
-versions RTP still loads on (down to 1.18 on Paper and Spigot) are best-effort:
+versions LeafFuzz still loads on (down to 1.18 on Paper and Spigot) are best-effort:
 reports from them may be closed without a fix. A later release will deprecate
 1.21.11, which moves this window up; it does not remove 1.21.11 support.
 Folia is the exception: it is experimental and only its current builds are
 maintained upstream, so Folia below 1.21.11 is not supported at all, and
 reports from it are closed.
 
-For platform, Minecraft, and Java runtime compatibility, refer to the canonical [Platform Support Matrix](resource/LeafRTP/docs/dev/SUPPORT_MATRIX.md).
+For platform, Minecraft, and Java runtime compatibility, refer to the canonical [Platform Support Matrix](resource/LeafFuzz/docs/dev/SUPPORT_MATRIX.md).
 
 ---
 
 ## Response Expectations & Timelines
 
-RTP is actively maintained by an open-source team. While we do not offer commercial SLA guarantees, incoming reports are triaged under the following expected response windows:
+LeafFuzz is actively maintained by an open-source team. While we do not offer commercial SLA guarantees, incoming reports are triaged under the following expected response windows:
 
 - **Initial Triage & Acknowledgement:** Typically within **3 to 7 business days** for well-formed reports containing complete logs and reproduction steps.
 - **Bug Fix Delivery:** Confirmed defects on tested platforms are typically addressed in the next patch release (typically **2 to 4 weeks**), or an intermediate snapshot build if critical.
 - **Critical Security Hazards:** Handled on an expedited track via [`SECURITY.md`](SECURITY.md) (acknowledgement within **72 hours**, triage within **7 days**).
-- **Pro Support Priority:** Operators running LeafRTP Pro on BuiltByBit receive priority support via BuiltByBit tickets or the `#support` Forum in `LeafCraft Plugin Support` (where the `@Pro Supporter` role attaches the `💎 Pro Priority` tag), routing confirmed issues to the front of the queue (24-72 h weekday target).
+- **Pro Support Priority:** Operators running LeafFuzz on BuiltByBit receive priority support via BuiltByBit tickets or the `#support` Forum in `LeafCraft Plugin Support` (where the `@Pro Supporter` role attaches the `💎 Pro Priority` tag), routing confirmed issues to the front of the queue (24-72 h weekday target).
 - **Incomplete Reports:** Reports missing required reproduction steps, configuration diffs, or `latest.log` links may be flagged or closed until the required context is provided.
 - Pinging the maintainer in DMs, other repositories, or unrelated threads will not speed anything up and is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
 

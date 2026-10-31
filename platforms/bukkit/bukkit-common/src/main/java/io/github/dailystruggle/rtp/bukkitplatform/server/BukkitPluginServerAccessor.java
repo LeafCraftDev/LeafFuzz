@@ -5,10 +5,11 @@ import io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand;
 import io.github.dailystruggle.effectsapi.EffectsAPI;
 import io.github.dailystruggle.effectsapi.bukkit.BukkitEffectsInitializer;
 import io.github.dailystruggle.effectsapi.bukkit.BukkitHandles;
-import io.github.dailystruggle.rtp.bukkitplatform.tools.SendMessage;
+import io.github.dailystruggle.rtp.bukkitplatform.tools.MiniMessageRenderer;
 import io.github.dailystruggle.server.api.BlockPos3i;
 import io.github.dailystruggle.server.api.BookMenuSpec;
 import io.github.dailystruggle.server.api.CallerLocation;
+import io.github.dailystruggle.server.api.MiniMessageColorExpander;
 import io.github.dailystruggle.server.api.PlayerLifecycleHook;
 import io.github.dailystruggle.server.api.PlayerSleepSnapshot;
 import io.github.dailystruggle.server.api.ServerAccessor;
@@ -914,13 +915,19 @@ public class BukkitPluginServerAccessor implements ServerAccessor {
 
   private static void deliverFormattedMessage(CommandSender targetSender, String raw) {
     if (targetSender == null || raw == null || raw.isEmpty()) return;
-    try {
-      SendMessage.sendMessage(targetSender, raw);
-      return;
-    } catch (RuntimeException | LinkageError ignored) {
-      // Standalone plugins that shade bukkit-common without rtp-core fall back to legacy + hex formatting
+    if (raw.indexOf('<') >= 0) {
+      try {
+        BaseComponent[] rendered = MiniMessageRenderer.render(raw);
+        if (targetSender instanceof Player p && p.spigot() != null) {
+          p.spigot().sendMessage(rendered);
+          return;
+        }
+      } catch (RuntimeException | LinkageError ignored) {
+        // Pure Spigot fallback
+      }
     }
-    targetSender.sendMessage(ChatColor.translateAlternateColorCodes('&', raw));
+    String expanded = MiniMessageColorExpander.expand(raw);
+    targetSender.sendMessage(ChatColor.translateAlternateColorCodes('&', expanded));
   }
 
   @Override

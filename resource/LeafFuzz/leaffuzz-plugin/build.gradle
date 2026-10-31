@@ -54,9 +54,11 @@ shadowJar {
         )
     }
 
-    from(project(':resource:LeafFuzz').projectDir) {
-        include 'LICENSE'
-        into 'META-INF/leaffuzz'
+    def licenseFile = [project(':resource:LeafFuzz').file('LICENSE'), rootProject.file('LICENSE')].find { it.exists() }
+    if (licenseFile != null) {
+        from(licenseFile) {
+            into 'META-INF/leaffuzz'
+        }
     }
 
     exclude 'org/jetbrains/annotations/**'

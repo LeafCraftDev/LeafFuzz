@@ -336,7 +336,7 @@ public final class FabricLegacyText {
         // 0) Expand MiniMessage <tag> color/format markup (named/hex colors,
         //    bold/italic/..., gradient/rainbow/transition) into legacy &-codes
         //    so Adventure-less Fabric still honors MiniMessage colors.
-        raw = io.github.dailystruggle.rtp.common.tools.MiniMessageColorExpander.expand(raw);
+        raw = io.github.dailystruggle.server.api.MiniMessageColorExpander.expand(raw);
         // 1) Convert "#RRGGBB" / "&#RRGGBB" to "section xsection Rsection Rsection Gsection Gsection Bsection B" so the main
         //    scanner can treat hex uniformly with formatting codes.
         Matcher m = HEX_PATTERN.matcher(raw);

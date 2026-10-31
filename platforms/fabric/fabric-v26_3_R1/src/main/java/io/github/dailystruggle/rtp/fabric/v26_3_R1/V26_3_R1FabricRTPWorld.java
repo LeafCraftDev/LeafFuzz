@@ -8,10 +8,12 @@ import io.github.dailystruggle.rtp.api.world.RTPWorld;
 import io.github.dailystruggle.rtp.common.RTP;
 import io.github.dailystruggle.rtp.common.configuration.ActiveConfigs;
 import io.github.dailystruggle.rtp.common.configuration.ConfigParser;
+import io.github.dailystruggle.rtp.common.configuration.enums.BlocksKeys;
 import io.github.dailystruggle.rtp.common.configuration.enums.SafetyKeys;
 import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
 import io.github.dailystruggle.rtp.common.world.BiomeOverride;
 import io.github.dailystruggle.rtp.anvil.AnvilColumnProbeAdapter;
+import io.github.dailystruggle.rtp.anvil.AnvilProbeSupport;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.resources.Identifier;
@@ -70,6 +72,8 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                     return size() > RECENT_LOADED_CAP;
                 }
             });
+
+    private final AnvilProbeSupport anvilProbeSupport = new AnvilProbeSupport();
 
     private static final class KeyedChunkRef extends WeakReference<ChunkAccess> {
         final long key;
@@ -145,14 +149,70 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
 
     @Override
     public CompletableFuture<Long> getChunkAt(int cx, int cz) {
+        return resolveChunkKey(cx, cz, true);
+    }
+
+    @Override
+    public CompletableFuture<Long> getChunkIfReadable(int cx, int cz) {
+        return resolveChunkKey(cx, cz, false);
+    }
+
+    private CompletableFuture<Long> resolveChunkKey(int cx, int cz, boolean allowLive) {
         ServerLevel level = world;
         if (level == null) return CompletableFuture.completedFuture(null);
         MinecraftServer server = level.getServer();
         if (server == null) return CompletableFuture.completedFuture(null);
         long k = key(cx, cz);
-        if (getCachedChunk(k) != null) {
+        if (getLiveCachedChunk(k) != null) {
             return CompletableFuture.completedFuture(k);
         }
+        if (shouldPrefilter(cx, cz)) {
+            java.nio.file.Path worldFolder;
+            try {
+                worldFolder = server.getWorldPath(LevelResource.ROOT);
+            } catch (Throwable t) {
+                worldFolder = null;
+            }
+            if (worldFolder != null) {
+                String dim = dimensionRegionSubpath(worldFolder, level);
+                java.util.Set<String> rawUnsafe = currentUnsafeBlocks();
+                return anvilProbeSupport
+                        .probeAndPublish(worldFolder, dim, cx, cz, k, rawUnsafe,
+                                s -> (RTPRuntime.serverAccessor() != null)
+                                        ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
+                                        : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s))
+                        .thenCompose(result -> {
+                            io.github.dailystruggle.rtp.anvil.AnvilChunkView view = result.view();
+                            if (view != null) {
+                                return CompletableFuture.completedFuture(k);
+                            }
+                            return allowLive
+                                    ? loadLiveChunk(level, server, cx, cz, k)
+                                    : CompletableFuture.completedFuture(null);
+                        });
+            }
+        }
+        if (!allowLive && !isChunkLoaded(cx, cz)) return CompletableFuture.completedFuture(null);
+        return loadLiveChunk(level, server, cx, cz, k);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static java.util.Set<String> currentUnsafeBlocks() {
+        try {
+            if (ActiveConfigs.get() == null) return java.util.Collections.emptySet();
+            Object raw = ActiveConfigs.get().getConfigValue(BlocksKeys.unsafeBlocks, new java.util.ArrayList<>());
+            if (raw instanceof java.util.Collection<?> c) {
+                java.util.Set<String> out = new java.util.HashSet<>(c.size());
+                for (Object o : c) if (o != null) out.add(o.toString());
+                return out;
+            }
+        } catch (Throwable ignored) {
+        }
+        return java.util.Collections.emptySet();
+    }
+
+    private CompletableFuture<Long> loadLiveChunk(
+            ServerLevel level, MinecraftServer server, int cx, int cz, long k) {
         // Live-load entry: counted once here (getChunkAtAsync and getOrLoadChunk route through it).
         totalChunkLoads.incrementAndGet();
         final ChunkPos ticketPos = new ChunkPos(cx, cz);
@@ -171,6 +231,7 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                     expungeClearedChunks();
                     chunkCache.put(k, new KeyedChunkRef(k, ca, clearedChunks));
                     recentlyLoadedChunks.put(k, new V26_3_R1FabricRTPChunk(ca, level, id));
+                    anvilProbeSupport.evict(k);
                     return k;
                 })
                 .exceptionally(t -> {
@@ -341,10 +402,12 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         return CompletableFuture.completedFuture((int) numForceLoaded());
     }
 
-    @Override
-    public RTPChunk<?> getCachedChunk(long key) {
+    private RTPChunk<?> getLiveCachedChunk(long key) {
         V26_3_R1FabricRTPChunk pinned = recentlyLoadedChunks.get(key);
-        if (pinned != null) return pinned;
+        if (pinned != null) {
+            anvilProbeSupport.evict(key);
+            return pinned;
+        }
         KeyedChunkRef ref = chunkCache.get(key);
         if (ref == null) return null;
         ChunkAccess chunk = ref.get();
@@ -352,7 +415,24 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
             chunkCache.remove(key, ref);
             return null;
         }
+        anvilProbeSupport.evict(key);
         return new V26_3_R1FabricRTPChunk(chunk, world, id);
+    }
+
+    @Override
+    public RTPChunk<?> getCachedChunk(long key) {
+        RTPChunk<?> live = getLiveCachedChunk(key);
+        if (live != null) return live;
+        io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+        if (view != null) {
+            int cx = (int) (key & 0xffffffffL);
+            int cz = (int) (key >> 32);
+            java.util.Set<String> reconciled = (RTPRuntime.serverAccessor() != null)
+                    ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
+                    : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+            return new V26_3_R1FabricRTPChunk(view, cx, cz, id, reconciled);
+        }
+        return null;
     }
 
     @Override
@@ -366,6 +446,7 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         long k = key(cx, cz);
         chunkCache.remove(k);
         recentlyLoadedChunks.remove(k);
+        anvilProbeSupport.evict(k);
     }
 
     @Override
@@ -381,6 +462,7 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         });
         chunkCache.clear();
         recentlyLoadedChunks.clear();
+        anvilProbeSupport.clear();
     }
 
     @Override

@@ -1,0 +1,655 @@
+package io.github.dailystruggle.server.api;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.File;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+class ServerAccessorsTest {
+  private static final Logger LOGGER = Logger.getLogger("Server");
+
+  @BeforeEach
+  @AfterEach
+  void clearInstalledAccessor() {
+    ServerAccessors.set(null);
+    ServerAccessors.setEffectAccessor(null);
+  }
+
+  @Test
+  void storesAccessorAndDelegatesLogging() {
+    StubAccessor accessor = new StubAccessor("paper", 21);
+    ServerAccessors.set(accessor);
+
+    assertSame(accessor, ServerAccessors.get());
+    ServerAccessors.log(Level.INFO, "delegated");
+    assertEquals(List.of("INFO:delegated"), accessor.messages);
+  }
+
+  @Test
+  void loggingFallsBackToGenericLoggerWithoutAccessor() {
+    List<LogRecord> records = new ArrayList<>();
+    Handler handler = new Handler() {
+      @Override
+      public void publish(LogRecord record) {
+        records.add(record);
+      }
+
+      @Override
+      public void flush() {}
+
+      @Override
+      public void close() {}
+    };
+    Level oldLevel = LOGGER.getLevel();
+    boolean oldParentHandlers = LOGGER.getUseParentHandlers();
+    try {
+      LOGGER.addHandler(handler);
+      LOGGER.setLevel(Level.ALL);
+      LOGGER.setUseParentHandlers(false);
+
+      ServerAccessors.log(Level.WARNING, "fallback");
+
+      assertEquals(1, records.size());
+      assertEquals(Level.WARNING, records.get(0).getLevel());
+      assertEquals("fallback", records.get(0).getMessage());
+    } finally {
+      LOGGER.removeHandler(handler);
+      LOGGER.setLevel(oldLevel);
+      LOGGER.setUseParentHandlers(oldParentHandlers);
+    }
+  }
+
+  @Test
+  @DisplayName("REQ-API-NF-002: common server API signatures expose no RTP types")
+  void commonApiTypesDoNotExposeRtpTypes() {
+    Class<?>[] apiTypes = {
+      ServerAccessor.class,
+      ScoreboardAccessor.class,
+      WorldBorderAccessor.class,
+      PaletteTagAccessor.class,
+      EffectHandleBridge.class,
+      MenuContextAccessor.class,
+      CommandDispatchAccessor.class,
+      PlatformFamily.class,
+      ServerAccessors.class,
+      TaskHandle.class,
+      TaskScheduler.class,
+      ProgressBar.class,
+      PlayerLifecycleHook.class,
+      NoopPlayerLifecycleHook.class,
+      DispatchingPlayerLifecycleHook.class,
+      WorldEventHook.class,
+      NoopWorldEventHook.class,
+      DispatchingWorldEventHook.class,
+      PlayerInteractBlockContext.class,
+      BlockBreakContext.class,
+      LeavesDecayContext.class,
+      ChunkLoadContext.class,
+      SaplingGrowContext.class,
+      TaggedItemSpec.class,
+      BlockPos3i.class,
+      CallerLocation.class,
+      AbstractModServerAccessor.class
+    };
+    for (Class<?> apiType : apiTypes) {
+      assertFalse(apiType.getName().startsWith("io.github.dailystruggle.rtp."));
+      for (Method method : apiType.getDeclaredMethods()) {
+        assertFalse(method.getReturnType().getName().startsWith("io.github.dailystruggle.rtp."));
+        for (Class<?> parameterType : method.getParameterTypes()) {
+          assertFalse(parameterType.getName().startsWith("io.github.dailystruggle.rtp."));
+        }
+      }
+    }
+  }
+
+  @Test
+  void defaultCompatibilityHelpersUsePlatformFamilyAndVersion() {
+    StubAccessor accessor = new StubAccessor("paper", 21);
+
+    assertEquals(PlatformFamily.BUKKIT, accessor.getPlatformFamily());
+    assertTrue(accessor.isPlatformFamily(PlatformFamily.BUKKIT));
+    assertTrue(accessor.isServerVersionAtLeast(21));
+    assertTrue(accessor.isServerVersionAtMost(21));
+    assertTrue(accessor.isCompatible(PlatformFamily.BUKKIT, 21, 21));
+    assertFalse(accessor.isCompatible(PlatformFamily.FABRIC, 21, 21));
+    assertFalse(new StubAccessor("paper", null).isCompatible(PlatformFamily.BUKKIT, 21, 21));
+  }
+
+  @Test
+  void defaultHostPrimitivesProvideSafeFallbacks() {
+    StubAccessor accessor = new StubAccessor("paper", 21);
+    UUID player = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+    // Identity & directories
+    assertNull(accessor.getServerName());
+    assertEquals(new File("."), accessor.getPluginDirectory());
+    assertTrue(accessor.isPrimaryThread());
+    assertEquals(0L, accessor.overTime());
+    assertEquals(20.0, accessor.getTPS(20));
+
+    // Online roster, lifecycle hook, progress bars & player probes
+    assertTrue(accessor.getOnlinePlayerNames().isEmpty());
+    assertSame(NoopPlayerLifecycleHook.INSTANCE, accessor.getPlayerLifecycleHook());
+    accessor.clearProgressBars();
+    assertFalse(accessor.menuPermissionProbe(player).test("rtp.use"));
+    assertTrue(accessor.menuEffectivePermissions(player).isEmpty());
+    assertEquals("en_us", accessor.menuLocale(player));
+    assertEquals("", accessor.menuRegionDescriptor(player));
+
+    // Command registration & dispatch
+    accessor.registerCommands(new Object(), "rtp", "wild");
+    assertFalse(accessor.executeCommand(player, "rtp"));
+    assertFalse(accessor.executeCommandWithCapture("rtp", line -> {}));
+    var failedCapture = accessor.executeCommandWithCapture("rtp");
+    assertTrue(failedCapture.isDone());
+    assertTrue(failedCapture.join().isEmpty());
+
+    ServerAccessor capturingAccessor =
+        new StubAccessor("paper", 21) {
+          @Override
+          public boolean executeCommandWithCapture(
+              String commandLine, Consumer<String> lineConsumer) {
+            lineConsumer.accept("out:" + commandLine);
+            return true;
+          }
+        };
+    assertEquals(List.of("out:help"), capturingAccessor.executeCommandWithCapture("help").join());
+
+    // Scoreboard tags & objectives
+    assertTrue(accessor.getScoreboardTags(player).isEmpty());
+    assertFalse(accessor.addScoreboardTag(player, "tag"));
+    assertFalse(accessor.removeScoreboardTag(player, "tag"));
+    assertNull(accessor.getScoreboardScore(player, "obj"));
+    accessor.setScoreboardScore(player, "obj", 42);
+    accessor.resetScoreboardScore(player, "obj");
+    assertTrue(accessor.hasScoreboardObjective("obj").isEmpty());
+    accessor.ensureScoreboardObjective("obj", "dummy");
+
+    // Per-player world border & health
+    List<String> borderCalls = new ArrayList<>();
+    ServerAccessor borderAccessor =
+        new StubAccessor("paper", 21) {
+          @Override
+          public void sendWorldBorder(
+              UUID playerId,
+              double centerX,
+              double centerZ,
+              double oldSize,
+              double newSize,
+              long shrinkSeconds,
+              double damageAmount,
+              double damageBuffer) {
+            borderCalls.add(
+                centerX
+                    + ":"
+                    + centerZ
+                    + ":"
+                    + oldSize
+                    + ":"
+                    + newSize
+                    + ":"
+                    + shrinkSeconds
+                    + ":"
+                    + damageAmount
+                    + ":"
+                    + damageBuffer);
+          }
+        };
+    borderAccessor.sendWorldBorder(player, 10.0, 20.0, 100.0);
+    borderAccessor.sendWorldBorder(player, 10.0, 20.0, 100.0, 50.0, 5L);
+    assertEquals(
+        List.of("10.0:20.0:100.0:100.0:0:0.0:0.0", "10.0:20.0:100.0:50.0:5:0.0:0.0"), borderCalls);
+    accessor.sendWorldBorder(player, 0.0, 0.0, 100.0, 50.0, 5L, 0.2, 5.0);
+    accessor.resetWorldBorder(player);
+    accessor.damagePlayer(player, 2.0);
+
+    // Registry & palette snapshot surface
+    assertTrue(accessor.materials().isEmpty());
+    assertTrue(accessor.blockTagSnapshot().isEmpty());
+    accessor.rebuildBlockTagSnapshot();
+    assertNull(accessor.reconcilePaletteIdentifier(null));
+    assertEquals("", accessor.reconcilePaletteIdentifier("   "));
+    assertEquals("STONE", accessor.reconcilePaletteIdentifier("minecraft:stone"));
+    assertEquals("DIRT", accessor.reconcilePaletteIdentifier("dirt"));
+
+    assertTrue(accessor.reconcilePaletteIdentifiers(null).isEmpty());
+    assertTrue(accessor.reconcilePaletteIdentifiers(Collections.emptyList()).isEmpty());
+    Set<String> reconciled =
+        accessor.reconcilePaletteIdentifiers(Arrays.asList(null, "  ", "minecraft:stone", "dirt"));
+    assertEquals(Set.of("STONE", "DIRT"), reconciled);
+    assertThrows(UnsupportedOperationException.class, () -> reconciled.add("GRASS"));
+
+    assertFalse(accessor.matchesPaletteIdentifier("minecraft:stone", null));
+    assertFalse(accessor.matchesPaletteIdentifier("minecraft:stone", Collections.emptySet()));
+    assertFalse(accessor.matchesPaletteIdentifier(null, reconciled));
+    assertFalse(accessor.matchesPaletteIdentifier("   ", reconciled));
+    assertTrue(accessor.matchesPaletteIdentifier("minecraft:stone", reconciled));
+    assertFalse(accessor.matchesPaletteIdentifier("minecraft:lava", reconciled));
+
+    // Effect target & command dispatch defaults (ADR-116 Decision 2)
+    assertNull(accessor.wrapEffectPlayer(new Object()));
+    assertNull(accessor.wrapEffectLocation(new Object()));
+    assertNull(accessor.resolveEffectPlayerAt(new Object()));
+    accessor.dispatchConsoleCommand("say test");
+    accessor.dispatchConsoleCommand("");
+    accessor.dispatchConsoleCommand(null);
+  }
+
+  @Test
+  void serverAccessorIsAssignableToCapabilitySubInterfacesAndDefaultsBehaveAsExpected() {
+    ServerAccessor accessor = new StubAccessor("paper", 21);
+    UUID player = UUID.fromString("00000000-0000-0000-0000-000000000002");
+
+    assertTrue(ScoreboardAccessor.class.isAssignableFrom(ServerAccessor.class));
+    assertTrue(WorldBorderAccessor.class.isAssignableFrom(ServerAccessor.class));
+    assertTrue(PaletteTagAccessor.class.isAssignableFrom(ServerAccessor.class));
+    assertTrue(EffectHandleBridge.class.isAssignableFrom(ServerAccessor.class));
+    assertTrue(MenuContextAccessor.class.isAssignableFrom(ServerAccessor.class));
+    assertTrue(CommandDispatchAccessor.class.isAssignableFrom(ServerAccessor.class));
+
+    assertInstanceOf(ScoreboardAccessor.class, accessor);
+    assertInstanceOf(WorldBorderAccessor.class, accessor);
+    assertInstanceOf(PaletteTagAccessor.class, accessor);
+    assertInstanceOf(EffectHandleBridge.class, accessor);
+    assertInstanceOf(MenuContextAccessor.class, accessor);
+    assertInstanceOf(CommandDispatchAccessor.class, accessor);
+
+    ScoreboardAccessor scoreboard = accessor;
+    assertTrue(scoreboard.getScoreboardTags(player).isEmpty());
+    assertFalse(scoreboard.addScoreboardTag(player, "tag"));
+    assertFalse(scoreboard.removeScoreboardTag(player, "tag"));
+    assertNull(scoreboard.getScoreboardScore(player, "obj"));
+    scoreboard.setScoreboardScore(player, "obj", 7);
+    scoreboard.resetScoreboardScore(player, "obj");
+    scoreboard.resetScoreboardScores(player, "obj");
+    assertTrue(scoreboard.hasScoreboardObjective("obj").isEmpty());
+    scoreboard.ensureScoreboardObjective("obj", "dummy");
+
+    WorldBorderAccessor worldBorder = accessor;
+    worldBorder.sendWorldBorder(player, 0.0, 0.0, 64.0);
+    worldBorder.sendWorldBorder(player, 0.0, 0.0, 64.0, 32.0, 2L);
+    worldBorder.sendWorldBorder(player, 0.0, 0.0, 64.0, 32.0, 2L, 0.5, 2.0);
+    worldBorder.damagePlayer(player, 1.0);
+    worldBorder.resetWorldBorder(player);
+
+    PaletteTagAccessor palette = accessor;
+    assertTrue(palette.materials().isEmpty());
+    assertTrue(palette.blockTagSnapshot().isEmpty());
+    palette.rebuildBlockTagSnapshot();
+    assertEquals("OAK_LOG", palette.reconcilePaletteIdentifier("minecraft:oak_log"));
+    Set<String> reconciled =
+        palette.reconcilePaletteIdentifiers(List.of("minecraft:oak_log", "birch_log"));
+    assertEquals(Set.of("OAK_LOG", "BIRCH_LOG"), reconciled);
+    assertTrue(palette.matchesPaletteIdentifier("minecraft:oak_log", reconciled));
+    assertFalse(palette.matchesPaletteIdentifier("minecraft:lava", reconciled));
+
+    EffectHandleBridge effects = accessor;
+    assertNull(effects.wrapEffectPlayer(new Object()));
+    assertNull(effects.wrapEffectLocation(new Object()));
+    assertNull(effects.resolveEffectPlayerAt(new Object()));
+    effects.dispatchConsoleCommand("say effect");
+
+    MenuContextAccessor menuContext = accessor;
+    assertFalse(menuContext.menuPermissionProbe(player).test("rtp.use"));
+    assertNotNull(menuContext.menuPermissionProbeFactory());
+    assertFalse(menuContext.menuPermissionProbeFactory().apply(player).test("rtp.use"));
+    assertTrue(menuContext.menuEffectivePermissions(player).isEmpty());
+    assertEquals("en_us", menuContext.menuLocale(player));
+    assertEquals("", menuContext.menuRegionDescriptor(player));
+
+    CommandDispatchAccessor commands = accessor;
+    commands.registerCommands(new Object(), "rtp");
+    assertFalse(commands.executeCommand(player, "rtp"));
+    assertFalse(commands.executeCommandWithCapture("rtp", line -> {}));
+    assertTrue(commands.executeCommandWithCapture("rtp").join().isEmpty());
+    commands.dispatchConsoleCommand("say command");
+
+    List<String> dispatched = new ArrayList<>();
+    CommandDispatchAccessor recordingCommands =
+        new CommandDispatchAccessor() {
+          @Override
+          public boolean executeCommand(UUID senderId, String commandLine) {
+            dispatched.add(senderId + ":" + commandLine);
+            return true;
+          }
+        };
+    recordingCommands.dispatchConsoleCommand("say console");
+    recordingCommands.dispatchConsoleCommand("");
+    recordingCommands.dispatchConsoleCommand(null);
+    assertEquals(List.of("null:say console"), dispatched);
+  }
+
+  @Test
+  void effectAccessorBridgeRoutesThroughPrimaryOrExplicitOverride() {
+    assertFalse(ServerAccessors.hasEffectAccessor());
+    assertNull(ServerAccessors.effectAccessor());
+    assertNull(ServerAccessors.wrapEffectPlayer(null));
+    assertNull(ServerAccessors.wrapEffectLocation(null));
+    assertNull(ServerAccessors.resolveEffectPlayerAt(null));
+
+    List<String> consoleCommands = new ArrayList<>();
+    ServerAccessor effectDelegate =
+        new StubAccessor("paper", 21) {
+          @Override
+          public Object wrapEffectPlayer(Object player) {
+            return "wrappedPlayer:" + player;
+          }
+
+          @Override
+          public Object wrapEffectLocation(Object location) {
+            return "wrappedLoc:" + location;
+          }
+
+          @Override
+          public Object resolveEffectPlayerAt(Object location) {
+            return "playerAt:" + location;
+          }
+
+          @Override
+          public void dispatchConsoleCommand(String command) {
+            consoleCommands.add(command);
+          }
+        };
+
+    ServerAccessors.setEffectAccessor(effectDelegate);
+    assertTrue(ServerAccessors.hasEffectAccessor());
+    assertSame(effectDelegate, ServerAccessors.effectAccessor());
+    assertEquals("wrappedPlayer:p1", ServerAccessors.wrapEffectPlayer("p1"));
+    assertEquals("wrappedLoc:l1", ServerAccessors.wrapEffectLocation("l1"));
+    assertEquals("playerAt:l1", ServerAccessors.resolveEffectPlayerAt("l1"));
+    ServerAccessors.dispatchConsoleCommand("say hello");
+    assertEquals(List.of("say hello"), consoleCommands);
+  }
+
+  @Test
+  void progressBarAndLifecycleHooksFollowValueAndDispatchContracts() throws Exception {
+    ProgressBar bar = new ProgressBar("&aScan", 0.75, "rtp.see");
+    assertEquals("&aScan", bar.title());
+    assertEquals(0.75, bar.progress());
+    assertEquals("rtp.see", bar.viewerPermission());
+    assertEquals(bar, new ProgressBar("&aScan", 0.75, "rtp.see"));
+    assertEquals(bar.hashCode(), new ProgressBar("&aScan", 0.75, "rtp.see").hashCode());
+    assertNotEquals(bar, new ProgressBar("&aScan", 0.25, "rtp.see"));
+    assertEquals("", new ProgressBar(null, 0.0, null).title());
+    assertTrue(bar.toString().contains("Scan"));
+
+    NoopPlayerLifecycleHook noop = NoopPlayerLifecycleHook.INSTANCE;
+    noop.onPlayerJoin(id -> {}).close();
+    noop.onPlayerQuit(id -> {}).close();
+
+    DispatchingPlayerLifecycleHook dispatching = new DispatchingPlayerLifecycleHook();
+    assertFalse(dispatching.hasSubscribers());
+    assertThrows(IllegalArgumentException.class, () -> dispatching.onPlayerJoin(null));
+    assertThrows(IllegalArgumentException.class, () -> dispatching.onPlayerQuit(null));
+
+    AtomicReference<UUID> joined = new AtomicReference<>();
+    AtomicInteger quitCount = new AtomicInteger();
+    AutoCloseable joinSub =
+        dispatching.onPlayerJoin(
+            id -> {
+              throw new RuntimeException("boom");
+            });
+    dispatching.onPlayerJoin(joined::set);
+    AutoCloseable quitSub = dispatching.onPlayerQuit(id -> quitCount.incrementAndGet());
+    assertTrue(dispatching.hasSubscribers());
+
+    UUID id = UUID.randomUUID();
+    dispatching.fireJoin(id);
+    dispatching.fireQuit(id);
+    dispatching.fireJoin(null);
+    dispatching.fireQuit(null);
+    assertEquals(id, joined.get());
+    assertEquals(1, quitCount.get());
+
+    joinSub.close();
+    quitSub.close();
+    dispatching.fireQuit(id);
+    assertEquals(1, quitCount.get());
+  }
+
+  @Test
+  void worldEventHooksFollowValueAndDispatchContracts() throws Exception {
+    assertSame(NoopWorldEventHook.INSTANCE, ServerAccessors.worldEventHook());
+    StubAccessor stub = new StubAccessor("paper", 21);
+    ServerAccessors.set(stub);
+    assertSame(NoopWorldEventHook.INSTANCE, stub.getWorldEventHook());
+    assertSame(NoopWorldEventHook.INSTANCE, ServerAccessors.worldEventHook());
+
+    NoopWorldEventHook noop = NoopWorldEventHook.INSTANCE;
+    noop.onPlayerInteractBlock(ctx -> {}).close();
+    noop.onBlockBreak(ctx -> {}).close();
+    noop.onLeavesDecay(ctx -> {}).close();
+    noop.onChunkLoad(ctx -> {}).close();
+    noop.onSaplingGrow(ctx -> {}).close();
+    assertThrows(IllegalArgumentException.class, () -> noop.onPlayerInteractBlock(null));
+    assertThrows(IllegalArgumentException.class, () -> noop.onBlockBreak(null));
+    assertThrows(IllegalArgumentException.class, () -> noop.onLeavesDecay(null));
+    assertThrows(IllegalArgumentException.class, () -> noop.onChunkLoad(null));
+    assertThrows(IllegalArgumentException.class, () -> noop.onSaplingGrow(null));
+
+    DispatchingWorldEventHook hook = new DispatchingWorldEventHook();
+    assertFalse(hook.hasSubscribers());
+    assertThrows(IllegalArgumentException.class, () -> hook.onPlayerInteractBlock(null));
+    assertThrows(IllegalArgumentException.class, () -> hook.onBlockBreak(null));
+    assertThrows(IllegalArgumentException.class, () -> hook.onLeavesDecay(null));
+    assertThrows(IllegalArgumentException.class, () -> hook.onChunkLoad(null));
+    assertThrows(IllegalArgumentException.class, () -> hook.onSaplingGrow(null));
+
+    AtomicInteger consumed = new AtomicInteger();
+    PlayerInteractBlockContext interact =
+        new PlayerInteractBlockContext(
+            UUID.randomUUID(),
+            "world",
+            1,
+            64,
+            2,
+            1,
+            65,
+            2,
+            true,
+            false,
+            false,
+            "minecraft:oak_sapling",
+            java.util.Map.of("tree_species", "oak"),
+            "leaftreegen.sapling"::equals,
+            consumed::addAndGet);
+    assertEquals("world", interact.worldName());
+    assertEquals(1, interact.clickedX());
+    assertEquals(64, interact.clickedY());
+    assertEquals(2, interact.clickedZ());
+    assertEquals(1, interact.targetX());
+    assertEquals(65, interact.targetY());
+    assertEquals(2, interact.targetZ());
+    assertTrue(interact.mainHand());
+    assertFalse(interact.creativeMode());
+    assertFalse(interact.clickedOrTargetLiquid());
+    assertEquals("minecraft:oak_sapling", interact.itemKey());
+    assertEquals("oak", interact.customTag("tree_species"));
+    assertTrue(interact.hasPermission("leaftreegen.sapling"));
+    assertFalse(interact.hasPermission("other"));
+    assertTrue(interact.hasPermission(""));
+    interact.consumeItem(1);
+    assertEquals(1, consumed.get());
+
+    AutoCloseable sub1 =
+        hook.onPlayerInteractBlock(
+            c -> {
+              throw new RuntimeException("isolated");
+            });
+    AutoCloseable sub2 = hook.onPlayerInteractBlock(PlayerInteractBlockContext::cancel);
+    assertTrue(hook.hasSubscribers());
+    hook.firePlayerInteractBlock(interact);
+    hook.firePlayerInteractBlock(null);
+    assertTrue(interact.isCancelled());
+    sub1.close();
+    sub2.close();
+
+    BlockBreakContext breakCtx =
+        new BlockBreakContext(UUID.randomUUID(), "world", 3, 70, 4, "minecraft:oak_leaves", "minecraft:forest");
+    AutoCloseable breakSub = hook.onBlockBreak(BlockBreakContext::cancel);
+    hook.fireBlockBreak(breakCtx);
+    assertTrue(breakCtx.isCancelled());
+    assertEquals("minecraft:oak_leaves", breakCtx.blockKey());
+    assertEquals("minecraft:forest", breakCtx.biomeKey());
+    breakSub.close();
+
+    LeavesDecayContext decayCtx =
+        new LeavesDecayContext("world", 5, 72, 6, "minecraft:birch_leaves", "minecraft:birch_forest");
+    AutoCloseable decaySub = hook.onLeavesDecay(LeavesDecayContext::cancel);
+    hook.fireLeavesDecay(decayCtx);
+    assertTrue(decayCtx.isCancelled());
+    decaySub.close();
+
+    AtomicInteger chunkEvents = new AtomicInteger();
+    ChunkLoadContext chunkCtx = new ChunkLoadContext("world", 2, -3, true, 12345L);
+    AutoCloseable chunkSub = hook.onChunkLoad(c -> chunkEvents.incrementAndGet());
+    hook.fireChunkLoad(chunkCtx);
+    assertEquals(1, chunkEvents.get());
+    assertTrue(chunkCtx.newChunk());
+    assertEquals(12345L, chunkCtx.worldSeed());
+    chunkSub.close();
+
+    SaplingGrowContext growCtx =
+        new SaplingGrowContext(
+            "world", 10, 64, 10, "minecraft:oak_sapling", "minecraft:forest", false);
+    AutoCloseable growSub = hook.onSaplingGrow(SaplingGrowContext::cancel);
+    hook.fireSaplingGrow(growCtx);
+    assertTrue(growCtx.isCancelled());
+    assertEquals("minecraft:oak_sapling", growCtx.blockKey());
+    assertEquals("minecraft:forest", growCtx.biomeKey());
+    assertFalse(growCtx.onLiquid());
+    growSub.close();
+    assertFalse(hook.hasSubscribers());
+
+    TaggedItemSpec spec =
+        new TaggedItemSpec(
+            "minecraft:oak_sapling",
+            3,
+            "Custom Oak Sapling",
+            List.of("Line 1", "Line 2"),
+            java.util.Map.of("tree_species", "custom-oak"));
+    assertEquals("minecraft:oak_sapling", spec.itemKey());
+    assertEquals(3, spec.amount());
+    assertEquals("Custom Oak Sapling", spec.displayName());
+    assertEquals(List.of("Line 1", "Line 2"), spec.lore());
+    assertEquals("custom-oak", spec.customTags().get("tree_species"));
+    assertFalse(stub.giveItem(UUID.randomUUID(), "Alice", spec));
+    stub.dropItem("world", 0, 64, 0, spec);
+  }
+
+  @Test
+  void abstractModServerAccessorSharesVersionParsingSchedulingAndChunkMetadata() {
+    assertEquals(21, AbstractModServerAccessor.parseIntVersion("1.21.4"));
+    assertEquals(26, AbstractModServerAccessor.parseIntVersion("26.1.2"));
+    assertEquals(26, AbstractModServerAccessor.parseIntVersion("26.2-rc-2"));
+    assertEquals(0, AbstractModServerAccessor.parseIntVersion("unknown"));
+    assertEquals(0, AbstractModServerAccessor.parseIntVersion(null));
+
+    AbstractModServerAccessor modAccessor =
+        new AbstractModServerAccessor("TestMod", java.nio.file.Path.of("config", "test-mod")) {
+          @Override
+          public String getServerVersion() {
+            return "26.1.2";
+          }
+
+          @Override
+          public String getPlatform() {
+            return "fabric";
+          }
+        };
+
+    assertEquals(26, modAccessor.getServerIntVersion());
+    assertEquals("TestMod", modAccessor.logger().getName());
+    assertEquals(java.nio.file.Path.of("config", "test-mod"), modAccessor.getRootFolder());
+    assertEquals(java.nio.file.Path.of("world"), modAccessor.getWorldFolder("world"));
+    assertNull(modAccessor.getWorldFolder(null));
+    assertFalse(modAccessor.getWorldNames().isEmpty());
+    assertSame(modAccessor.dispatchingWorldEventHook(), modAccessor.getWorldEventHook());
+
+    UUID caller = UUID.randomUUID();
+    CallerLocation loc = new CallerLocation("world", 10, 64, -20);
+    modAccessor.recordCallerLocation(caller, loc);
+    assertEquals(loc, modAccessor.resolveCallerLocation(caller));
+    assertNull(modAccessor.resolveCallerLocation(null));
+
+    assertNull(modAccessor.getChunkData("world", 1, 2, "trees"));
+    modAccessor.setChunkData("world", 1, 2, "trees", "oak:10,64,20");
+    assertEquals("oak:10,64,20", modAccessor.getChunkData("world", 1, 2, "trees"));
+    modAccessor.updateChunkData("world", 1, 2, "trees", prev -> prev + ";birch:12,64,22");
+    assertEquals("oak:10,64,20;birch:12,64,22", modAccessor.getChunkData("world", 1, 2, "trees"));
+    modAccessor.setChunkData("world", 1, 2, "trees", "");
+    assertNull(modAccessor.getChunkData("world", 1, 2, "trees"));
+
+    AtomicInteger runs = new AtomicInteger();
+    modAccessor.scheduleRepeatingTask(runs::incrementAndGet, 1L, 2L);
+    modAccessor.tickScheduledTasks();
+    assertEquals(0, runs.get());
+    modAccessor.tickScheduledTasks();
+    assertEquals(1, runs.get());
+    modAccessor.tickScheduledTasks();
+    assertEquals(1, runs.get());
+    modAccessor.tickScheduledTasks();
+    assertEquals(2, runs.get());
+  }
+
+  private static class StubAccessor implements ServerAccessor {
+    private final String platform;
+    private final Integer version;
+    private final List<String> messages = new ArrayList<>();
+
+    private StubAccessor(String platform, Integer version) {
+      this.platform = platform;
+      this.version = version;
+    }
+
+    @Override
+    public String getServerVersion() {
+      return "test";
+    }
+
+    @Override
+    public String getPlatform() {
+      return platform;
+    }
+
+    @Override
+    public Integer getServerIntVersion() {
+      return version;
+    }
+
+    @Override
+    public void log(Level level, String message) {
+      messages.add(level.getName() + ":" + message);
+    }
+
+    @Override
+    public void log(Level level, String message, Throwable throwable) {
+      messages.add(level.getName() + ":" + message);
+    }
+  }
+}

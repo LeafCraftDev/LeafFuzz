@@ -1,0 +1,22 @@
+repositories {
+    // Brigadier is published on Mojang's libraries Maven; the Fabric
+    // Maven mirror in the root build.gradle's allprojects { } block also
+    // resolves it. This explicit entry keeps :commands-api buildable
+    // even if the Fabric Maven mirror lags behind.
+    maven {
+        name = 'Minecraft Libraries'
+        url  = 'https://libraries.minecraft.net/'
+    }
+}
+
+dependencies {
+    // commands-api-ADR-001 — Brigadier Bridge. compileOnly so consumers that
+    // provide Brigadier at runtime (e.g. Fabric, NeoForge) resolve it via
+    // the platform, while pure Java consumers do not force a runtime dependency.
+    compileOnly 'com.mojang:brigadier:1.2.9'
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+    testCompileOnly 'org.jetbrains:annotations:24.1.0'
+
+    // Brigadier needed at test runtime to exercise the adapter.
+    testImplementation 'com.mojang:brigadier:1.2.9'
+}

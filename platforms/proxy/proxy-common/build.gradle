@@ -19,7 +19,7 @@ base {
 
 dependencies {
     api project(':rtp-api')
-    api "io.github.dailystruggle:database-api:${rootProject.version}"
+    api project(':database-api')
     compileOnly 'org.slf4j:slf4j-api:2.0.12'
     testImplementation 'org.slf4j:slf4j-api:2.0.12'
     testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.12'

@@ -1,7 +1,6 @@
 package io.github.dailystruggle.rtp.neoforge.effects.local;
 
 import io.github.dailystruggle.effectsapi.common.Effect;
-import io.github.dailystruggle.rtp.neoforge.player.NeoForgeRTPPlayer;
 import net.minecraft.core.particles.ParticleOptions;
 import net.minecraft.core.particles.ParticleType;
 import net.minecraft.core.particles.ParticleTypes;
@@ -84,7 +83,7 @@ public class NeoForgeParticleEffect extends Effect<NeoForgeParticleKeys> {
         double py = player.getY() + 1.0;
         double pz = player.getZ();
 
-        ServerLevel level = NeoForgeRTPPlayer.resolveServerLevel(player);
+        ServerLevel level = (ServerLevel) player.level();
         if (level == null) return false;
         if (!invokeSendParticlesTargeted(level, player, opts, px, py, pz, clampedCount, dx, dy, dz, speed)) {
             invokeSendParticles(level, opts, px, py, pz, clampedCount, dx, dy, dz, speed);

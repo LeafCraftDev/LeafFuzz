@@ -2,7 +2,7 @@ name: Java CI with Gradle
 
 on:
   push:
-    branches: [ V3, V2, V1 ]
+    branches: [ main, V3, V2, V1 ]
     paths-ignore:
       - 'docs/**'
       - 'resource/LeafRTP/docs/**'
@@ -20,7 +20,7 @@ on:
   # No paths-ignore on pull_request: `ci-ok` must report on every PR, or a
   # required check stays "Expected". Docs-only PRs get scope `none` instead.
   pull_request:
-    branches: [ V3, V2, V1 ]
+    branches: [ main, V3, V2, V1 ]
   workflow_dispatch:
 
 concurrency:
@@ -178,7 +178,7 @@ jobs:
     uses: ./.github/workflows/gradle-set.yml
     with:
       set: core
-      tasks: ${{ needs.changes.outputs.core_tasks }} ${{ needs.changes.outputs.scope == 'full' && 'checkBinaryCompatibility' || '' }}
+      tasks: ${{ needs.changes.outputs.core_tasks }} ${{ needs.changes.outputs.scope == 'full' && needs.changes.outputs.plugin_tasks != '' && 'checkBinaryCompatibility' || '' }}
 
   proxy:
     needs: [changes, core]
@@ -250,7 +250,7 @@ jobs:
   # addon/helper-only PRs (scope `leaf`); every merge to V1/V2/V3 builds it.
   plugin:
     needs: [changes, core, proxy, bukkit, fabric, neoforge, addons]
-    if: ${{ !cancelled() && needs.changes.outputs.plugin == 'true' && needs.changes.outputs.scope == 'full' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    if: ${{ !cancelled() && needs.changes.outputs.plugin == 'true' && needs.changes.outputs.plugin_tasks != '' && needs.changes.outputs.scope == 'full' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     uses: ./.github/workflows/gradle-set.yml
     with:
       set: plugin

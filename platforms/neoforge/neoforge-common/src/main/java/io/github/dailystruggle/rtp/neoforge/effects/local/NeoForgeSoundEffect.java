@@ -1,7 +1,6 @@
 package io.github.dailystruggle.rtp.neoforge.effects.local;
 
 import io.github.dailystruggle.effectsapi.common.Effect;
-import io.github.dailystruggle.rtp.neoforge.player.NeoForgeRTPPlayer;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
@@ -91,7 +90,7 @@ public class NeoForgeSoundEffect extends Effect<NeoForgeSoundKeys> {
                 player.getX() + dx, player.getY() + dy, player.getZ() + dz, volume, pitch)) return true;
         // Last resort: level broadcast. Resolve the level via the
         // mapping-agnostic NeoForge resolver (Entity#level() drifts on 1.21.11).
-        ServerLevel level = NeoForgeRTPPlayer.resolveServerLevel(player);
+        ServerLevel level = (ServerLevel) player.level();
         if (level == null) return false;
         invokePlaySound(level, player.getX() + dx, player.getY() + dy, player.getZ() + dz,
                 sound, SoundSource.MASTER, volume, pitch);
@@ -169,7 +168,7 @@ public class NeoForgeSoundEffect extends Effect<NeoForgeSoundKeys> {
             Object soundArg = SOUND_PACKET_HOLDER ? BuiltInRegistries.SOUND_EVENT.wrapAsHolder(sound) : sound;
             Object packet = SOUND_PACKET_HAS_SEED
                     ? ctor.newInstance(soundArg, source, x, y, z, volume, pitch,
-                            ((ServerLevel) NeoForgeRTPPlayer.resolveServerLevel(player)).getRandom().nextLong())
+                            ((ServerLevel) player.level()).getRandom().nextLong())
                     : ctor.newInstance(soundArg, source, x, y, z, volume, pitch);
             Object conn = CONNECTION_FIELD.get(player);
             if (conn == null) return false;

@@ -1179,6 +1179,10 @@ def main(argv=None):
         parser.error("--stdout needs --target")
 
     selected_product = "all" if args.all else args.product
+    if selected_product is None and args.source is None and not SOURCE.is_file():
+        available = [pid for pid, spec in PRODUCTS.items() if spec.source.is_file()]
+        if len(available) == 1:
+            selected_product = available[0]
     if selected_product is not None and args.source is None:
         product_ids = list(PRODUCTS.keys()) if selected_product == "all" else [selected_product]
         for pid in product_ids:

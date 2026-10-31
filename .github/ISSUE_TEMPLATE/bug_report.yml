@@ -20,9 +20,9 @@ body:
           required: true
         - label: I searched **open *and* closed** issues for duplicates.
           required: true
-        - label: I reproduced on the latest RTP release.
+        - label: I reproduced on the latest LeafFuzz release.
           required: true
-        - label: I reproduced with RTP alone (no other plugins), or I explain below why that was not possible.
+        - label: I reproduced with LeafFuzz alone (no other plugins), or I explain below why that was not possible.
           required: true
         - label: I agree to the [Code of Conduct](../../CODE_OF_CONDUCT.md).
           required: true
@@ -55,7 +55,7 @@ body:
     id: plugin-version
     attributes:
       label: Plugin version
-      description: Output of `/rtp version`.
+      description: Output of `/fuzz test`.
       placeholder: "e.g. 3.0.0-beta.1"
     validations:
       required: true
@@ -81,7 +81,7 @@ body:
         A [spark](https://spark.lucko.me/) profile link covering the problem window
         (`/spark profiler --timeout 60`, then paste the upload URL). Required for any
         performance, lag, TPS/MSPT, or "server hangs" report so the cost can be attributed
-        to a real frame (RTP tasks appear as `rtp_pipeline_attempt`, `rtp_cache_generator`,
+        to a real frame (LeafFuzz tasks appear as `rtp_pipeline_attempt`, `rtp_cache_generator`,
         `rtp_scan_crawler`, etc.). Put `N/A - not a performance issue` if this is a purely
         functional bug.
       placeholder: "https://spark.lucko.me/..."
@@ -130,11 +130,11 @@ body:
     attributes:
       label: Required validation
       options:
-        - label: I have read the docs (https://dailystruggle.github.io/RTP/) and the FAQ.
+        - label: I have read the docs (https://dailystruggle.github.io/LeafFuzz/) and the FAQ.
           required: true
         - label: I have verified this is not a configuration mismatch.
           required: true
-        - label: I have confirmed this issue persists on the latest build of RTP.
+        - label: I have confirmed this issue persists on the latest build of LeafFuzz.
           required: true
         - label: I understand that incomplete reports will be closed immediately.
           required: true

@@ -53,14 +53,14 @@ dependencies {
     //     and is fully loadable from this Java 25 module's runtime.
     api project(':rtp-api')
     api project(':rtp-core')
-    api "io.github.dailystruggle:commands-api:${rootProject.version}"
+    api project(':commands-api')
     api project(':fabric:fabric-common')
     // ADR-009 step 4 -- unobf carrier of NM-typed common surfaces (FabricEffectsHandlerUnobf,
     // FabricRTP{World,Chunk,Player}Unobf). Edge is `api` because v26.x adapters call into
     // these types directly from Mojmap-typed shims (see V26_1_R1FabricVersionAdapter#installEffectsWiring).
     api project(':fabric:fabric-common-unobf')
     // See V26_1_R1FabricEffectDispatchers -- Loom-compiled effect dispatchers.
-    compileOnly "io.github.dailystruggle:effects-api:${rootProject.version}"
+    compileOnly project(':effects-api')
     // ADR-006 amendment 2026-05-09 -- unobf carrier of NM-typed effect runtime.
     compileOnly project(':effects-api:effects-api-fabric-unobf')
 }

@@ -1,0 +1,564 @@
+package io.github.dailystruggle.effectsapi.fabric_unobf;
+
+import io.github.dailystruggle.effectsapi.common.effects.GlideKeepAlive;
+import io.github.dailystruggle.effectsapi.common.spi.HandleProvider;
+import io.github.dailystruggle.effectsapi.common.spi.LocationHandle;
+import io.github.dailystruggle.effectsapi.common.spi.PlayerHandle;
+import io.github.dailystruggle.server.api.ServerAccessors;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.phys.Vec3;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.core.particles.ParticleOptions;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
+import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
+import net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket;
+
+import java.util.UUID;
+import java.util.Map;
+
+/**
+ * Mojmap-unobfuscated counterpart of {@code io.github.dailystruggle.rtp.fabric.effects.FabricHandles}.
+ *
+ * <p>The shared {@code rtp.fabric.effects.FabricHandles} lives in the obf
+ * {@code :rtp-fabric:rtp-fabric-common} module, which Loom remaps to <em>intermediary</em>
+ * names (e.g. {@code net.minecraft.server.level.ServerPlayer} -&gt;
+ * {@code net.minecraft.class_3222}). Those aliases exist on a 1.20/1.21
+ * Fabric runtime (the loader remaps intermediary -&gt; runtime at load) but
+ * <em>not</em> on the deobfuscated MC 26.x runtime, so registering that
+ * provider and calling {@code wrapPlayer} there raises
+ * {@link NoClassDefFoundError} ({@code net/minecraft/class_3222}) the instant
+ * a common effect (SOUND / PARTICLE / ...) fires.
+ *
+ * <p>This class is compiled by the unobf module's Loom plugin with <em>no</em>
+ * {@code mappings} step, so its bytecode names Mojang names natively and links
+ * cleanly on the deobf 26.x runtime. It is registered with
+ * {@link ServerAccessors} by {@link FabricEffectsInitializer#registerAll()} in
+ * place of the intermediary {@code FabricHandles}.
+ */
+@SuppressWarnings({"deprecation", "resource"})
+public final class FabricHandlesUnobf implements HandleProvider {
+    private static final FabricHandlesUnobf INSTANCE = new FabricHandlesUnobf();
+
+    private FabricHandlesUnobf() {}
+
+    public static void register() {
+        ServerAccessors.setEffectAccessor(INSTANCE);
+    }
+
+    @Override
+    public @Nullable PlayerHandle wrapPlayer(@NotNull Object player) {
+        if (player instanceof ServerPlayer) return new PlayerWrapper((ServerPlayer) player);
+        return null;
+    }
+
+    @Override
+    public @Nullable LocationHandle wrapLocation(@NotNull Object location) {
+        if (location instanceof Vec3) return new LocationWrapper((Vec3) location, "unknown");
+        if (location instanceof ServerPlayer) return wrapLocation((ServerPlayer) location);
+        return null;
+    }
+
+    @SuppressWarnings("java:S3077") // Volatile reference publication for server handle
+    private static volatile net.minecraft.server.MinecraftServer cachedServer;
+
+    public static void setServer(net.minecraft.server.MinecraftServer server) {
+        cachedServer = server;
+    }
+
+    static @Nullable net.minecraft.server.MinecraftServer server() {
+        net.minecraft.server.MinecraftServer s = FabricEffectRuntimeUnobf.server();
+        return s != null ? s : cachedServer;
+    }
+
+    @Override
+    public void dispatchConsoleCommand(@NotNull String command) {
+        net.minecraft.server.MinecraftServer server = server();
+        if (server != null) {
+            server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), command));
+        }
+    }
+
+    @Override
+    public void dispatchPlayerCommand(@NotNull PlayerHandle player, @NotNull String command) {
+        player.performCommand(command);
+    }
+
+    public static PlayerHandle wrap(@NotNull ServerPlayer player) {
+        return new PlayerWrapper(player);
+    }
+
+    public static LocationHandle wrap(@NotNull Vec3 location, @NotNull String worldName) {
+        return new LocationWrapper(location, worldName);
+    }
+
+    public static LocationHandle wrapLocation(@NotNull ServerPlayer player) {
+        return new LocationWrapper(player.position(),
+                ((ServerLevel) player.level()).dimension().identifier().toString());
+    }
+
+    /**
+     * Extracts a Fabric {@link Vec3} from a target object.
+     */
+    public static @Nullable Vec3 unwrapLocation(@Nullable Object target) {
+        if (target instanceof LocationHandle lh) {
+            return (Vec3) lh.platformLocation();
+        }
+        if (target instanceof PlayerWrapper pw) {
+            return pw.player().position();
+        }
+        if (target instanceof ServerPlayer) {
+            return ((ServerPlayer) target).position();
+        }
+        if (target instanceof Vec3) {
+            return (Vec3) target;
+        }
+        return null;
+    }
+
+    private record PlayerWrapper(@NotNull ServerPlayer player) implements PlayerHandle {
+        @Override
+        public @NotNull UUID uuid() {
+            return player.getUUID();
+        }
+
+        @Override
+        public @NotNull String name() {
+            // authlib's GameProfile is a record on MC 26.1+ (component accessor
+            // name()); earlier versions exposed getName(). Mirror the resilient
+            // resolution used by FabricRTPPlayerUnobf so this links across drift.
+            try {
+                return player.getGameProfile().name();
+            } catch (NoSuchMethodError | NoSuchFieldError ignored) {
+                // record-shape mismatch - fall through.
+            } catch (Throwable ignored) {
+                // defensive
+            }
+            return player.getName().getString();
+        }
+
+        @Override
+        public void playSound(Object type, float volume, float pitch, double dx, double dy, double dz) {
+            SoundEvent sound = null;
+            if (type instanceof SoundEvent se) {
+                sound = se;
+            } else if (type != null) {
+                try {
+                    Object parsed = new FabricValueCoercer().parse(
+                            io.github.dailystruggle.effectsapi.common.spi.TypeKey.SOUND, type.toString());
+                    if (parsed instanceof SoundEvent se) sound = se;
+                } catch (RuntimeException _) {
+                }
+            }
+            if (sound == null) return;
+            player.connection.send(new net.minecraft.network.protocol.game.ClientboundSoundPacket(
+                    net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT.wrapAsHolder(sound),
+                    SoundSource.PLAYERS,
+                    player.getX() + dx, player.getY() + dy, player.getZ() + dz,
+                    volume, pitch, player.getRandom().nextLong()
+            ));
+        }
+
+        @Override
+        public void spawnParticle(Object type, int count, double dx, double dy, double dz, double speed) {
+            ParticleOptions particle = null;
+            if (type instanceof ParticleOptions po) {
+                particle = po;
+            } else if (type != null) {
+                try {
+                    Object parsed = new FabricValueCoercer().parse(
+                            io.github.dailystruggle.effectsapi.common.spi.TypeKey.PARTICLE, type.toString());
+                    if (parsed instanceof ParticleOptions po) particle = po;
+                } catch (RuntimeException _) {
+                }
+            }
+            if (particle == null) return;
+            // 26.x targeted overload: 2 booleans (longDistance, overrideLimiter).
+            player.level().sendParticles(player, particle, false, false,
+                    player.getX() + dx, player.getY() + dy, player.getZ() + dz,
+                    count, 0, 0, 0, speed);
+        }
+
+        @Override
+        public void applyPotionEffect(Object type, int duration, int amplifier, boolean ambient, boolean particles, boolean icon) {
+            MobEffect effect = null;
+            if (type instanceof MobEffect me) {
+                effect = me;
+            } else if (type != null) {
+                try {
+                    Object parsed = new FabricValueCoercer().parse(
+                            io.github.dailystruggle.effectsapi.common.spi.TypeKey.POTION_EFFECT, type.toString());
+                    if (parsed instanceof MobEffect me) effect = me;
+                } catch (RuntimeException _) {
+                }
+            }
+            if (effect == null) return;
+            player.addEffect(new MobEffectInstance(
+                    net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT.wrapAsHolder(effect),
+                    duration, amplifier, ambient, particles, icon));
+        }
+
+        @Override
+        public void sendTitle(String title, String subtitle, int fadeIn, int stay, int fadeOut) {
+            player.connection.send(new ClientboundSetTitlesAnimationPacket(fadeIn, stay, fadeOut));
+            if (title != null && !title.isEmpty()) {
+                player.connection.send(new ClientboundSetTitleTextPacket(Component.literal(title)));
+            }
+            if (subtitle != null && !subtitle.isEmpty()) {
+                player.connection.send(new ClientboundSetSubtitleTextPacket(Component.literal(subtitle)));
+            }
+        }
+
+        @Override
+        public void playNote(Object instrument, int tone) {
+            SoundEvent sound = resolveNoteSound(instrument);
+            if (sound == null) {
+                io.github.dailystruggle.effectsapi.common.EffectFactory.reportUnsupportedPrimitive(
+                        "Fabric-26.x", "NOTE", "unknown note instrument: " + instrument);
+                return;
+            }
+            int clamped = Math.clamp(tone, 0, 24);
+            float pitch = (float) Math.pow(2.0D, (clamped - 12) / 12.0D);
+            playSound(sound, 3.0f, pitch, 0.0, 0.0, 0.0);
+        }
+
+        @Override
+        public void setGliding(boolean gliding) {
+            if (gliding) player.startFallFlying();
+            else player.stopFallFlying();
+        }
+
+        @Override
+        public void dropInventory(@Nullable LocationHandle dropLocation) {
+            net.minecraft.server.MinecraftServer server = ((ServerLevel) player.level()).getServer();
+            Runnable task = () -> {
+                try {
+                    player.getInventory().dropAll();
+                } catch (Throwable ignored) {}
+            };
+            if (server != null) {
+                server.execute(task);
+            } else {
+                task.run();
+            }
+        }
+
+        @Override
+        public void dropExperience(@Nullable LocationHandle dropLocation) {
+            net.minecraft.server.MinecraftServer server = ((ServerLevel) player.level()).getServer();
+            Runnable task = () -> {
+                try {
+                    int pointsToDrop = Math.min(player.experienceLevel * 7, 100);
+                    if (pointsToDrop > 0) {
+                        net.minecraft.world.phys.Vec3 pos = player.position();
+                        if (dropLocation != null) {
+                            pos = new net.minecraft.world.phys.Vec3(dropLocation.doubleX(), dropLocation.doubleY(), dropLocation.doubleZ());
+                        }
+                        net.minecraft.world.entity.ExperienceOrb.award((ServerLevel) player.level(), pos, pointsToDrop);
+                    }
+                    player.experienceLevel = 0;
+                    player.experienceProgress = 0.0f;
+                    player.totalExperience = 0;
+                } catch (Throwable ignored) {}
+            };
+            if (server != null) {
+                server.execute(task);
+            } else {
+                task.run();
+            }
+        }
+
+        @Override
+        public void kill(boolean setBed, @Nullable LocationHandle respawnLocation) {
+            net.minecraft.server.MinecraftServer server = ((ServerLevel) player.level()).getServer();
+            Runnable task = () -> {
+                try {
+                    if (respawnLocation != null) {
+                        try {
+                            ServerLevel targetLevel = (ServerLevel) player.level();
+                            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> targetDim = targetLevel.dimension();
+                            if (server != null) {
+                                for (ServerLevel sl : server.getAllLevels()) {
+                                    if (sl.dimension().identifier().toString().equals(respawnLocation.worldName())) {
+                                        targetDim = sl.dimension();
+                                        break;
+                                    }
+                                }
+                            }
+                            net.minecraft.core.BlockPos pos = new net.minecraft.core.BlockPos(
+                                    respawnLocation.x(), respawnLocation.y(), respawnLocation.z());
+                            for (java.lang.reflect.Method m : ServerPlayer.class.getMethods()) {
+                                if (!m.getName().equals("setRespawnPosition")) continue;
+                                Class<?>[] pt = m.getParameterTypes();
+                                if (pt.length == 5) {
+                                    m.invoke(player, targetDim, pos, 0.0f, setBed, false);
+                                    break;
+                                }
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                    player.kill((ServerLevel) player.level());
+                } catch (Throwable ignored) {}
+            };
+            if (server != null) {
+                server.execute(task);
+            } else {
+                task.run();
+            }
+        }
+
+        @Override
+        public void kill() {
+            kill(true, null);
+        }
+
+        @Override
+        public void performCommand(@NotNull String command) {
+            net.minecraft.server.MinecraftServer server = ((ServerLevel) player.level()).getServer();
+            if (server != null) {
+                server.execute(() -> server.getCommands().performPrefixedCommand(player.createCommandSourceStack(), command));
+            }
+        }
+
+        @Override
+        public void spawnFirework(Map<String, Object> data) {
+            try {
+                ServerLevel level = player.level();
+                if (!spawnFireworkAt(level, player.getX(), player.getY(), player.getZ(), data)) {
+                    io.github.dailystruggle.effectsapi.common.EffectFactory.reportUnsupportedPrimitive(
+                            "Fabric-26.x", "FIREWORK", "firework spawn unavailable on active Fabric 26.x runtime");
+                }
+            } catch (Throwable t) {
+                io.github.dailystruggle.effectsapi.common.EffectFactory.reportUnsupportedPrimitive(
+                        "Fabric-26.x", "FIREWORK", t.getClass().getSimpleName() + ": " + t.getMessage());
+            }
+        }
+
+        @Override
+        public void startGlide(int relativeLift, int maxY, int landingTimeoutTicks,
+                               boolean allowFireworks, boolean placeOnShutdown, String platformMaterial) {
+            ServerLevel level = (ServerLevel) player.level();
+            double toY = Math.min(player.getY() + relativeLift, maxY);
+            try {
+                // The 6-arg ServerPlayer#teleportTo(ServerLevel,double,double,
+                // double,float,float) is missing on some 26.x patch releases
+                // (same intermediary drift worked around in FabricRTPPlayerUnobf);
+                // attempt it reflectively, then fall back to a same-dimension
+                // packet teleport.
+                boolean moved = false;
+                try {
+                    java.lang.reflect.Method m = ServerPlayer.class.getMethod(
+                            "teleportTo", ServerLevel.class,
+                            double.class, double.class, double.class, float.class, float.class);
+                    m.invoke(player, level, player.getX(), toY, player.getZ(),
+                            player.getYRot(), player.getXRot());
+                    moved = true;
+                } catch (NoSuchMethodException ignored) {
+                    // fall through to packet teleport
+                }
+                if (!moved && ((ServerLevel) player.level()) == level) {
+                    player.connection.teleport(player.getX(), toY, player.getZ(),
+                            player.getYRot(), player.getXRot());
+                }
+                player.startFallFlying(); // begin gliding
+                player.hurtMarked = true;
+            } catch (Throwable t) {
+                java.util.logging.Logger.getLogger(FabricHandlesUnobf.class.getName())
+                        .log(java.util.logging.Level.WARNING, t, () -> "GLIDE lift failed for " + player.getUUID());
+                return;
+            }
+            // Vanilla drops the glide flag next tick without an elytra; the keep-alive (driven from
+            // END_SERVER_TICK) holds it until landing and enforces landingTimeoutTicks.
+            GlideKeepAlive.track(new FabricGliderUnobf(player), landingTimeoutTicks);
+        }
+
+        @Override
+        public String toString() {
+            return "FabricPlayerHandle{name=" + name() + ", uuid=" + uuid() + "}";
+        }
+    }
+
+    private record LocationWrapper(@NotNull Vec3 location, @NotNull String worldName) implements LocationHandle {
+        @Override
+        public int x() {
+            return (int) Math.floor(location.x);
+        }
+
+        @Override
+        public int y() {
+            return (int) Math.floor(location.y);
+        }
+
+        @Override
+        public int z() {
+            return (int) Math.floor(location.z);
+        }
+
+        @Override
+        public double doubleX() {
+            return location.x;
+        }
+
+        @Override
+        public double doubleY() {
+            return location.y;
+        }
+
+        @Override
+        public double doubleZ() {
+            return location.z;
+        }
+
+        @Override
+        public @NotNull String worldName() {
+            return worldName;
+        }
+
+        @Override
+        public @NotNull Object platformLocation() {
+            return location;
+        }
+
+        @Override
+        public void playSound(Object type, float volume, float pitch) {
+            ServerLevel level = resolveLevel(worldName);
+            if (level == null || !(type instanceof SoundEvent sound)) {
+                io.github.dailystruggle.effectsapi.common.EffectFactory.reportUnsupportedPrimitive(
+                        "Fabric-26.x", "SOUND", "location sound playback unavailable for world=" + worldName);
+                return;
+            }
+            level.playSound(null, location.x, location.y, location.z, sound, SoundSource.PLAYERS, volume, pitch);
+        }
+
+        @Override
+        public void spawnParticle(Object type, int count, double dx, double dy, double dz, double speed) {
+            ServerLevel level = resolveLevel(worldName);
+            if (level == null || !(type instanceof ParticleOptions opts)) {
+                io.github.dailystruggle.effectsapi.common.EffectFactory.reportUnsupportedPrimitive(
+                        "Fabric-26.x", "PARTICLE", "location particle spawn unavailable for world=" + worldName);
+                return;
+            }
+            int clampedCount = Math.clamp(count, 1, 256);
+            level.sendParticles(opts, location.x, location.y, location.z, clampedCount, dx, dy, dz, speed);
+        }
+
+        @Override
+        public void spawnFirework(Map<String, Object> data) {
+            ServerLevel level = resolveLevel(worldName);
+            if (!spawnFireworkAt(level, location.x, location.y, location.z, data)) {
+                io.github.dailystruggle.effectsapi.common.EffectFactory.reportUnsupportedPrimitive(
+                        "Fabric-26.x", "FIREWORK", "location firework spawn unavailable for world=" + worldName);
+            }
+        }
+
+        @Override
+        public void playNote(Object instrument, int tone) {
+            SoundEvent sound = resolveNoteSound(instrument);
+            if (sound == null) {
+                io.github.dailystruggle.effectsapi.common.EffectFactory.reportUnsupportedPrimitive(
+                        "Fabric-26.x", "NOTE", "unknown note instrument: " + instrument);
+                return;
+            }
+            int clamped = Math.clamp(tone, 0, 24);
+            float pitch = (float) Math.pow(2.0D, (clamped - 12) / 12.0D);
+            playSound(sound, 3.0f, pitch);
+        }
+
+        @Override
+        public String toString() {
+            return "FabricLocationHandle{world=" + worldName + ", x=" + x() + ", y=" + y() + ", z=" + z() + "}";
+        }
+    }
+
+    private static @Nullable ServerLevel resolveLevel(@Nullable String worldName) {
+        net.minecraft.server.MinecraftServer s = server();
+        if (s == null) return null;
+        if (worldName != null && !worldName.isEmpty() && !"unknown".equals(worldName)) {
+            for (ServerLevel sl : s.getAllLevels()) {
+                if (worldName.equals(sl.dimension().identifier().toString())) {
+                    return sl;
+                }
+            }
+        }
+        return s.overworld();
+    }
+
+    private static @Nullable SoundEvent resolveNoteSound(@Nullable Object instrument) {
+        if (instrument instanceof SoundEvent se) return se;
+        String raw = instrument == null ? "harp" : instrument.toString().trim().toLowerCase(java.util.Locale.ROOT);
+        String id = switch (raw) {
+            case "piano", "harp" -> "minecraft:block.note_block.harp";
+            case "bass_drum", "basedrum" -> "minecraft:block.note_block.basedrum";
+            case "snare_drum", "snare" -> "minecraft:block.note_block.snare";
+            case "sticks", "hat" -> "minecraft:block.note_block.hat";
+            case "bass_guitar", "bass" -> "minecraft:block.note_block.bass";
+            case "flute" -> "minecraft:block.note_block.flute";
+            case "bell" -> "minecraft:block.note_block.bell";
+            case "guitar" -> "minecraft:block.note_block.guitar";
+            case "chime" -> "minecraft:block.note_block.chime";
+            case "xylophone" -> "minecraft:block.note_block.xylophone";
+            case "iron_xylophone" -> "minecraft:block.note_block.iron_xylophone";
+            case "cow_bell" -> "minecraft:block.note_block.cow_bell";
+            case "didgeridoo" -> "minecraft:block.note_block.didgeridoo";
+            case "bit" -> "minecraft:block.note_block.bit";
+            case "banjo" -> "minecraft:block.note_block.banjo";
+            case "pling" -> "minecraft:block.note_block.pling";
+            default -> raw.indexOf(':') >= 0 ? raw : "minecraft:block.note_block." + raw;
+        };
+        try {
+            return FabricRegistryCompat.resolve(
+                    net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT,
+                    net.minecraft.resources.Identifier.tryParse(id));
+        } catch (Throwable _) {
+            return null;
+        }
+    }
+
+    private static boolean spawnFireworkAt(@Nullable ServerLevel level, double x, double y, double z,
+                                           @Nullable Map<String, Object> data) {
+        if (level == null) return false;
+        int numFireworks = 1;
+        int power = 0;
+        double dx = 0.0, dy = 1.0, dz = 0.0;
+        if (data != null) {
+            Object o = data.get("NUMBER");
+            if (o instanceof Number n) numFireworks = Math.clamp(n.intValue(), 1, 8);
+            o = data.get("POWER");
+            if (o instanceof Number n) power = Math.clamp(n.intValue(), 0, 3);
+            o = data.get("DX");
+            if (o instanceof Number n) dx = n.doubleValue();
+            o = data.get("DY");
+            if (o instanceof Number n) dy = n.doubleValue();
+            o = data.get("DZ");
+            if (o instanceof Number n) dz = n.doubleValue();
+        }
+        try {
+            net.minecraft.world.item.ItemStack stack =
+                    new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.FIREWORK_ROCKET);
+            boolean anyAdded = false;
+            for (int i = 0; i < numFireworks; i++) {
+                net.minecraft.world.entity.projectile.FireworkRocketEntity rocket =
+                        new net.minecraft.world.entity.projectile.FireworkRocketEntity(level, x, y + 1.0, z, stack.copy());
+                if (dx != 0.0 || dy != 1.0 || dz != 0.0) {
+                    rocket.setDeltaMovement(dx, dy, dz);
+                }
+                if (level.addFreshEntity(rocket)) {
+                    anyAdded = true;
+                }
+                if (power == 0) {
+                    level.broadcastEntityEvent(rocket, (byte) 17);
+                    rocket.discard();
+                }
+            }
+            return anyAdded;
+        } catch (Throwable _) {
+            return false;
+        }
+    }
+}

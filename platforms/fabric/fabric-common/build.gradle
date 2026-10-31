@@ -56,10 +56,10 @@ dependencies {
     api project(':rtp-core')
     // commands-api-ADR-001 -- Brigadier Bridge. The bridge classes live in :commands-api;
     // this module supplies the Fabric-side registration shim (RTPCmdFabric).
-    api "io.github.dailystruggle:commands-api:${rootProject.version}"
+    api project(':commands-api')
     // ADR-016 -- anvil pre-filter. Platform-neutral .mca decoder used by
     // FabricRTPWorld#probeChunkColumn so the ScanTask refill loop can serve
     // most candidates without a synchronous tick-thread chunk generation.
     // See rtp-fabric-ADR-005-anvil-prefilter-parity.md.
-    api "io.github.dailystruggle:anvil-api:${rootProject.version}"
+    api project(':anvil-api')
 }

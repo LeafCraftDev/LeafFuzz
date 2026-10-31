@@ -1,0 +1,27 @@
+// tags-api -- platform-neutral Minecraft block-tag JSON resolver and ADR-017 safety-list compiler.
+// Per docs/adr/ADR-017, this module shall NOT depend on:
+//   - any RTP module (rtp-api, rtp-core, commands-api, effects-api, platform adapters);
+//   - any platform package (org.bukkit.*, io.papermc.*, net.minecraft.*, net.fabricmc.*);
+//   - any third-party JSON library. Tag file JSON is trivially simple and is parsed
+//     by a hand-rolled reader to avoid a runtime dependency on Gson / Jackson and to
+//     prevent external schema drift from creeping in via dependency updates.
+
+plugins {
+    id 'java-library'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+    withJavadocJar()
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+}
+
+dependencies {
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+    testCompileOnly 'org.jetbrains:annotations:24.1.0'
+}

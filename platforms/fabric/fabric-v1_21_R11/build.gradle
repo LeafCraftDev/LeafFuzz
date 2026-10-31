@@ -46,7 +46,7 @@ dependencies {
 
     api project(':rtp-api')
     api project(':rtp-core')
-    api "io.github.dailystruggle:commands-api:${rootProject.version}"
+    api project(':commands-api')
     api project(':fabric:fabric-common')
     // V1_21_R11FabricEffectDispatchers registers Loom-compiled Sound /
     // Particle / Potion dispatchers on rtp-fabric-common's
@@ -54,5 +54,5 @@ dependencies {
     // version. compileOnly: effects-api is shaded into the rtp-plugin jar, so it
     // is on the runtime classpath there; using compileOnly here avoids
     // double-shading and keeps this submodule's own jar slim.
-    compileOnly "io.github.dailystruggle:effects-api:${rootProject.version}"
+    compileOnly project(':effects-api')
 }

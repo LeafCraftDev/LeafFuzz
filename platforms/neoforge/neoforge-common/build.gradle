@@ -53,17 +53,46 @@ neoForge {
     // No runs configured on common — the carriers own dev-launch run configs.
 }
 
+def hasRtpCore = findProject(':rtp-api') != null && findProject(':rtp-core') != null
+
+if (!hasRtpCore) {
+    sourceSets {
+        main {
+            java {
+                include 'io/github/dailystruggle/rtp/neoforge/effects/local/**'
+                include 'io/github/dailystruggle/rtp/neoforge/player/NeoForgeDefaultPermissions.java'
+                include 'io/github/dailystruggle/rtp/neoforge/player/NeoForgeMapSink.java'
+                include 'io/github/dailystruggle/rtp/neoforge/player/NeoForgeOnEventPermissions.java'
+                include 'io/github/dailystruggle/rtp/neoforge/tools/NeoForgeAnsiText.java'
+                include 'io/github/dailystruggle/rtp/neoforge/tools/NeoForgeLegacyText.java'
+                include 'io/github/dailystruggle/rtp/neoforge/tools/NeoForgeResourceIds.java'
+            }
+        }
+        test {
+            java {
+                exclude '**/*'
+            }
+        }
+    }
+}
+
 dependencies {
+    api project(':server-api')
+    api project(':effects-api')
     // Platform-free abstractions consumed by every NeoForge adapter class.
     // Reused 1:1 from the platform-neutral modules (NEOFORGE_NOTES.md section 3).
-    api project(':rtp-api')
-    api project(':rtp-core')
+    if (hasRtpCore) {
+        api project(':rtp-api')
+        api project(':rtp-core')
+    }
     // commands-api-ADR-001 — Brigadier Bridge. The bridge classes live in
     // :commands-api; this module supplies the NeoForge-side registration
     // trampoline (RegisterCommandsEvent), see NeoForgeCommandRegistrar.
-    api "io.github.dailystruggle:commands-api:${rootProject.version}"
+    api project(':commands-api')
     // ADR-016 — anvil pre-filter. Platform-neutral .mca decoder; same .mca
     // substrate as Fabric (NEOFORGE_NOTES.md section 3), reused unchanged.
-    api "io.github.dailystruggle:anvil-api:${rootProject.version}"
+    if (findProject(':anvil-api') != null) {
+        api project(':anvil-api')
+    }
     testImplementation 'com.mojang:brigadier:1.2.9'
 }

@@ -37,8 +37,8 @@ dependencies {
     // version-agnostic Fabric glue that defines FabricVersionAdapter.
     api project(':rtp-api')
     api project(':rtp-core')
-    api "io.github.dailystruggle:commands-api:${rootProject.version}"
+    api project(':commands-api')
     api project(':fabric:fabric-common')
     // See V1_20_R1FabricEffectDispatchers -- Loom-compiled effect dispatchers.
-    compileOnly "io.github.dailystruggle:effects-api:${rootProject.version}"
+    compileOnly project(':effects-api')
 }

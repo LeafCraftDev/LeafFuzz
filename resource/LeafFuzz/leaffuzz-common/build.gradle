@@ -18,15 +18,15 @@ repositories {
 }
 
 dependencies {
-    api "io.github.dailystruggle:server-api:${rootProject.version}"
-    api "io.github.dailystruggle:yaml-api:${rootProject.version}"
-    api "io.github.dailystruggle:units-api:${rootProject.version}"
-    api "io.github.dailystruggle:bit-api:${rootProject.version}"
-    api "io.github.dailystruggle:config-bit-api:${rootProject.version}"
-    api "io.github.dailystruggle:commands-api:${rootProject.version}"
-    api "io.github.dailystruggle:menu-api:${rootProject.version}"
-    api "io.github.dailystruggle:effects-api:${rootProject.version}"
-    api "io.github.dailystruggle:predict-api:${rootProject.version}"
+    api project(':server-api')
+    api project(':yaml-api')
+    api project(':units-api')
+    api project(':bit-api')
+    api project(':config-bit-api')
+    api project(':commands-api')
+    api project(':menu-api')
+    api project(':effects-api')
+    api project(':predict-api')
     api project(':helpers:stresstest-core')
     compileOnly 'com.mojang:brigadier:1.2.9'
 
