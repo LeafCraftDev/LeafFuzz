@@ -27,7 +27,7 @@ plugins {
 
 ext {
     minecraftVersion       = '26.2'
-    loaderVersion          = '0.19.2'
+    loaderVersion          = '0.20.1'
     fabricApiVersion       = '0.150.2+26.2'
     permissionsApiVersion  = '0.3.1'
 }

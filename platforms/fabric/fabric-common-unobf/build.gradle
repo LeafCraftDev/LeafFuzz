@@ -24,7 +24,7 @@ ext {
     // bytecode is forward-compatible with later deobf 26.x lines because
     // every consumer (rtp-fabric-v26_*_R1) ships its own pinned MC.
     minecraftVersion       = '26.1.2'
-    loaderVersion          = '0.18.4'
+    loaderVersion          = '0.20.1'
     fabricApiVersion       = '0.143.5+26.1'
     permissionsApiVersion  = '0.3.1'
 }
