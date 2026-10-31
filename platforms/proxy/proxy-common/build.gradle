@@ -28,7 +28,7 @@ dependencies {
     // host's database accessor pool (AbstractSQLDatabaseAccessor in rtp-core);
     // we never bundle them. H2 ships as test-only so SqlNetworkStateBindingH2Test
     // can exercise two-instance fan-out without a real DB.
-    testRuntimeOnly 'com.h2database:h2:2.2.224'
+    testRuntimeOnly 'com.h2database:h2:2.5.252'
     // ENTERPRISE_READINESS.md item 17: the transport/redis package is exercised
     // against a real Redis via Testcontainers (not mocks). The container-backed
     // tests are Docker-gated (RedisTestContainer.dockerAvailable) so a routine
