@@ -20,9 +20,9 @@ base {
 dependencies {
     api project(':rtp-api')
     api "io.github.dailystruggle:database-api:${rootProject.version}"
-    compileOnly 'org.slf4j:slf4j-api:2.0.12'
-    testImplementation 'org.slf4j:slf4j-api:2.0.12'
-    testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.12'
+    compileOnly 'org.slf4j:slf4j-api:2.0.20'
+    testImplementation 'org.slf4j:slf4j-api:2.0.20'
+    testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.20'
     // Phase 2e-SQL slice: SqlNetworkStateBinding uses JDBC + standard DataSource.
     // Production JDBC drivers (MySQL / Postgres) are supplied by the deploying
     // host's database accessor pool (AbstractSQLDatabaseAccessor in rtp-core);
