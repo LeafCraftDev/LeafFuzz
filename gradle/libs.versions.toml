@@ -48,7 +48,7 @@ jazzer = "0.30.0"
 
 # Build plugins.
 shadow = "8.3.8"
-spotless = "6.25.0"
+spotless = "8.10.4"
 japicmp = "0.4.5"
 cyclonedx = "2.0.0"
 sonarqube = "7.5.0.8588"
