@@ -597,7 +597,7 @@ public final class NeoForgeHandles implements HandleProvider {
         @Override
         public void spawnFirework(Map<String, Object> data) {
             onServer("FIREWORK", () -> {
-                ServerLevel level = resolvePlayerServerLevel(player);
+                ServerLevel level = (ServerLevel) player.level();
                 spawnFireworkAt(level, player.getX(), player.getY(), player.getZ(), data);
             });
         }
@@ -611,7 +611,7 @@ public final class NeoForgeHandles implements HandleProvider {
         public void startGlide(int relativeLift, int maxY, int landingTimeoutTicks,
                                boolean allowFireworks, boolean placeOnShutdown, String platformMaterial) {
             onServer("GLIDE", () -> {
-                ServerLevel level = resolvePlayerServerLevel(player);
+                ServerLevel level = (ServerLevel) player.level();
                 if (level == null) {
                     logInternal(Level.WARNING, "[RTP][NeoForge] GLIDE dropped for " + player.getUUID() + " (no level)", null);
                     return;
@@ -634,7 +634,7 @@ public final class NeoForgeHandles implements HandleProvider {
         public void dropExperience(@Nullable LocationHandle dropLocation) {
             onServer("DROP_EXP", () -> {
                 int points = Math.min(player.experienceLevel * 7, 100);
-                ServerLevel level = resolvePlayerServerLevel(player);
+                ServerLevel level = (ServerLevel) player.level();
                 if (points > 0 && level != null) {
                     Vec3 pos = dropLocation != null
                             ? new Vec3(dropLocation.doubleX(), dropLocation.doubleY(), dropLocation.doubleZ())
