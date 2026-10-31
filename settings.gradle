@@ -60,7 +60,7 @@ pluginManagement {
         // graph, since those lines change Gradle-compatibility guarantees.
         id 'fabric-loom'                       version '1.15.5'
         id 'net.fabricmc.fabric-loom'          version '1.15.5'
-        id 'net.fabricmc.fabric-loom-remap'    version '1.15.5'
+        id 'net.fabricmc.fabric-loom-remap'    version '1.19.3'
         // NeoForge ModDevGradle: pin the version once here so the default
         // NeoForge carriers (rtp-neoforge-common + rtp-neoforge-v1_21_R1, the
         // JDK-21 1.21.x line that ships in the unified jar) share a single
