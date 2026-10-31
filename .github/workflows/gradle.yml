@@ -27,6 +27,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+
 # Job graph (one job per project set, chained along project(':...') edges;
 # `changes` verifies the chain against the Gradle graph on every run):
 #
@@ -329,7 +334,7 @@ jobs:
             BASELINE="origin/$BASE_REF"
           else
             BASELINE="$BEFORE_SHA"
-            if [ -z "$BASELINE" ] || [ "$BASELINE" = "0000000000000000000000000000000000000000" ]; then
+            if [ -z "$BASELINE" ] || [ "$BASELINE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BASELINE}^{commit}" 2>/dev/null; then
               BASELINE="HEAD~1"
             fi
           fi

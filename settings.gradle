@@ -289,7 +289,7 @@ project(':bukkit:bukkit-common').projectDir      = file('platforms/bukkit/bukkit
 
 
 
-project(':fabric').projectDir                    = file('platforms/fabric')
+findProject(':fabric')?.projectDir                    = file('platforms/fabric')
 if (!excludeJdk25) {
     project(':fabric:fabric-common-unobf').projectDir = file('platforms/fabric/fabric-common-unobf')
 }
