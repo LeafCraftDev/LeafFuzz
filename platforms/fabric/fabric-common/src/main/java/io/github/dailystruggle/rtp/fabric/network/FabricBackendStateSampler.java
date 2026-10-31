@@ -1,0 +1,261 @@
+package io.github.dailystruggle.rtp.fabric.network;
+
+import io.github.dailystruggle.metrics.api.MetricsSnapshot;
+import io.github.dailystruggle.rtp.api.world.RTPWorld;
+import io.github.dailystruggle.rtp.common.RTP;
+import io.github.dailystruggle.rtp.common.metrics.CoreMetrics;
+import io.github.dailystruggle.rtp.common.network.BackendStateSampler;
+import io.github.dailystruggle.rtp.common.network.NetworkHooks;
+import io.github.dailystruggle.rtp.common.playerData.TeleportSessions;
+import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
+import io.github.dailystruggle.rtp.common.selection.ActiveSelection;
+import io.github.dailystruggle.rtp.common.selection.region.Region;
+import io.github.dailystruggle.rtp.proxy.common.spi.BackendHeartbeat;
+import io.github.dailystruggle.rtp.proxy.common.spi.BackendHeartbeat.PluginState;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Fabric implementation of {@link BackendStateSampler} (ADR-049 step 4 /
+ * rtp-fabric-ADR-013 backend parity). Structurally mirrors
+ * {@code BukkitBackendStateSampler}: it pulls TPS / MSPT / player count from
+ * the active {@link io.github.dailystruggle.metrics.api.MetricsBinding} via
+ * {@link CoreMetrics#instance()} and reads available regions from the active {@link RTP}
+ * instance.
+ *
+ * <p>The only platform-specific difference from the Bukkit sampler is loaded
+ * world enumeration: instead of {@code Bukkit.getWorlds()} this reads
+ * {@link io.github.dailystruggle.rtp.api.server.RTPServerAccessor#getRTPWorlds()},
+ * so the class itself carries no {@code net.minecraft.*} import and can live in
+ * {@code rtp-fabric-common} alongside the other carrier-agnostic Fabric glue.</p>
+ *
+ * <p>Installed onto {@link NetworkHooks#backendStateSamplerFactory()} by the Fabric mod
+ * entrypoint ({@code RTPFabricMod}); {@code NetworkModeBootstrap.boot(...)}
+ * invokes the factory with the {@code routing.lobbyMode} flag.</p>
+ */
+public final class FabricBackendStateSampler implements BackendStateSampler {
+
+    /** Schema version emitted into heartbeats; pinned by REQ-RTP-NET-009. */
+    private static final int SCHEMA_VERSION = 1;
+
+    /**
+     * Lobby-mode flag. When {@code true}, heartbeats publish an
+     * empty {@code regions} set and {@code acceptingRequests = false} so peers
+     * never select this backend as a cross-server destination.
+     */
+    private volatile boolean lobbyMode;
+
+    /** Default ctor. Lobby mode off. */
+    public FabricBackendStateSampler() {
+        this.lobbyMode = false;
+    }
+
+    /** {@code lobbyMode == true} flips the suppression described on {@link #lobbyMode}. */
+    public FabricBackendStateSampler(boolean lobbyMode) {
+        this.lobbyMode = lobbyMode;
+    }
+
+    /**
+     * Toggle lobby mode at runtime. Volatile write; the next heartbeat tick
+     * observes the new value.
+     */
+    public void setLobbyMode(boolean lobbyMode) {
+        this.lobbyMode = lobbyMode;
+    }
+
+    /** @return current lobby-mode flag. Visible for tests. */
+    public boolean isLobbyMode() {
+        return lobbyMode;
+    }
+
+    @Override
+    public BackendHeartbeat sample(String serverId) {
+        long now = System.currentTimeMillis();
+
+        // Metrics: best-effort. Before MetricsBindingDispatcher installs a real
+        // binding, CoreMetrics.instance() may report UNSAMPLED; coerce to 0 / -1 so the
+        // schema's NOT NULL columns are still satisfied.
+        double mspt;
+        int playerCount;
+        int softCap;
+        long heapUsed;
+        long heapMax;
+        try {
+            MetricsSnapshot s = CoreMetrics.instance().snapshot();
+            mspt = s == null || Double.isNaN(s.mspt) ? 0.0 : s.mspt;
+            playerCount = s == null ? 0 : s.playerCount;
+            softCap = s == null ? 0 : s.softCap;
+            heapUsed = s == null ? 0L : s.heapUsedBytes;
+            heapMax = s == null ? 0L : s.heapMaxBytes;
+        } catch (Throwable ignored) {
+            mspt = 0.0;
+            playerCount = 0;
+            softCap = 0;
+            heapUsed = 0L;
+            heapMax = 0L;
+        }
+
+        // Loaded worlds: cheap. Read through the platform-neutral accessor so
+        // this class needs no net.minecraft.* import (parity with the Bukkit
+        // sampler's Bukkit.getWorlds() loop).
+        List<String> worlds = new ArrayList<>();
+        try {
+            if (RTPRuntime.serverAccessor() != null) {
+                for (RTPWorld<?> w : RTPRuntime.serverAccessor().getRTPWorlds()) {
+                    if (w != null && w.name() != null) {
+                        worlds.add(w.name());
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // Defensive: tests may run without a server in scope.
+        }
+
+        // Queue depth: best-effort from the RTP region queue manager.
+        int queueDepth = 0;
+        try {
+            RTP r = RTP.getInstance();
+            if (r != null) {
+                queueDepth = TeleportSessions.current().processingPlayers.size();
+            }
+        } catch (Throwable ignored) {
+            // Defensive.
+        }
+
+        // Regions available: lift the region keys from the loaded RTP config.
+        // Lobby-mode backends publish an empty regions list and
+        // acceptingRequests=false so peers never select them.
+        List<String> regions = new ArrayList<>();
+        boolean accepting = true;
+        int keptCountTotal = 0;
+        int networkReservedTotal = 0;
+        Map<String, Integer> regionKeptCounts = new HashMap<>();
+        Set<String> regionSet = new HashSet<>();
+        // Per-region descriptive attributes (icon / display hints) advertised
+        // to peers and addons. Keyed "<region>.<attribute>"; purely
+        // informational. Mirrors the Bukkit sampler so a lobby/GUI can show a
+        // recognisable cross-server icon and the operator-configured display
+        // label (region displayName) for a Fabric backend's regions.
+        Map<String, String> regionMetadata = new HashMap<>();
+        if (lobbyMode) {
+            accepting = false;
+        } else {
+            try {
+                RTP r = RTP.getInstance();
+                if (r != null) {
+                    for (Region region : ActiveSelection.get().permRegionLookup.values()) {
+                        if (region == null || region.name == null) continue;
+                        regions.add(region.name);
+                        regionSet.add(region.name);
+                        int per = 0;
+                        try {
+                            if (region.queueManager != null) {
+                                if (region.queueManager.keptLocations != null) {
+                                    per += region.queueManager.keptLocations.size();
+                                }
+                                if (region.queueManager.networkKeptLocations != null) {
+                                    per += region.queueManager.networkKeptLocations.size();
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                            // Defensive: a region mid-shutdown may NPE on its buffers.
+                        }
+                        regionKeptCounts.put(region.name, per);
+                        keptCountTotal += per;
+                        try {
+                            RTPWorld<?> rw = region.getWorld();
+                            String env = (rw == null) ? null : rw.environment();
+                            if (env != null && !env.isEmpty()) {
+                                regionMetadata.put(region.name + ".env", env);
+                                String block = representativeBlock(env);
+                                if (block != null) {
+                                    regionMetadata.put(region.name + ".block", block);
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                            // Defensive: env enrichment is best-effort and must
+                            // never break the heartbeat sample.
+                        }
+                        try {
+                            // Advertise the operator-configured cosmetic display
+                            // label (region displayName) so a lobby shows the
+                            // backend's chosen words for this region. Only published
+                            // when it differs from the region name, to keep the
+                            // heartbeat compact. Sent raw; the consumer applies
+                            // color/gradient formatting.
+                            String label = region.displayName();
+                            if (label != null && !label.isEmpty()
+                                    && !label.equals(region.name)) {
+                                regionMetadata.put(region.name + ".label", label);
+                            }
+                        } catch (Throwable ignored) {
+                            // Defensive: label enrichment is best-effort.
+                        }
+                        try {
+                            // Advertise whether this region is permission-gated
+                            // (`requirePermission`) so a peer only demands
+                            // rtp.regions.<region> from its players when this
+                            // backend would. Published only when true; absent
+                            // means "open", matching older peers.
+                            if (region.getSettings().requirePermission()) {
+                                regionMetadata.put(region.name + ".perm", "true");
+                            }
+                        } catch (Throwable ignored) {
+                            // Defensive: settings read must not break the sample.
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+                // Defensive.
+            }
+        }
+
+        return new BackendHeartbeat(
+                serverId,
+                SCHEMA_VERSION,
+                PluginState.READY,
+                accepting,
+                now,
+                mspt,
+                queueDepth,
+                softCap,
+                heapUsed,
+                heapMax,
+                playerCount,
+                regions,
+                worlds,
+                /* killSwitch */ false,
+                keptCountTotal,
+                networkReservedTotal,
+                regionSet,
+                regionKeptCounts,
+                regionMetadata);
+    }
+
+    /**
+     * Provider-side environment -> block hint for the common vanilla
+     * environments, advertised so a consuming menu can show a recognisable
+     * surface block for a cross-server destination. Returns {@code null} for an
+     * unrecognised (custom-dimension) environment, leaving the consumer to
+     * translate the advertised {@code env} string locally. The Fabric
+     * dimension's {@code environment()} maps to the Bukkit-style env names.
+     */
+    private static String representativeBlock(String env) {
+        if (env == null) return null;
+        switch (env) {
+            case "NORMAL":
+                return "GRASS_BLOCK";
+            case "NETHER":
+                return "NETHERRACK";
+            case "THE_END":
+                return "END_STONE";
+            default:
+                return null;
+        }
+    }
+}

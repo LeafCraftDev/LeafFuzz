@@ -1,0 +1,141 @@
+// LeafFuzz - single multi-loader assembly jar (Paper/Spigot/Folia, Fabric, NeoForge).
+plugins {
+    id 'java-library'
+    id 'com.gradleup.shadow'
+}
+
+group = 'net.leaf'
+version = '0.1.0'
+
+base {
+    archivesName = 'LeafFuzz'
+}
+
+def hasJdk25Carriers = findProject(':resource:LeafFuzz:leaffuzz-fabric') != null ||
+        findProject(':resource:LeafFuzz:leaffuzz-neoforge') != null
+
+java {
+    if (hasJdk25Carriers) {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(25)
+        }
+    } else {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+}
+
+dependencies {
+    implementation project(':resource:LeafFuzz:leaffuzz-common')
+    api project(':resource:LeafFuzz:leaffuzz-paper')
+    implementation(project(':bukkit:bukkit-common')) { transitive = false }
+
+    if (findProject(':resource:LeafFuzz:leaffuzz-fabric') != null) {
+        api(project(':resource:LeafFuzz:leaffuzz-fabric')) { transitive = false }
+        implementation(project(':fabric:fabric-common-unobf')) { transitive = false }
+        implementation(project(':effects-api:effects-api-fabric-unobf')) { transitive = false }
+    }
+    if (findProject(':resource:LeafFuzz:leaffuzz-neoforge') != null) {
+        api(project(':resource:LeafFuzz:leaffuzz-neoforge')) { transitive = false }
+        implementation(project(':neoforge:neoforge-v26_1_R1')) { transitive = false }
+        implementation(project(':neoforge:neoforge-common')) { transitive = false }
+    }
+}
+
+shadowJar {
+    archiveBaseName.set('LeafFuzz')
+    archiveClassifier.set('')
+    mergeServiceFiles()
+
+    manifest {
+        attributes(
+                'Main-Class': 'net.leaf.fuzz.common.cli.LeafFuzzStandaloneCli'
+        )
+    }
+
+    from(project(':resource:LeafFuzz').projectDir) {
+        include 'LICENSE'
+        into 'META-INF/leaffuzz'
+    }
+
+    exclude 'org/jetbrains/annotations/**'
+    exclude 'org/intellij/lang/annotations/**'
+    exclude 'META-INF/maven/**'
+    exclude 'META-INF/versions/*/module-info.class'
+
+    minimize {
+        exclude(project(':resource:LeafFuzz:leaffuzz-common'))
+    }
+}
+
+tasks.named('jar') { enabled = false }
+assemble.dependsOn shadowJar
+
+tasks.register('generateChecksums') {
+    group = 'build'
+    description = 'Generates SHA-256 and SHA-512 checksums for LeafFuzz release deliverables (ADR-126).'
+    dependsOn tasks.named('shadowJar')
+
+    doLast {
+        File jarFile = tasks.named('shadowJar').get().archiveFile.get().asFile
+        if (jarFile.exists()) {
+            ['SHA-256': '.sha256', 'SHA-512': '.sha512'].each { algo, ext ->
+                def digest = java.security.MessageDigest.getInstance(algo)
+                jarFile.withInputStream { is ->
+                    byte[] buffer = new byte[8192]
+                    int read
+                    while ((read = is.read(buffer)) > 0) {
+                        digest.update(buffer, 0, read)
+                    }
+                }
+                def hex = digest.digest().collect { String.format('%02x', it) }.join('')
+                def checksumFile = new File(jarFile.parentFile, jarFile.name + ext)
+                checksumFile.text = "${hex}  ${jarFile.name}\n"
+                logger.lifecycle("[ADR-126] Generated ${algo} checksum for ${jarFile.name} -> ${checksumFile.name}")
+            }
+        }
+    }
+}
+
+apply plugin: 'signing'
+
+signing {
+    def signingKey = findProperty('signingKey') as String
+    def signingPassword = findProperty('signingPassword') as String
+    if (findProperty('signWithGpgCmd') != null) {
+        useGpgCmd()
+    } else if (signingKey) {
+        useInMemoryPgpKeys(signingKey, signingPassword)
+    }
+}
+
+tasks.register('signDeliverables') {
+    group = 'signing'
+    description = 'Signs the LeafFuzz shaded release deliverable if signing keys are present (ADR-126).'
+    dependsOn tasks.named('shadowJar')
+
+    doLast {
+        def signingKey = findProperty('signingKey') as String
+        def useGpg = findProperty('signWithGpgCmd') != null
+        if (!signingKey && !useGpg) {
+            logger.info('[ADR-126] Skipping signDeliverables: no signing credentials configured.')
+            return
+        }
+
+        File jarFile = tasks.named('shadowJar').get().archiveFile.get().asFile
+        if (jarFile.exists()) {
+            try {
+                project.signing.sign(jarFile)
+                logger.lifecycle("[ADR-126] Signed deliverable: ${jarFile.name}")
+            } catch (Exception e) {
+                logger.warn("[ADR-126] Failed to sign deliverable ${jarFile.name}: ${e.message}")
+                if (project.hasProperty('strictSigning')) {
+                    throw e
+                }
+            }
+        }
+    }
+}
+
+assemble.dependsOn tasks.named('generateChecksums')

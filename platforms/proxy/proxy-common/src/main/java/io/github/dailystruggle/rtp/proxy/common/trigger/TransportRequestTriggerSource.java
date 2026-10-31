@@ -1,0 +1,478 @@
+package io.github.dailystruggle.rtp.proxy.common.trigger;
+
+import io.github.dailystruggle.rtp.proxy.common.spi.DispatchOutcome;
+import io.github.dailystruggle.rtp.proxy.common.spi.NetworkRequestQueue;
+import io.github.dailystruggle.rtp.proxy.common.spi.RtpDispatcher;
+import io.github.dailystruggle.rtp.proxy.common.spi.RtpRequest;
+import io.github.dailystruggle.rtp.proxy.common.spi.TriggerType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
+
+/**
+ * The proxy-side trigger
+ * source that drives {@code /rtp} dispatch off the cross-server wait queue.
+ *
+ * <p>This replaces {@code CommandTriggerSource} on the proxy: the proxy no
+ * longer hosts a {@code /rtp} Brigadier command. Instead, backends enrol
+ * locally and ship batches into the shared {@link NetworkRequestQueue};
+ * this trigger source runs one or more BLPOP-style workers that
+ * {@code dequeueReady} envelopes and hand them to the
+ * {@link RtpDispatcher}.</p>
+ *
+ * <p><b>Threading.</b> Each worker is a daemon thread that loops on
+ * {@link NetworkRequestQueue#dequeueReady(Duration)}. The blocking wait
+ * lives inside the queue implementation's executor; we await the resulting
+ * future with a small upper bound (1s past {@code pollTimeout}) so
+ * {@link #stop()} can interrupt promptly. {@code dispatcher.dispatch} is
+ * invoked from the worker thread, but the dispatcher itself is async and
+ * returns immediately, so we do not hold the worker for the full teleport
+ * pipeline.</p>
+ *
+ * <p><b>S-004 contract.</b> Every failure mode logs a WARNING and continues
+ * the loop. The worker never silently swallows a dequeue or dispatch
+ * exception. The only "no-op" path is the timeout where {@code dequeueReady}
+ * resolves to {@link Optional#empty()}.</p>
+ *
+ * <p><b>Lifecycle.</b> {@link #start()} is single-shot per instance;
+ * {@link #stop()} is idempotent and bounded by {@link #SHUTDOWN_TIMEOUT_MS}
+ * (mirrors {@code RtpVelocityPlugin}'s transport-close deadline).</p>
+ */
+public final class TransportRequestTriggerSource {
+
+    /** Bounded join window for stopping workers (CHECKLIST row E3). */
+    public static final long SHUTDOWN_TIMEOUT_MS = 2_000L;
+    private static final String NONE_LITERAL = "<none>";
+    /**
+     * How long this proxy keeps handing back an envelope whose player it does
+     * not hold before treating the entry as orphaned (backend crashed before its
+     * quit-cancel) and cancelling it. Measured on this proxy's clock.
+     */
+    public static final long DEFAULT_FOREIGN_GRACE_MS = 60_000L;
+    /** Pause after a hand-back so two proxies do not spin on one foreign head entry. */
+    private static final long REQUEUE_BACKOFF_MS = 100L;
+    /** Soft cap on {@link #foreignSince}; stale rows are pruned past it. */
+    private static final int MAX_TRACKED_FOREIGN = 4_096;
+
+    private final NetworkRequestQueue queue;
+    private final RtpDispatcher dispatcher;
+    private final int workerThreads;
+    private final Duration pollTimeout;
+    private final Logger logger;
+    /**
+     * Stable id of this proxy node; routed through to ownership-aware
+     * {@link NetworkRequestQueue#dequeueReady(Duration, String)}. When
+     * {@code null} or empty, the worker falls back to the legacy
+     * {@link NetworkRequestQueue#dequeueReady(Duration)} (single-proxy /
+     * in-memory transports). See {@code rtp-proxy-ADR-016}.
+     */
+    private final String thisProxyId;
+    /**
+     * Optional local-presence gate ({@code ProxySender::isConnected} on the
+     * proxy). Dequeued {@code playerId}s come from a shared store; when this
+     * predicate is set, envelopes for players without a session on this
+     * proxy are never dispatched (see {@link #handleForeign}). {@code null}
+     * defers the check to the dispatcher.
+     */
+    private final Predicate<UUID> localPresence;
+    private final long foreignGraceMs;
+    /** correlationId -> first time this proxy popped it for a player it does not hold. */
+    private final ConcurrentHashMap<UUID, Long> foreignSince = new ConcurrentHashMap<>();
+
+    private final List<Thread> workers = new ArrayList<>();
+    private volatile boolean running;
+    private volatile boolean started;
+    private final AtomicLong dispatchedCount = new AtomicLong();
+    /**
+     * Count of consecutive {@code dequeueReady} timeouts (reset on any
+     * successful await, empty or not). Surfaced in the timeout WARNING so a
+     * persistent stall is distinguishable from a one-off hiccup - the former
+     * points at queue-executor starvation (see the timeout catch block).
+     */
+    private final AtomicLong consecutiveTimeouts = new AtomicLong();
+
+    /**
+     * Build a transport-driven trigger source.
+     *
+     * @param queue         cross-server wait queue (shared SPI handle)
+     * @param dispatcher    proxy dispatcher fed each popped envelope
+     * @param workerThreads how many BLPOP workers to spin (clamped to {@code >= 1})
+     * @param pollTimeout   max time a single dequeue waits before returning
+     *                      empty (clamped to {@code >= 100ms} / {@code <= 30s})
+     * @param logger        SLF4J logger (defaults to this class' logger when {@code null})
+     */
+    public TransportRequestTriggerSource(NetworkRequestQueue queue,
+                                         RtpDispatcher dispatcher,
+                                         int workerThreads,
+                                         Duration pollTimeout,
+                                         Logger logger) {
+        this(queue, dispatcher, workerThreads, pollTimeout, logger, null);
+    }
+
+    /**
+     * Ownership-aware constructor (rtp-proxy-ADR-016). When {@code thisProxyId}
+     * is non-null and non-empty the worker uses
+     * {@link NetworkRequestQueue#dequeueReady(Duration, String)} so foreign-
+     * owned envelopes are skipped without losing FIFO order.
+     */
+    public TransportRequestTriggerSource(NetworkRequestQueue queue,
+                                         RtpDispatcher dispatcher,
+                                         int workerThreads,
+                                         Duration pollTimeout,
+                                         Logger logger,
+                                         String thisProxyId) {
+        this(queue, dispatcher, workerThreads, pollTimeout, logger, thisProxyId, null);
+    }
+
+    /**
+     * Presence-gated constructor. {@code localPresence} answers "does this
+     * proxy currently hold a session for the player?" (Velocity:
+     * {@code sender::isConnected}); {@code null} disables the gate here.
+     * Envelopes for players held elsewhere are handed back to a shared queue
+     * ({@link NetworkRequestQueue#requeue}) rather than cancelled.
+     */
+    public TransportRequestTriggerSource(NetworkRequestQueue queue,
+                                         RtpDispatcher dispatcher,
+                                         int workerThreads,
+                                         Duration pollTimeout,
+                                         Logger logger,
+                                         String thisProxyId,
+                                         Predicate<UUID> localPresence) {
+        this(queue, dispatcher, workerThreads, pollTimeout, logger, thisProxyId, localPresence,
+                DEFAULT_FOREIGN_GRACE_MS);
+    }
+
+    /** As the presence-gated constructor with an explicit orphan grace window (tests). */
+    TransportRequestTriggerSource(NetworkRequestQueue queue,
+                                  RtpDispatcher dispatcher,
+                                  int workerThreads,
+                                  Duration pollTimeout,
+                                  Logger logger,
+                                  String thisProxyId,
+                                  Predicate<UUID> localPresence,
+                                  long foreignGraceMs) {
+        this.localPresence = localPresence;
+        this.foreignGraceMs = Math.max(0L, foreignGraceMs);
+        this.queue = Objects.requireNonNull(queue, "queue");
+        this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
+        this.workerThreads = Math.max(1, workerThreads);
+        Duration pt = Objects.requireNonNullElse(pollTimeout, Duration.ofSeconds(2));
+        if (pt.toMillis() < 100L) pt = Duration.ofMillis(100L);
+        if (pt.toMillis() > 30_000L) pt = Duration.ofSeconds(30);
+        this.pollTimeout = pt;
+        this.logger = (logger != null) ? logger
+                : LoggerFactory.getLogger(TransportRequestTriggerSource.class);
+        this.thisProxyId = (thisProxyId == null || thisProxyId.isEmpty()) ? null : thisProxyId;
+    }
+
+    /**
+     * Spawn the worker threads and begin draining the queue. Single-shot:
+     * re-invocation throws {@link IllegalStateException} (matches the
+     * {@code CommandTriggerSource} contract).
+     */
+    public void start() {
+        synchronized (this) {
+            if (started) {
+                throw new IllegalStateException(
+                        "TransportRequestTriggerSource already started; create a new instance.");
+            }
+            started = true;
+            running = true;
+            for (int i = 0; i < workerThreads; i++) {
+                Thread t = new Thread(this::workerLoop,
+                        "rtp-proxy-request-worker-" + i);
+                t.setDaemon(true);
+                workers.add(t);
+                t.start();
+            }
+            logger.info("RTP TransportRequestTriggerSource started: workers={}, pollTimeout={}ms.",
+                    workerThreads, pollTimeout.toMillis());
+        }
+    }
+
+    /**
+     * Signal workers to stop, interrupt them, and join each within
+     * {@link #SHUTDOWN_TIMEOUT_MS}. Idempotent. Logs a WARNING for any
+     * worker that fails to exit within the deadline; in that case the
+     * thread is abandoned (daemon, so JVM exit is unaffected).
+     */
+    public void stop() {
+        synchronized (this) {
+            if (!started) return;
+            if (!running) return;
+            running = false;
+            long deadline = System.currentTimeMillis() + SHUTDOWN_TIMEOUT_MS;
+            for (Thread t : workers) {
+                t.interrupt();
+            }
+            for (Thread t : workers) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) remaining = 1;
+                try {
+                    t.join(remaining);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                if (t.isAlive()) {
+                    logger.warn("RTP TransportRequestTriggerSource worker {} did not exit within {}ms; abandoning.",
+                            t.getName(), SHUTDOWN_TIMEOUT_MS);
+                }
+            }
+        }
+    }
+
+    /** @return true between {@link #start()} and the end of {@link #stop()}. */
+    public boolean isRunning() {
+        return running;
+    }
+
+    /** @return number of envelopes successfully handed to the dispatcher. */
+    public long dispatchedCount() {
+        return dispatchedCount.get();
+    }
+
+    /** Visible for tests: configured worker count. */
+    public int workerThreads() {
+        return workerThreads;
+    }
+
+    /** Visible for tests: configured poll timeout. */
+    public Duration pollTimeout() {
+        return pollTimeout;
+    }
+
+    private void workerLoop() {
+        while (running && !Thread.currentThread().isInterrupted()) {
+            Optional<NetworkRequestQueue.QueueEnvelope> popped;
+            try {
+                CompletableFuture<Optional<NetworkRequestQueue.QueueEnvelope>> fut =
+                        (thisProxyId != null)
+                                ? queue.dequeueReady(pollTimeout, thisProxyId)
+                                : queue.dequeueReady(pollTimeout);
+                // Bound the await slightly past the poll timeout so stop()
+                // can interrupt quickly even if the queue impl is slow to
+                // honour the deadline.
+                long awaitMs = pollTimeout.toMillis() + 1_000L;
+                popped = fut.get(awaitMs, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (java.util.concurrent.TimeoutException te) {
+                // The dequeueReady future did not resolve within pollTimeout+1s.
+                // A bare TimeoutException carries NO cause, so the old one-line
+                // warning could not explain the 'why'. The dominant real cause
+                // is queue-executor starvation: the Redis/SQL queue impls run
+                // every dequeue on a SINGLE-THREAD executor, so when more than
+                // one worker blocks it for the full pollTimeout the queued
+                // worker's task cannot even start (let alone finish) inside the
+                // await bound. Other causes: Redis unreachable/slow, or a
+                // GC/host stall. Surface all the context needed to tell these
+                // apart instead of a bare 'exceeded Nms'.
+                long streak = consecutiveTimeouts.incrementAndGet();
+                long awaitMs = pollTimeout.toMillis() + 1_000L;
+                logger.warn("RTP TransportRequestTriggerSource: dequeueReady on worker '{}' did not complete within {}ms "
+                                + "(pollTimeout={}ms + 1000ms grace); consecutiveTimeouts={}, workerThreads={}, thisProxyId={}. "
+                                + "Likely cause: the queue's async executor is saturated - the Redis/SQL NetworkRequestQueue "
+                                + "services dequeues on a single thread, so workerThreads>1 starves it; reduce network worker "
+                                + "threads to 1 or verify Redis reachability/latency. Continuing.",
+                        Thread.currentThread().getName(), awaitMs, pollTimeout.toMillis(),
+                        streak, workerThreads, thisProxyId == null ? NONE_LITERAL : thisProxyId);
+                continue;
+            } catch (java.util.concurrent.ExecutionException ee) {
+                // Log the FULL cause chain (with stack) - the previous
+                // getMessage()-only line printed 'null' for the many Jedis /
+                // NPE style failures whose message is null, hiding the real
+                // fault (S-004: never silently discard).
+                consecutiveTimeouts.set(0L);
+                Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
+                logger.warn("RTP TransportRequestTriggerSource: dequeueReady failed on worker '{}' ({}); continuing.",
+                        Thread.currentThread().getName(), cause.getClass().getName(), cause);
+                continue;
+            } catch (RuntimeException re) {
+                consecutiveTimeouts.set(0L);
+                logger.warn("RTP TransportRequestTriggerSource: dequeueReady threw on worker '{}' ({}); continuing.",
+                        Thread.currentThread().getName(), re.getClass().getName(), re);
+                continue;
+            }
+            // Any resolved await (empty or not) clears the stall streak.
+            consecutiveTimeouts.set(0L);
+            if (popped.isEmpty()) {
+                // Timeout / empty queue. Loop.
+                continue;
+            }
+            try {
+                dispatchEnvelope(popped.get());
+            } catch (RuntimeException re) {
+                logger.warn("RTP TransportRequestTriggerSource: dispatchEnvelope threw for correlationId={}: {}",
+                        popped.get().correlationId(), re.getMessage());
+            }
+        }
+    }
+
+    private void dispatchEnvelope(NetworkRequestQueue.QueueEnvelope env) {
+        UUID playerId = env.playerId();
+        UUID correlationId = env.correlationId();
+        if (localPresence != null && !isLocal(playerId)) {
+            // Never dispatch a shared-store playerId this proxy does not hold.
+            handleForeign(env);
+            return;
+        }
+        foreignSince.remove(correlationId);
+        // Phase B trace (2026-05-23): worker has popped an envelope from the
+        // queue and is about to hand it to the dispatcher. Logged at INFO so
+        // devstack repros can confirm the proxy actually received the
+        // envelope (vs. it never being enqueued, or being claimed by a
+        // sibling proxy worker). Remove or downgrade once root cause known.
+        logger.info(
+                "[NETWORK][trace] TransportRequestTriggerSource.dispatchEnvelope: received envelope correlationId={} player={} serverHint={} regionKey={} thisProxyId={}",
+                correlationId, playerId,
+                env.serverHint().orElse(NONE_LITERAL),
+                env.regionKey().orElse(NONE_LITERAL),
+                thisProxyId == null ? NONE_LITERAL : thisProxyId);
+        // env.serverHint() must reach the dispatcher in the dedicated
+        // serverHint slot (added 2026-05-23) - previously it was smuggled
+        // into the originServerId slot, which the BackendSelector does
+        // not read, so every cross-server /rtp was load-balanced even
+        // when the player typed `region=<server>:<region>`. The trigger
+        // source is not the request's origin, so originServerId is empty.
+        RtpRequest req = new RtpRequest(
+                playerId,
+                TriggerType.COMMAND,
+                env.regionKey(),
+                /*worldKey=*/Optional.empty(),
+                /*serverHint=*/env.serverHint(),
+                /*originServerId=*/Optional.empty(),
+                correlationId
+        );
+        CompletableFuture<DispatchOutcome> fut;
+        try {
+            fut = dispatcher.dispatch(req);
+        } catch (RuntimeException re) {
+            logger.warn("RTP dispatcher.dispatch threw for correlationId={} player={}: {}",
+                    correlationId, playerId, re.getMessage());
+            return;
+        }
+        dispatchedCount.incrementAndGet();
+        if (fut == null) {
+            logger.warn("RTP dispatcher.dispatch returned null future for correlationId={} player={}.",
+                    correlationId, playerId);
+            return;
+        }
+        fut.whenComplete((outcome, err) -> {
+            if (err != null) {
+                Throwable cause = err.getCause() != null ? err.getCause() : err;
+                logger.warn("RTP dispatcher failed for correlationId={} player={}: {}",
+                        correlationId, playerId, cause.getMessage());
+            }
+            // Non-fatal outcomes are already emitted by the dispatcher's
+            // StatusSink; we deliberately do not double-log.
+        });
+    }
+
+    /**
+     * Envelope for a player without a session here. On a shared queue another
+     * proxy may hold the player (or an ownership tag lapsed), so cancelling would
+     * destroy their request: hand it back, and cancel only once it has stayed
+     * foreign past {@link #foreignGraceMs} (orphan: backends cancel on quit). A
+     * JVM-local queue has no other consumer, so the player is gone: cancel.
+     */
+    private void handleForeign(NetworkRequestQueue.QueueEnvelope env) {
+        UUID playerId = env.playerId();
+        UUID correlationId = env.correlationId();
+        if (!queue.supportsRequeue()) {
+            logger.info("RTP TransportRequestTriggerSource: player {} not connected to this proxy; "
+                    + "cancelling correlationId={}.", playerId, correlationId);
+            cancelQuietly(playerId, NetworkRequestQueue.CancelReason.PLAYER_DISCONNECT);
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Long first = foreignSince.putIfAbsent(correlationId, now);
+        if (first != null && now - first >= foreignGraceMs) {
+            foreignSince.remove(correlationId);
+            logger.warn("RTP TransportRequestTriggerSource: player {} not connected to any proxy that "
+                            + "dequeued correlationId={} for {}ms; cancelling the orphaned request.",
+                    playerId, correlationId, now - first);
+            cancelQuietly(playerId, NetworkRequestQueue.CancelReason.TTL_EXPIRED);
+            return;
+        }
+        pruneForeign(now);
+        boolean requeued;
+        try {
+            requeued = Boolean.TRUE.equals(queue.requeue(env)
+                    .get(pollTimeout.toMillis() + 1_000L, TimeUnit.MILLISECONDS));
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            logger.warn("RTP TransportRequestTriggerSource: interrupted handing back correlationId={} "
+                    + "for player {}.", correlationId, playerId);
+            return;
+        } catch (Exception e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            logger.warn("RTP TransportRequestTriggerSource: hand-back of correlationId={} for player {} "
+                    + "failed; the request stays ROUTING until the backend re-enrols or cancels.",
+                    correlationId, playerId, cause);
+            return;
+        }
+        if (!requeued) {
+            foreignSince.remove(correlationId);
+            logger.debug("RTP TransportRequestTriggerSource: correlationId={} for player {} changed "
+                    + "since dequeue; nothing to hand back.", correlationId, playerId);
+            return;
+        }
+        logger.debug("RTP TransportRequestTriggerSource: player {} not on this proxy; handed back "
+                + "correlationId={}.", playerId, correlationId);
+        try {
+            Thread.sleep(REQUEUE_BACKOFF_MS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void cancelQuietly(UUID playerId, NetworkRequestQueue.CancelReason reason) {
+        try {
+            queue.cancel(playerId, reason)
+                    .whenComplete((v, err) -> {
+                        if (err != null) {
+                            logger.warn("RTP TransportRequestTriggerSource: cancel failed for player {}: {}",
+                                    playerId, err.getMessage());
+                        }
+                    });
+        } catch (RuntimeException re) {
+            logger.warn("RTP TransportRequestTriggerSource: cancel threw for player {}: {}",
+                    playerId, re.getMessage());
+        }
+    }
+
+    private void pruneForeign(long now) {
+        if (foreignSince.size() <= MAX_TRACKED_FOREIGN) return;
+        long cutoff = now - Math.max(foreignGraceMs, 1L) * 2L;
+        foreignSince.values().removeIf(t -> t < cutoff);
+    }
+
+    /** Visible for tests: envelopes currently being handed back. */
+    int trackedForeignCount() {
+        return foreignSince.size();
+    }
+
+    /** Fail closed: a throwing presence predicate counts as "not local". */
+    private boolean isLocal(UUID playerId) {
+        try {
+            return localPresence.test(playerId);
+        } catch (RuntimeException re) {
+            logger.warn("RTP TransportRequestTriggerSource: presence check threw for player {}: {}",
+                    playerId, re.getMessage());
+            return false;
+        }
+    }
+}

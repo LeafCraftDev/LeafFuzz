@@ -1,0 +1,210 @@
+package io.github.dailystruggle.rtp.folia.mock;
+
+import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
+import io.github.dailystruggle.rtp.folia.scheduling.FoliaSchedulerImpl;
+import org.bukkit.plugin.Plugin;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Logger;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Simulates the Vault/Economy context-switching pipeline using in-memory Folia
+ * scheduler mocks.
+ *
+ * <p>Pipeline under test:
+ * <ol>
+ *   <li>(RegionThread) Player types {@code /rtp}; plugin submits an economy
+ *       check to {@link MockAsyncScheduler}.</li>
+ *   <li>Test calls {@link MockAsyncScheduler#executeAll()} to simulate the
+ *       async thread pool draining its queue.</li>
+ *   <li>(AsyncThread) The async task performs a successful Vault withdrawal,
+ *       then dispatches the teleport callback via {@link MockRegionScheduler}.</li>
+ *   <li>Test calls {@link MockRegionScheduler#executeAll()} to simulate the
+ *       region thread processing its queue.</li>
+ *   <li>(RegionThread) Assert that the teleportation logic fired and that
+ *       execution counts match expectations.</li>
+ * </ol>
+ *
+ * <p>Requirements covered: REQ-FOLIA-ARCH-007, REQ-FOLIA-ARCH-008,
+ * REQ-FOLIA-ARCH-009.
+ */
+class FoliaEconomyPipelineTest {
+
+    // -----------------------------------------------------------------------
+    // Minimal no-op Plugin stub - only getLogger() is used by the mocks.
+    // -----------------------------------------------------------------------
+    private static final Plugin STUB_PLUGIN = stubPlugin();
+
+    private static Plugin stubPlugin() {
+        Plugin plugin = Mockito.mock(Plugin.class);
+        Mockito.when(plugin.isEnabled()).thenReturn(true);
+        Mockito.when(plugin.getName()).thenReturn("StubPlugin");
+        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger("StubPlugin"));
+        return plugin;
+    }
+
+    private MockAsyncScheduler asyncScheduler;
+    private MockRegionScheduler regionScheduler;
+    private MockGlobalRegionScheduler globalScheduler;
+    private FoliaSchedulerImpl foliaScheduler;
+
+    @BeforeEach
+    void setUp() {
+        asyncScheduler  = new MockAsyncScheduler();
+        regionScheduler = new MockRegionScheduler();
+        globalScheduler = new MockGlobalRegionScheduler();
+
+        // Wire the Folia mocks into FoliaSchedulerImpl via the test constructor,
+        // then inject it as the global RTP scheduler.
+        foliaScheduler  = new FoliaSchedulerImpl(
+                STUB_PLUGIN,
+                regionScheduler,
+                asyncScheduler,
+                globalScheduler);
+        RTPRuntime.setScheduler(foliaScheduler);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 - full context-switching pipeline
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verifies the economy → teleport pipeline end-to-end:
+     * <ol>
+     *   <li>Async task is queued (economy check).</li>
+     *   <li>{@code asyncScheduler.executeAll()} runs exactly 1 task.</li>
+     *   <li>Inside that task a region task is queued (teleport callback).</li>
+     *   <li>{@code regionScheduler.executeAll()} runs exactly 1 task.</li>
+     *   <li>The teleport flag is set, confirming end-to-end execution.</li>
+     * </ol>
+     */
+    @Test
+    void economy_check_then_teleport_fires_in_correct_order() {
+        AtomicBoolean economyCheckRan  = new AtomicBoolean(false);
+        AtomicBoolean teleportFired    = new AtomicBoolean(false);
+        AtomicInteger asyncTaskCount   = new AtomicInteger(0);
+        AtomicInteger regionTaskCount  = new AtomicInteger(0);
+
+        // Region thread: player types /rtp; the plugin submits an economy check
+        // to the async scheduler.
+        asyncScheduler.runNow(STUB_PLUGIN, scheduledTask -> {
+
+            // Async thread: Vault withdrawal succeeds.
+            economyCheckRan.set(true);
+            asyncTaskCount.incrementAndGet();
+
+            // Dispatch the teleport callback back to the region scheduler.
+            regionScheduler.execute(STUB_PLUGIN, null, 0, 0, () -> {
+
+                // Region thread: teleportation logic.
+                teleportFired.set(true);
+                regionTaskCount.incrementAndGet();
+            });
+        });
+
+        // Async queue must have exactly one pending task at this point.
+        assertEquals(1, asyncScheduler.pendingCount(),
+                "Async queue must hold exactly 1 task after /rtp submission");
+        assertFalse(economyCheckRan.get(),
+                "Economy check must NOT have run before executeAll()");
+
+        // Drain the async scheduler.
+        int asyncExecuted = asyncScheduler.executeAll();
+
+        assertEquals(1, asyncExecuted,
+                "executeAll() must report exactly 1 async task executed");
+        assertTrue(economyCheckRan.get(),
+                "Economy check must have run after asyncScheduler.executeAll()");
+        assertEquals(0, asyncScheduler.pendingCount(),
+                "Async queue must be empty after executeAll()");
+
+        // Region queue must now have exactly one pending task.
+        assertEquals(1, regionScheduler.pendingCount(),
+                "Region queue must hold exactly 1 task after async callback");
+        assertFalse(teleportFired.get(),
+                "Teleport must NOT have fired before regionScheduler.executeAll()");
+
+        // Drain the region scheduler.
+        int regionExecuted = regionScheduler.executeAll();
+
+        assertEquals(1, regionExecuted,
+                "executeAll() must report exactly 1 region task executed");
+        assertTrue(teleportFired.get(),
+                "Teleport must have fired after regionScheduler.executeAll()");
+        assertEquals(0, regionScheduler.pendingCount(),
+                "Region queue must be empty after executeAll()");
+
+        // Execution-count assertions.
+        assertEquals(1, asyncTaskCount.get(),
+                "Async (economy) task must have executed exactly once");
+        assertEquals(1, regionTaskCount.get(),
+                "Region (teleport) task must have executed exactly once");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 - economy failure: teleport must NOT fire
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verifies that when the economy check fails (insufficient funds), the
+     * teleport callback is never submitted to the region scheduler.
+     */
+    @Test
+    void economy_failure_does_not_dispatch_teleport() {
+        AtomicBoolean teleportFired = new AtomicBoolean(false);
+
+        // Simulate insufficient funds: async task does NOT enqueue a region task.
+        asyncScheduler.runNow(STUB_PLUGIN, scheduledTask -> {
+            boolean hasFunds = false; // simulated Vault response
+            if (hasFunds) {
+                regionScheduler.execute(STUB_PLUGIN, null, 0, 0,
+                        () -> teleportFired.set(true));
+            }
+        });
+
+        asyncScheduler.executeAll();
+        regionScheduler.executeAll();
+
+        assertFalse(teleportFired.get(),
+                "Teleport must NOT fire when the economy check fails");
+        assertEquals(0, regionScheduler.pendingCount(),
+                "Region queue must remain empty after a failed economy check");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 - GlobalRegionScheduler queues and executes tasks correctly
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verifies that {@link MockGlobalRegionScheduler} stores submitted tasks
+     * and executes them deterministically via {@link MockGlobalRegionScheduler#executeAll()}.
+     */
+    @Test
+    void global_region_scheduler_executes_queued_tasks() {
+        AtomicInteger counter = new AtomicInteger(0);
+
+        globalScheduler.execute(STUB_PLUGIN, counter::incrementAndGet);
+        globalScheduler.execute(STUB_PLUGIN, counter::incrementAndGet);
+        globalScheduler.execute(STUB_PLUGIN, counter::incrementAndGet);
+
+        assertEquals(3, globalScheduler.pendingCount(),
+                "Global scheduler must hold 3 pending tasks");
+        assertEquals(0, counter.get(),
+                "Tasks must not run before executeAll()");
+
+        int executed = globalScheduler.executeAll();
+
+        assertEquals(3, executed,
+                "executeAll() must report 3 tasks executed");
+        assertEquals(3, counter.get(),
+                "All 3 global tasks must have run after executeAll()");
+        assertEquals(0, globalScheduler.pendingCount(),
+                "Global scheduler queue must be empty after executeAll()");
+    }
+}

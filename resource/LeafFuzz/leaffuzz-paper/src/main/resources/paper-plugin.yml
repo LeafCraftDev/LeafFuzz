@@ -1,0 +1,10 @@
+name: LeafFuzz
+version: 0.1.0
+main: net.leaf.fuzz.paper.PaperLeafFuzzPlugin
+api-version: '1.21'
+folia-supported: true
+description: Cross-platform in-JVM QC, command-tree fuzzing, and post-GC memory leak screener (Paper/Folia).
+permissions:
+  leaffuzz.admin:
+    description: Allows executing /fuzz (/leaffuzz, /qc) QC checks, command audits, and leak screens.
+    default: op

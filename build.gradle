@@ -1,0 +1,1321 @@
+plugins {
+    id 'java'
+    // Shared plugin versions live in gradle/libs.versions.toml (version catalog).
+    alias(libs.plugins.shadow) apply false
+    alias(libs.plugins.spotless)
+    alias(libs.plugins.japicmp) apply false
+    alias(libs.plugins.cyclonedx) apply false
+    alias(libs.plugins.sonar)
+}
+
+group = 'io.github.dailystruggle'
+// Single source of truth for the version of both jars: `gradle.properties`
+// (`version`, ADR-117). Do not hardcode the number here.
+version = providers.gradleProperty('version').get()
+
+spotless {
+    lineEndings = 'UNIX'
+    java {
+        target 'rtp-*/**/*.java', 'addons/**/*.java', 'api/**/*.java', 'plugins/**/*.java'
+        targetExclude '**/build/**', '**/.gradle/**', '**/generated/**', '**/target/**', 'api/**/build/**', 'rtp-*/**/build/**', 'plugins/**/build/**'
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}
+
+allprojects {
+    group = 'io.github.dailystruggle'
+    version = providers.gradleProperty('version').get()
+
+    // ENTERPRISE_READINESS.md Item 40: Reproducible builds.
+    // Ensure deterministic byte-for-byte JAR/ZIP creation across build environments.
+    tasks.withType(AbstractArchiveTask).configureEach {
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+    }
+
+    // ENTERPRISE_READINESS.md Item 40: Dependency locking support.
+    // Allows generating and verifying dependency lockfiles via `--write-locks`.
+    dependencyLocking {
+        lockMode = LockMode.LENIENT
+    }
+
+    repositories {
+        mavenLocal()
+        mavenCentral()
+        maven {
+            url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/'
+            mavenContent {
+                snapshotsOnly()
+            }
+        }
+        maven { url = 'https://repo.papermc.io/repository/maven-public/' }
+        maven {
+            url = 'https://repo.papermc.io/repository/maven-snapshots/'
+            mavenContent {
+                snapshotsOnly()
+            }
+        }
+        maven {
+            url = 'https://repo.extendedclip.com/content/repositories/placeholderapi/'
+            content {
+                includeGroupByRegex 'me\\.clip.*'
+            }
+        }
+        maven {
+            url = 'https://nexus.sirblobman.xyz/public/'
+            content {
+                includeGroupByRegex 'com\\.github\\.sirblobman.*'
+                includeGroupByRegex 'com\\.sirblobman.*'
+            }
+        }
+        maven {
+            url = 'https://jitpack.io'
+            content {
+                excludeGroupByRegex 'com\\.github\\.sirblobman.*'
+                excludeGroupByRegex 'com\\.sirblobman.*'
+            }
+        }
+        maven { url = 'https://repo.codemc.io/repository/maven-public/' }
+        maven { url = 'https://maven.fabricmc.net/' }
+    }
+}
+
+subprojects {
+    apply plugin: 'java-library'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(Integer.parseInt(rootProject.libs.versions.javaToolchain.get()))
+        }
+        // `-sources` / `-javadoc` jars are intentionally NOT produced: the build
+        // only ships the executable artifacts. The addon-API publish closure
+        // below publishes `from components.java`, which simply carries no
+        // sources/javadoc variant as a result.
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+    }
+
+    // ADR-113: the platform-neutral shared closure ships Java 17 bytecode
+    // (classfile 61) from the shared toolchain, so `--release 17` also rejects
+    // Java 18+ APIs. The pre-1.20.5 carrier path (Bukkit/Paper/Folia v1_20_R1,
+    // Fabric v1_20_R1, their common modules and rtp-plugin's own classes) is
+    // Java 17 too, so the jar loads on 1.18-1.20.4 servers. The 1.21+ and 26.x
+    // carriers keep the toolchain level; they only load on Java 21+ runtimes.
+    // The bundled addons' Bukkit path is Java 17 so it loads there too, and so
+    // is rtp-neoforge-common: the unified jar's ServiceLoader files list its menu
+    // providers, which every platform instantiates before the family filter.
+    // Tests are not shipped and stay on the toolchain level.
+    def java17Modules = [
+            ':rtp-api', ':server-api', ':rtp-core', ':anvil-api', ':bit-api', ':yaml-api', ':units-api', ':commands-api',
+            ':effects-api', ':metrics-api', ':bstats-api', ':maps-api',
+            ':predict-api', ':config-bit-api', ':menu-api', ':tags-api', ':database-api', ':schematics-api',
+            ':proxy:proxy-common',
+            ':bukkit:bukkit-common', ':bukkit:bukkit-v1_20_R1',
+            ':paper:paper-common', ':paper:paper-v1_20_R1',
+            ':folia:folia-common', ':folia:folia-v1_20_R1',
+            ':fabric:fabric-common', ':fabric:fabric-v1_20_R1',
+            ':rtp-plugin',
+            ':neoforge:neoforge-common',
+            ':rtp-neoforge',
+            ':addons:LeafRTPCountdownAddon', ':addons:LeafRTPRiftAddon',
+            ':addons:LeafRTPClaimAddon', ':addons:LeafRTPActionAddon',
+            ':addons:LeafRTPGuiAddon:rtp-gui-common', ':addons:LeafRTPGuiAddon:rtp-gui-bukkit',
+    ]
+    if (project.path in java17Modules) {
+        tasks.named('compileJava', JavaCompile).configure {
+            options.release = 17
+        }
+    }
+    // ADR-113 bytecode gate: `release = 17` is a request, not proof. Fail the build unless every
+    // main-source class (including rtp-plugin's lite set) is classfile 61, so a Java 21 class
+    // cannot reach a pre-1.20.5 jar unnoticed. Test classes are excluded and stay on the toolchain.
+    if (project.path in java17Modules) {
+        tasks.register('verifyJava17Bytecode') {
+            group = 'verification'
+            description = 'ADR-113: fails unless every main-source class of this Java 17 module is classfile 61.'
+            dependsOn tasks.named('classes')
+            dependsOn tasks.matching { it.name == 'compileLiteJava' }
+            doLast {
+                def scanned = 0
+                def offenders = []
+                ['main', 'lite'].each { setName ->
+                    def set = project.sourceSets.findByName(setName)
+                    if (set == null) return
+                    set.output.classesDirs.files.each { dir ->
+                        if (!dir.isDirectory()) return
+                        dir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+                            if (!f.name.endsWith('.class')) return
+                            scanned++
+                            def major = new DataInputStream(new BufferedInputStream(new FileInputStream(f))).withCloseable { dis ->
+                                dis.readInt()
+                                dis.readUnsignedShort()
+                                dis.readUnsignedShort()
+                            }
+                            if (major != 61) offenders << "${f.path} (classfile major ${major})"
+                        }
+                    }
+                }
+                if (scanned == 0) {
+                    throw new GradleException("verifyJava17Bytecode: no compiled classes found in ${project.path}")
+                }
+                if (!offenders.isEmpty()) {
+                    throw new GradleException("ADR-113: ${project.path} emits non-Java-17 classes:\n  " + offenders.join('\n  '))
+                }
+            }
+        }
+        tasks.named('check').configure { dependsOn 'verifyJava17Bytecode' }
+    }
+    // These Java 17 modules compile against Java 21 artifacts that only load on
+    // Java 21+ runtimes (1.21+/26.x carriers and Velocity in rtp-plugin, NeoForge
+    // 21.1, WorldGuard 7.0.12), so their classpaths keep requesting JVM 21
+    // variants instead of the JVM 17 that `release = 17` would imply.
+    def java17OnJava21Classpath = [
+            ':rtp-plugin', ':neoforge:neoforge-common', ':rtp-neoforge', ':addons:LeafRTPClaimAddon',
+    ]
+    // Test classpaths of the Java 17 addons that consume Java 21-only test helpers (rtp-core
+    // test fixtures, helpers:MockItemPlugins) keep requesting JVM 21 variants; test sources
+    // stay on the toolchain level.
+    def java17TestOnJava21Classpath = [
+            ':addons:LeafRTPActionAddon', ':addons:LeafRTPClaimAddon', ':addons:LeafRTPGuiAddon:rtp-gui-bukkit',
+    ]
+    def jvm21Configurations = []
+    if (project.path in java17OnJava21Classpath) {
+        jvm21Configurations += ['compileClasspath', 'runtimeClasspath']
+    }
+    if (project.path in java17TestOnJava21Classpath) {
+        jvm21Configurations += ['testCompileClasspath', 'testRuntimeClasspath']
+    }
+    jvm21Configurations.each { cfg ->
+        configurations.named(cfg) {
+            attributes {
+                attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 21)
+            }
+        }
+    }
+
+    // Javadoc strictness is concentrated on the addon-facing surface. rtp-api and
+    // rtp-core are consumed by out-of-repo addon authors (see the publishing block
+    // below), so they keep the JDK's default doclint checks (missing tags included).
+    // Every other module (platform adapters, rtp-plugin, addons, the helper api/*
+    // SPI modules) only needs javadoc to *build*, not to be exhaustively documented,
+    // so doclint is disabled and javadoc warnings no longer fail their builds.
+    tasks.withType(Javadoc).configureEach {
+        options.encoding = 'UTF-8'
+        (options as StandardJavadocDocletOptions).tags(
+                'governedBy:a:Governed By:',
+                'trace:a:Trace:',
+                'invariant:aX:Invariant:',
+                'prohibition:aX:Prohibition:'
+        )
+        if (project.path != ':rtp-api' && project.path != ':rtp-core') {
+            options.addStringOption('Xdoclint:none', '-quiet')
+            failOnError = false
+        }
+    }
+
+    dependencies {
+        // Shared versions are centralized in gradle/libs.versions.toml.
+        compileOnly rootProject.libs.jetbrains.annotations
+        // Checker Framework qualifier annotations (compile-time only; not shipped in JARs).
+        // The Resource Leak Checker reads @MustCall, @Owning, and @EnsuresCalledMethods
+        // from this artifact during annotation processing.
+        compileOnly rootProject.libs.checker.qual
+        testCompileOnly rootProject.libs.checker.qual
+        testImplementation platform(rootProject.libs.junit.bom)
+        testImplementation rootProject.libs.junit.jupiter
+        testImplementation rootProject.libs.mockito.core
+        testImplementation rootProject.libs.jetbrains.annotations
+        testRuntimeOnly rootProject.libs.junit.platform.launcher
+    }
+
+    // Verbose test output (per-test start/pass lines + full stdout/stderr streaming)
+    // is opt-in via `-PverboseTests`. The default run only reports skipped/failed
+    // tests, which removes the dominant console-I/O cost on large suites
+    // (rtp-core streams a lot of runtime logging). Failures still print full
+    // stack traces and exceptions so a red build stays diagnosable.
+    def verboseTests = project.hasProperty('verboseTests')
+    // Fork tests across JVMs so a single module's suite runs in parallel. Capped
+    // at half the available processors to leave headroom for Gradle's own
+    // module-level parallelism (`org.gradle.parallel=true`) and the 8g daemon
+    // heap shared with the Loom remap workers. `forkEvery` recycles a worker JVM
+    // periodically to bound leaked static state across test classes.
+    def testForks = project.hasProperty('testForks') ?
+            project.property('testForks').toInteger() :
+            Math.max(1, Runtime.runtime.availableProcessors().intdiv(2))
+    // Tiered test execution (JUnit 5 tags). Test categories, by purpose:
+    //   - "logic" (the DEFAULT / coverage tier): every UNTAGGED test. Fast,
+    //     deterministic unit/logic tests - this is the tier the changed-line
+    //     coverage gate (scripts/diff-coverage.py) measures, and the one new
+    //     tests join by default (per library, then core).
+    //   - `slow`    : long-running characterization / benchmark suites.
+    //   - `edge`    : environment-specific / edge-case suites.
+    //   - `simulation` / `drawing` / `demo` : non-logic suites (Monte-Carlo
+    //     simulations, image/map drawing, demonstrations). Excluded from the
+    //     default coverage-focused tier so it stays under budget.
+    // Default `.\gradlew.bat build` / `test` runs the logic tier only (all of
+    // the above tags are excluded). Pass `-PfullTests` to run EVERYTHING
+    // (release / nightly CI): `.\gradlew.bat build -PfullTests`.
+    // Untagged tests always run in both tiers, so the default stays a safe
+    // superset-minus-non-logic.
+    def fullTests = project.hasProperty('fullTests')
+    def nonLogicTags = ['slow', 'edge', 'simulation', 'drawing', 'demo'] as String[]
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform {
+            if (!fullTests && name != 'simulationBenchmark') {
+                excludeTags nonLogicTags
+            }
+        }
+        maxHeapSize = '2048m'
+        // -XX:+EnableDynamicAgentLoading opts in to Mockito/ByteBuddy's dynamic
+        // agent attach, silencing the JDK "agent loaded dynamically ... will be
+        // disallowed by default in a future release" warning across the suite.
+        // -Xshare:off disables CDS so the test launcher's bootstrap-classpath
+        // append no longer prints "Sharing is only supported for boot loader
+        // classes ..." on every fork.
+        jvmArgs '-XX:+UseG1GC', '-XX:MaxMetaspaceSize=384m', '-XX:+EnableDynamicAgentLoading', '-Xshare:off'
+        maxParallelForks = testForks
+        forkEvery = 20
+        // Re-run when the tier toggle flips so cached results from the other
+        // tier are not silently reused.
+        inputs.property 'fullTests', fullTests
+        // Jazzer fuzz mode (JAZZER_FUZZ) is read from the environment of the forked
+        // test JVM; without these a cached result would be reused and nothing fuzzed.
+        inputs.property 'jazzerFuzz', System.getenv('JAZZER_FUZZ') ?: ''
+        inputs.property 'jazzerMaxDuration', System.getenv('JAZZER_MAX_DURATION') ?: ''
+        if (System.getenv('JAZZER_FUZZ')) {
+            outputs.upToDateWhen { false }
+        }
+        testLogging {
+            events = (verboseTests ? ['started', 'passed', 'skipped', 'failed'] : ['skipped', 'failed'])
+            showStandardStreams = verboseTests
+            exceptionFormat = 'full'
+            showStackTraces = true
+        }
+    }
+
+    // JaCoCo instrumentation + HTML/XML report generation is opt-in via
+    // `-Pcoverage`. A routine `.\gradlew.bat build` skips it entirely (the
+    // instrumentation agent and dual-format report are pure overhead for local
+    // dev); CI runs coverage with `-Pcoverage`.
+    apply plugin: 'jacoco'
+    jacoco { toolVersion = rootProject.libs.versions.jacoco.get() }
+    if (project.hasProperty('coverage')) {
+        def isPlatformOrAddonProject = project.projectDir.canonicalPath.contains(File.separator + 'platforms' + File.separator) ||
+                project.projectDir.canonicalPath.contains(File.separator + 'addons' + File.separator) ||
+                project.projectDir.canonicalPath.contains(File.separator + 'helpers' + File.separator) ||
+                project.projectDir.canonicalPath.contains(File.separator + 'plugins' + File.separator) ||
+                project.path.startsWith(':bukkit') ||
+                project.path.startsWith(':paper') ||
+                project.path.startsWith(':folia') ||
+                project.path.startsWith(':fabric') ||
+                project.path.startsWith(':neoforge') ||
+                project.path == ':rtp-neoforge' ||
+                project.path.startsWith(':addons') ||
+                project.path.startsWith(':helpers') ||
+                project.path.startsWith(':plugins') ||
+                project.path == ':rtp-plugin' ||
+                project.path == ':proxy:proxy-velocity' ||
+                project.path == ':effects-api:effects-api-fabric-unobf'
+
+        tasks.withType(Test).configureEach { finalizedBy jacocoTestReport }
+        jacocoTestReport {
+            dependsOn test
+            reports { html.required = true; xml.required = true }
+        }
+    }
+
+    // Coverage floors, centralized (ENTERPRISE_READINESS.md section 4.1 item 3).
+    // Single source of truth for every module's jacocoTestCoverageVerification
+    // ratchet: floors live in one map here rather than scattered across per-module
+    // build scripts. Add a module's path with its measured-minus-margin floors to
+    // start gating it; raise the numbers as coverage grows -- never lower them.
+    // The verification runs off the JaCoCo exec data the jacoco plugin already
+    // attaches to every Test task, so it gates `check` regardless of `-Pcoverage`
+    // (which only controls report generation). Platform adapters stay uncapped
+    // until their realistic ceilings (section 2.2) are reached; add them here then.
+    def coverageFloors = [
+            // rtp-core measured via jacocoTestReport (2026-09-15): 81.6% instruction /
+            // 65.8% branch. Floors carry a ~1-2 pt margin under the baseline because a
+            // partially-recompiled tree makes JaCoCo discard stale execution data,
+            // which can read several points low. Target is 90/80 (section 3).
+            ':rtp-core': [
+                    instruction: 0.80,
+                    branch: 0.64,
+                    // Per-package rules for safety-critical packages (ENTERPRISE_READINESS.md 4.1 item 4).
+                    // Floors are higher than module baseline and gate critical pipelines.
+                    packages: [
+                            'io.github.dailystruggle.rtp.common.tasks.teleport': [instruction: 0.87, branch: 0.75],
+                            'io.github.dailystruggle.rtp.common.selection.region': [instruction: 0.82, branch: 0.68],
+                            'io.github.dailystruggle.rtp.common.selection.worldborder': [instruction: 0.99, branch: 0.89]
+                    ]
+            ],
+            // metrics-api measured: 100% instruction / 94.6% branch.
+            // Sits at Stage A target (0.95/0.85). ENTERPRISE_READINESS.md 4.2 item 13.
+            ':metrics-api': [instruction: 0.95, branch: 0.85],
+            // bstats-api: new module; floor set at the Stage A strict gate.
+            ':bstats-api': [instruction: 0.90, branch: 0.80],
+            // yaml-api measured via jacocoTestReport (2026-10-24): 89.0% instruction /
+            // 79.3% branch overall (96.4% / 88.8% on configuration.yaml).
+            ':yaml-api': [
+                    instruction: 0.85,
+                    branch: 0.75,
+                    packages: [
+                            'io.github.dailystruggle.rtp.common.configuration.yaml': [instruction: 0.92, branch: 0.80]
+                    ]
+            ],
+            // config-bit-api measured via jacocoTestReport (2026-10-24): 96.1% instruction /
+            // 81.2% branch.
+            ':config-bit-api': [instruction: 0.90, branch: 0.78],
+            // predict-api measured via jacocoTestReport (2026-10-24): 94.3% instruction /
+            // 79.5% branch.
+            ':predict-api': [instruction: 0.90, branch: 0.76],
+            // units-api measured via jacocoTestReport (2026-10-22): 86.3% instruction /
+            // 67.9% branch. CacheMemoryCost's RTP-dependent tests remain in rtp-core.
+            ':units-api': [instruction: 0.85, branch: 0.66],
+            // tags-api measured: 98.2% instruction / 90.9% branch.
+            // Sits at Stage A target (0.95/0.85). ENTERPRISE_READINESS.md 4.2 item 8.
+            ':tags-api': [instruction: 0.95, branch: 0.85],
+            // anvil-api measured via jacocoTestReport (2026-10-13): 91.7% instruction / 82.7% branch.
+            ':anvil-api': [instruction: 0.90, branch: 0.80],
+            // maps-api measured via jacocoTestReport (2026-10-08): 96.2% instruction / 84.6% branch.
+            ':maps-api': [instruction: 0.90, branch: 0.80],
+            // rtp-api measured: 95.7% instruction / 81.3% branch.
+            // Sits at Stage A strict 90/80 JaCoCo gate.
+            ':rtp-api': [instruction: 0.90, branch: 0.80],
+            // rtp-proxy-common measured via jacocoTestReport (2026-09-15): 87.0% instruction /
+            // 68.8% branch (without Docker Redis IT). Floors carry a ~1-2 pt margin under the
+            // baseline because a partially-recompiled tree makes JaCoCo discard stale execution
+            // data, which can read several points low.
+            ':proxy:proxy-common': [instruction: 0.85, branch: 0.67],
+            // commands-api measured via jacocoTestReport (2026-10-23): 96.5% instruction /
+            // 90.4% branch.
+            // Sits at Stage A strict 90/80 JaCoCo gate.
+            ':commands-api': [instruction: 0.90, branch: 0.80],
+            ':bit-api': [instruction: 0.90, branch: 0.80],
+    ]
+    def moduleFloors = coverageFloors[project.path]
+    if (moduleFloors != null) {
+        jacocoTestCoverageVerification {
+            // Read a fresh exec file, never a stale one. JaCoCo discards coverage
+            // for classes whose bytecode changed since the last run, so a
+            // verification off cached exec data can fail for reasons unrelated to
+            // tests (ENTERPRISE_READINESS.md section 2.4 caveat 1). Binding to the
+            // test task guarantees a same-invocation measurement.
+            dependsOn test
+            violationRules {
+                rule {
+                    limit {
+                        counter = 'INSTRUCTION'
+                        value   = 'COVEREDRATIO'
+                        minimum = moduleFloors.instruction
+                    }
+                    limit {
+                        counter = 'BRANCH'
+                        value   = 'COVEREDRATIO'
+                        minimum = moduleFloors.branch
+                    }
+                }
+                if (moduleFloors.packages) {
+                    moduleFloors.packages.each { pkgName, pkgLimits ->
+                        rule {
+                            element = 'PACKAGE'
+                            includes = [pkgName]
+                            if (pkgLimits.instruction != null) {
+                                limit {
+                                    counter = 'INSTRUCTION'
+                                    value   = 'COVEREDRATIO'
+                                    minimum = pkgLimits.instruction
+                                }
+                            }
+                            if (pkgLimits.branch != null) {
+                                limit {
+                                    counter = 'BRANCH'
+                                    value   = 'COVEREDRATIO'
+                                    minimum = pkgLimits.branch
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        tasks.named('check').configure { dependsOn jacocoTestCoverageVerification }
+    }
+
+    // Local, programmable static analysis (the clang-tidy analogue). PMD is the
+    // engine; the curated, appendable ruleset lives in config/pmd/ruleset.xml
+    // (starter known-issue detectors + project-specific rules such as
+    // PreferNonLockingExecution). It is applied ONLY under `-PstaticAnalysis`
+    // so a routine `.\gradlew.bat build` neither resolves the PMD toolchain nor
+    // pays its scan cost (keeps the fast-build budget intact). When enabled,
+    // `pmdMain`/`pmdTest` run as part of `check` and FAIL the build on any
+    // violation. Opt-in locally; always on in CI (gradle-set.yml passes
+    // `-PstaticAnalysis` to every set build, Jenkinsfile `Static Analysis` stage).
+    //   Local / CI gate : .\gradlew.bat check -PstaticAnalysis
+    //   Whole build      : .\gradlew.bat build -PstaticAnalysis
+    // `pmdRegexMain` is a separate ADVISORY scan (config/pmd/regex.xml, never
+    // fails the build) that flags avoidable regex use. It runs under either
+    // flag; `-PregexAnalysis` alone runs only it, skipping the gating tasks.
+    //   Regex advisory  : .\gradlew.bat pmdRegexMain -PregexAnalysis
+    def pmdGate = project.hasProperty('staticAnalysis')
+    if (pmdGate || project.hasProperty('regexAnalysis')) {
+        apply plugin: 'pmd'
+        pmd {
+            toolVersion = rootProject.libs.versions.pmd.get()
+            // The starter ruleset is the single source of truth; disable PMD's
+            // built-in default set so only our curated/appended rules run.
+            ruleSetFiles = rootProject.files('config/pmd/ruleset.xml')
+            ruleSets = []
+            consoleOutput = true
+            // Fail the build on violations (that is the point of the gate).
+            ignoreFailures = false
+            // Analyse production + test sources; skip generated/remapped output.
+            incrementalAnalysis = true
+        }
+        def pmdRegexMain = tasks.register('pmdRegexMain', Pmd) {
+            group = 'verification'
+            description = 'Advisory PMD scan for avoidable regex use (config/pmd/regex.xml); never fails the build.'
+            ruleSetFiles = rootProject.files('config/pmd/regex.xml')
+            ruleSets = []
+            source = sourceSets.main.allJava
+            // Type resolution for pmd-java:matchesSig (String / Pattern receivers).
+            classpath = sourceSets.main.output + sourceSets.main.compileClasspath
+            ignoreFailures = true
+            consoleOutput = true
+            reports {
+                xml.required = true
+                xml.outputLocation = layout.buildDirectory.file('reports/pmd/regexMain.xml')
+                html.required = true
+                html.outputLocation = layout.buildDirectory.file('reports/pmd/regexMain.html')
+            }
+        }
+        tasks.named('check').configure { dependsOn pmdRegexMain }
+        tasks.withType(Pmd).configureEach {
+            if (!pmdGate && name != 'pmdRegexMain') enabled = false
+        }
+        afterEvaluate {
+            def jrtFsFiles = files(javaToolchains.launcherFor(java.toolchain).map {
+                it.metadata.installationPath.file('lib/jrt-fs.jar').asFile
+            }).filter { it.exists() }
+            def fallbackJrtFs = new File(System.getProperty('java.home'), 'lib/jrt-fs.jar')
+            if (jrtFsFiles.isEmpty() && fallbackJrtFs.exists()) {
+                jrtFsFiles = files(fallbackJrtFs)
+            }
+            tasks.withType(Pmd).configureEach {
+                // AuxClasspathLoader treats every non-directory file as a JAR/ZIP archive. Filter out non-archives
+                // (such as POM artifacts resolved by pom-packaging dependencies) to prevent ZipException crashes.
+                if (classpath != null) {
+                    classpath = files(classpath.filter { it.isDirectory() || it.name.endsWith('.jar') || it.name.endsWith('.zip') }, jrtFsFiles)
+                }
+            }
+        }
+    }
+
+    processResources {
+        // Capture project.version at configuration time so the filesMatching
+        // closure does not reach Task.project at execution time
+        // (deprecated in Gradle 9, fatal in Gradle 10).
+        def projectVersion = project.version
+        inputs.property "version", projectVersion
+        filesMatching(["plugin.yml", "fabric.mod.json"]) {
+            expand "version": projectVersion
+        }
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Addon-facing and standalone SDK artifact publishing (JitPack / Maven Local / Maven Central).
+//
+// All 14 platform-neutral `api/*` SDK modules (server-api, anvil-api, bit-api,
+// bstats-api, commands-api, config-bit-api, effects-api, maps-api, menu-api,
+// metrics-api, predict-api, tags-api, units-api, yaml-api) plus rtp-api,
+// rtp-core, and rtp-proxy:rtp-proxy-common are published to a public Maven
+// coordinate so both out-of-repo RTP addon authors and standalone multi-platform
+// plugin/mod authors can consume them without `project(...)` references.
+// This block applies `maven-publish` to that 17-module closure and nothing else,
+// deliberately excluding the platform adapters, the Fabric/Loom (JDK 25) modules,
+// and the shaded plugin jar.
+//
+// On JitPack (see jitpack.yml) the resulting modules are consumed as
+//   com.github.DailyStruggle.RTP:<module>:<tag>
+// For a "real" registry (Maven Central) see docs/dev/PUBLISHING.md.
+//
+// Closure rationale (transitive `api`/`implementation` project edges + standalone SDK):
+//   rtp-api  -> server-api, commands-api, yaml-api, units-api, metrics-api, menu-api, bit-api
+//   anvil-api -> bit-api
+//   config-bit-api -> yaml-api, bit-api, units-api
+//   menu-api -> server-api, commands-api
+//   rtp-core -> rtp-api, anvil-api, bit-api, config-bit-api, commands-api, yaml-api,
+//               effects-api, metrics-api, bstats-api, maps-api, menu-api, predict-api,
+//               tags-api, units-api, rtp-proxy:rtp-proxy-common
+//   rtp-proxy-common   -> rtp-api, metrics-api
+// Every coordinate that can appear in a generated POM must itself be published,
+// otherwise a consumer's transitive resolution fails. All 14 `api/*` modules are
+// published alongside rtp-api, rtp-core, and rtp-proxy:rtp-proxy-common.
+def publishedModulePaths = [
+        ':rtp-api',
+        ':server-api',
+        ':rtp-core',
+        ':anvil-api',
+        ':bit-api',
+        ':commands-api',
+        ':effects-api',
+        ':yaml-api',
+        ':units-api',
+        ':metrics-api',
+        ':bstats-api',
+        ':maps-api',
+        ':predict-api',
+        ':config-bit-api',
+        ':menu-api',
+        ':tags-api',
+        ':database-api',
+        ':schematics-api',
+        ':proxy:proxy-common',
+        ':bukkit:bukkit-common',
+        ':paper:paper-common',
+        ':folia:folia-common',
+]
+
+// ---------------------------------------------------------------------------
+// Binary compatibility checking (japicmp) - ENTERPRISE_READINESS.md item 31.
+//
+// Verifies public API modules (rtp-api, commands-api, effects-api, maps-api,
+// metrics-api, anvil-api, tags-api) against the previous release baseline.
+// Configured to fail the build on unannounced binary-incompatible changes.
+// server-api is excluded until it has a released baseline.
+def apiModulesForBinaryCheck = [
+        ':rtp-api',
+        ':commands-api',
+        ':effects-api',
+        ':maps-api',
+        ':metrics-api',
+        ':anvil-api',
+        ':tags-api',
+].findAll { findProject(it) != null }
+
+def acceptedBreaksConfigFile = file("${rootDir}/config/binary-compatibility-accepted-breaks.json")
+
+apiModulesForBinaryCheck.each { modulePath ->
+    project(modulePath) {
+        apply plugin: 'me.champeau.gradle.japicmp'
+
+        def baselineVersion = project.findProperty('japicmpBaselineVersion') as String ?: '3.2.1'
+        def baselineArtifact = "io.github.dailystruggle:${project.name}:${baselineVersion}"
+
+        configurations {
+            japicmpBaseline {
+                canBeResolved = true
+                canBeConsumed = false
+            }
+        }
+
+        dependencies {
+            japicmpBaseline(baselineArtifact) {
+                transitive = false
+            }
+        }
+
+        def pluginInst = project.plugins.findPlugin('me.champeau.gradle.japicmp')
+        def taskClass = pluginInst.class.classLoader.loadClass('me.champeau.gradle.japicmp.JapicmpTask')
+
+        def txtReportFile = layout.buildDirectory.file("reports/japicmp-${project.name}.txt")
+        def htmlReportFile = layout.buildDirectory.file("reports/japicmp-${project.name}.html")
+
+        tasks.register('checkBinaryCompatibility', taskClass) {
+            group = 'verification'
+            description = "Checks binary compatibility of ${project.name} against version ${baselineVersion}."
+
+            // Compare newly built jar against resolved baseline.
+            // In Loom-managed modules, `remapJar` produces the shippable jar
+            // in build/libs, whereas `jar` outputs to build/devlibs/*-dev.jar.
+            def jarTask = tasks.findByName('remapJar') ?: tasks.named('jar')
+            newClasspath = files(jarTask)
+            oldClasspath = configurations.japicmpBaseline
+
+            // Report modified classes and emit rich reports
+            onlyModified = true
+            onlyBinaryIncompatibleModified = false
+            failOnModification = false
+            failOnSourceIncompatibility = false
+            ignoreMissingClasses = true
+            // Platform/internal adapter implementation packages are not public API.
+            // effectsapi.fabric moved to rtp-fabric-common (effects-api-ADR-003
+            // amendment 2026-10-15) and effectsapi.bukkit / EffectsAPI moved to
+            // rtp-bukkit-common (ADR-116 Decision 4); kept excluded so the baseline diff stays quiet.
+            packageExcludes = [
+                    'io.github.dailystruggle.effectsapi.fabric',
+                    'io.github.dailystruggle.effectsapi.bukkit'
+            ]
+            classExcludes = [
+                    'io.github.dailystruggle.effectsapi.fabric.*',
+                    'io.github.dailystruggle.effectsapi.bukkit.*',
+                    'io.github.dailystruggle.effectsapi.EffectsAPI'
+            ]
+            txtOutputFile = txtReportFile.get().asFile
+            richReport {
+                reportName = "japicmp-${project.name}.html"
+                addDefaultRules = true
+            }
+
+            // Do not fail task execution if baseline jar cannot be found in repos (e.g. initial dev snapshot)
+            onlyIf {
+                try {
+                    !configurations.japicmpBaseline.files.isEmpty()
+                } catch (Exception e) {
+                    logger.info("japicmp baseline ${baselineArtifact} not resolvable; skipping check for ${project.name}: ${e.message}")
+                    return false
+                }
+            }
+
+            // Post-analysis verification against binary-compatibility-accepted-breaks.json per DEPRECATION_POLICY.md
+            doLast {
+                def txtReport = txtReportFile.get().asFile
+                if (!txtReport.exists()) {
+                    return
+                }
+
+                // Parse accepted breaks from config
+                def acceptedBreaks = []
+                if (acceptedBreaksConfigFile.exists()) {
+                    try {
+                        def slurper = Class.forName('groovy.json.JsonSlurper').getDeclaredConstructor().newInstance()
+                        def parsed = slurper.parse(acceptedBreaksConfigFile)
+                        if (parsed.acceptedBreaks instanceof List) {
+                            acceptedBreaks = parsed.acceptedBreaks
+                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to parse ${acceptedBreaksConfigFile}: ${e.message}", e)
+                    }
+                }
+
+                def unacceptedBinaryBreaks = []
+                String currentClass = null
+                txtReport.eachLine { line ->
+                    def trimmed = line.trim()
+                    if (trimmed.startsWith('class ') || trimmed.startsWith('interface ') || trimmed.startsWith('enum ')) {
+                        currentClass = trimmed.split('\\s+')[1]
+                    }
+                    if (trimmed.contains('(!)') && (trimmed.contains('INCOMPATIBLE') || trimmed.contains('REMOVED') || trimmed.contains('MODIFIED'))) {
+                        // Check if accepted in acceptedBreaks
+                        boolean accepted = acceptedBreaks.any { entry ->
+                            def modMatch = !entry.module || entry.module == project.name || entry.module == ":${project.name}"
+                            def memberMatch = entry.member && trimmed.contains(entry.member as String)
+                            def classMatch = entry.className && (currentClass == entry.className || trimmed.contains(entry.className as String))
+                            def reasonGiven = entry.reason && entry.reason.toString().trim().length() > 0
+                            return modMatch && (memberMatch || classMatch) && reasonGiven
+                        }
+                        if (!accepted) {
+                            unacceptedBinaryBreaks << "[${project.name}] ${currentClass ?: ''}: ${trimmed}"
+                        }
+                    }
+                }
+
+                if (!unacceptedBinaryBreaks.isEmpty()) {
+                    def msg = "Binary compatibility verification failed for ${project.name} against baseline ${baselineVersion}.\n" +
+                            "The following binary-incompatible changes were detected and are NOT listed in config/binary-compatibility-accepted-breaks.json:\n" +
+                            unacceptedBinaryBreaks.collect { "  - " + it }.join('\n') + "\n\n" +
+                            "Per docs/dev/DEPRECATION_POLICY.md, public API elements must be deprecated for at least two minor releases before removal.\n" +
+                            "If this breaking change has fulfilled the deprecation window and was announced in CHANGELOG.md, record it in config/binary-compatibility-accepted-breaks.json with the rationale."
+                    throw new RuntimeException(msg)
+                }
+            }
+        }
+    }
+}
+
+// Root aggregator for binary compatibility
+tasks.register('checkBinaryCompatibility') {
+    group = 'verification'
+    description = 'Aggregated binary compatibility verification for all public API modules.'
+    apiModulesForBinaryCheck.each { modulePath ->
+        dependsOn "${modulePath}:checkBinaryCompatibility"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Root `build/libs` artifact aggregation.
+//
+// The root project applies the `java` plugin (for Spotless / convenience), so
+// its `jar` task produces an empty `RTP-<version>.jar` in `build/libs` (the
+// root source tree has no `src/main/java`). The shippable artifacts (the shaded
+// + Loom-remapped Pro and lite jars) are produced by `:rtp-plugin`. Mirror
+// them into the root `build/libs` so `build/libs` holds the real jars rather
+// than a blank one.
+// `:rtp-plugin` is the shaded Bukkit-family aggregator. It bundles the JDK-25
+// Fabric carriers via project(...) dependencies, so settings.gradle drops it
+// from the build graph whenever the JDK-25 modules are excluded (e.g. the
+// `-PexcludeJdk25` JitPack publish run). Only wire the aggregation task when
+// the module is actually part of this build, otherwise `project(':rtp-plugin')`
+// fails configuration with "Project with path ':rtp-plugin' could not be found".
+// Only the executable, shippable jars are mirrored into the root `build/libs`.
+// The intermediate `-dev` jars (Loom/Shadow pre-remap inputs) and the
+// `-sources` / `-javadoc` jars are deliberately excluded - the root build
+// collects executables only.
+def executableJarsOnly = { spec ->
+    spec.exclude '*-dev.jar'
+    spec.exclude '*-sources.jar'
+    spec.exclude '*-javadoc.jar'
+}
+
+if (findProject(':rtp-plugin') != null) {
+    // Capture the empty root jar's name at configuration time. Reaching
+    // Task.project (via `project.version`) inside the doFirst below is
+    // deprecated in Gradle 9, fatal in Gradle 10, and incompatible with the
+    // configuration cache.
+    def rootJarName = "${rootProject.name}-${version}.jar"
+    tasks.register('copyPluginJars', Copy) {
+        group = 'build'
+        description = 'Copies the shippable :rtp-plugin jars into the root build/libs.'
+        from(project(':rtp-plugin').layout.buildDirectory.dir('libs')) {
+            executableJarsOnly(it)
+        }
+        into layout.buildDirectory.dir('libs')
+        // The root `jar` task drops an empty RTP-<version>.jar here; remove it so
+        // build/libs only contains the real plugin artifacts. Also sweep any
+        // stale non-executable jars left by earlier builds (the intermediate
+        // `-dev` jars and historical `-sources` / `-javadoc` jars), since a
+        // `Copy` task never prunes its destination - build/libs holds
+        // executables only.
+        doFirst {
+            delete fileTree(layout.buildDirectory.dir('libs')) {
+                include rootJarName
+                include '*-dev.jar'
+                include '*-sources.jar'
+                include '*-javadoc.jar'
+            }
+        }
+    }
+
+    // Build the plugin jars before copying, and run the copy as part of the root
+    // build so `.\gradlew build` leaves the real artifacts in build/libs.
+    copyPluginJars.dependsOn ':rtp-plugin:assemble'
+    tasks.named('assemble').configure { finalizedBy copyPluginJars }
+}
+
+// ---------------------------------------------------------------------------
+// Root `build/libs` aggregation of the executable addon / helper jars.
+//
+// Mirroring the `:rtp-plugin` mirroring above, the user-installable jars from
+// the standalone addons (LeafRTPGuiAddon assembly, LeafRTPCountdownAddon) and the
+// helper plugins (PeriodicWorldSaver, StressTestRTP) are copied into the root
+// `build/libs` so a single `.\gradlew build` leaves every shippable jar in one
+// place. Only executables are copied (no `-dev` / `-sources` / `-javadoc`).
+// Each module is wired only when it is part of the build graph (the JDK-25 /
+// NeoForge carriers can be excluded via settings.gradle, but the executable
+// modules listed here are always present).
+def executableAddonHelperPaths = [
+        ':addons:LeafRTPGuiAddon:rtp-gui',
+        ':addons:LeafRTPCountdownAddon',
+        ':helpers:PeriodicWorldSaver',
+        ':helpers:StressTestRTP',
+].findAll { findProject(it) != null }
+
+if (!executableAddonHelperPaths.isEmpty()) {
+    tasks.register('copyAddonAndHelperJars', Copy) {
+        group = 'build'
+        description = 'Copies the shippable addon / helper executable jars into the root build/libs.'
+        executableAddonHelperPaths.each { path ->
+            from(project(path).layout.buildDirectory.dir('libs')) {
+                executableJarsOnly(it)
+            }
+        }
+        into layout.buildDirectory.dir('libs')
+    }
+
+    executableAddonHelperPaths.each { path ->
+        copyAddonAndHelperJars.dependsOn "${path}:assemble"
+        if (project(path).tasks.findByName('shadowJar') != null) {
+            copyAddonAndHelperJars.dependsOn "${path}:shadowJar"
+        }
+    }
+    tasks.named('assemble').configure { finalizedBy 'copyAddonAndHelperJars' }
+}
+
+configure(publishedModulePaths.findAll { findProject(it) != null }.collect { project(it) }) {
+    apply plugin: 'maven-publish'
+    // `signing` is a first-party Gradle plugin (ships inside the Gradle
+    // distribution, no external coordinate). It GPG-signs every published
+    // artifact, which Maven Central requires. Applying it unconditionally is
+    // harmless: the `signing {}` block below only wires signing tasks when a
+    // key is actually present, so a credential-free `.\gradlew build` never
+    // signs and never fails.
+    apply plugin: 'signing'
+
+    // Publish after evaluation so each module's `java`/`java-library` component
+    // (and any withSourcesJar/withJavadocJar wiring) is fully registered first.
+    afterEvaluate {
+        if (project.path == ':config-bit-api' && project.hasProperty('publicSdkOnly')) {
+            sourceSets {
+                main {
+                    java {
+                        exclude 'io/github/dailystruggle/rtp/common/bit/config/atlas/**'
+                    }
+                }
+                test {
+                    java {
+                        exclude 'io/github/dailystruggle/rtp/common/bit/config/atlas/**'
+                    }
+                }
+            }
+        }
+
+        // Maven Central rejects a publication that lacks `-sources` and
+        // `-javadoc` jars, so the published closure produces both (the rest of
+        // the build still ships thin executable jars only - see the `java {}`
+        // note in `subprojects`). rtp-api/rtp-core keep strict doclint for the
+        // in-repo build, but the Javadoc *jar* only needs to build, so doclint
+        // is relaxed here for the published modules to keep the javadoc task
+        // from failing the release on a missing @param/@return tag.
+        tasks.withType(Javadoc).configureEach {
+            options.addStringOption('Xdoclint:none', '-quiet')
+            failOnError = false
+        }
+        java {
+            withSourcesJar()
+            withJavadocJar()
+        }
+
+        // Embed module README.md and ADR/architecture docs inside META-INF/leaf-sdk/<module>/
+        // in both the compiled jar and -sources.jar so downstream Maven and addon consumers
+        // receive the documented purpose and contracts directly inside their IDE and artifact.
+        def moduleDir = project.projectDir
+        def moduleName = project.name
+        tasks.withType(Jar).configureEach { jarTask ->
+            if (jarTask.name == 'jar' || jarTask.name == 'sourcesJar') {
+                jarTask.from(moduleDir) {
+                    include 'README.md'
+                    include 'docs/**/*.md'
+                    into "META-INF/leaf-sdk/${moduleName}"
+                }
+            }
+        }
+
+        publishing {
+            publications {
+                mavenJava(MavenPublication) {
+                    from components.java
+
+                    // rtp-core applies `java-test-fixtures`, which adds
+                    // testFixtures{Api,Runtime}Elements variants to the `java`
+                    // component. Those carry a Gradle capability that cannot be
+                    // represented in a POM (hence the "cannot be mapped to Maven"
+                    // warning) and would publish a stray `-test-fixtures` jar that
+                    // Maven Central rejects. Addon consumers never need the test
+                    // fixtures, so drop those variants from every published module
+                    // that has them (only rtp-core does today).
+                    ['testFixturesApiElements', 'testFixturesRuntimeElements'].each { cfgName ->
+                        if (configurations.findByName(cfgName) != null) {
+                            components.java.withVariantsFromConfiguration(configurations.getByName(cfgName)) {
+                                skip()
+                            }
+                        }
+                    }
+
+                    // POM metadata required by Maven Central (name, description,
+                    // url, license, developers, scm). Central validates these on
+                    // upload; JitPack / GitHub Packages ignore them, so adding
+                    // them is safe for every channel.
+                    pom {
+                        name = project.name
+                        description = 'RTP addon-facing API module: ' + project.name
+                        url = 'https://github.com/DailyStruggle/RTP'
+                        licenses {
+                            license {
+                                name = 'GPL-3.0'
+                                url  = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+                            }
+                        }
+                        developers {
+                            developer {
+                                id = 'DailyStruggle'
+                                name = 'DailyStruggle'
+                            }
+                        }
+                        scm {
+                            connection = 'scm:git:https://github.com/DailyStruggle/RTP.git'
+                            developerConnection = 'scm:git:ssh://git@github.com/DailyStruggle/RTP.git'
+                            url = 'https://github.com/DailyStruggle/RTP'
+                        }
+                    }
+                }
+            }
+
+            // GitHub Packages Maven registry.
+            //
+            // Publishes the addon-facing closure to
+            //   https://maven.pkg.github.com/DailyStruggle/RTP
+            // Consumers add that URL as a Maven repo and depend on
+            //   io.github.dailystruggle:<module>:<version>
+            // (the same group/coordinate this build already produces).
+            //
+            // Credentials are read from Gradle properties `gpr.user` / `gpr.key`
+            // (e.g. in ~/.gradle/gradle.properties, never committed) or, failing
+            // that, the env vars GITHUB_ACTOR / GITHUB_TOKEN that GitHub Actions
+            // injects automatically. Publishing to GitHub Packages needs a token
+            // with the `write:packages` scope; reading needs `read:packages`.
+            //
+            // The repository is only wired when a token is actually present, so a
+            // normal `.\gradlew build` on a dev box without credentials neither
+            // fails configuration nor exposes an unauthenticated `publish` target.
+            def ghUser = (findProperty('gpr.user') ?: System.getenv('GITHUB_ACTOR')) as String
+            def ghKey  = (findProperty('gpr.key') ?: System.getenv('GITHUB_TOKEN')) as String
+            if (ghUser && ghKey) {
+                repositories {
+                    maven {
+                        name = 'GitHubPackages'
+                        url = 'https://maven.pkg.github.com/DailyStruggle/RTP'
+                        credentials {
+                            username = ghUser
+                            password = ghKey
+                        }
+                    }
+                    maven {
+                        name = 'LeafCraftDevPackages'
+                        url = 'https://maven.pkg.github.com/LeafCraftDev/MC'
+                        credentials {
+                            username = ghUser
+                            password = ghKey
+                        }
+                    }
+                }
+            }
+
+            // Maven Central staging (first-party only).
+            //
+            // Sonatype's new Central Portal accepts a signed *bundle* rather
+            // than a live Nexus deploy, and there is no first-party Gradle
+            // plugin that speaks the Portal upload protocol. So instead of
+            // trusting a third-party publish plugin with the signing key and
+            // token, this build publishes the signed artifacts into a local
+            // staging directory, which is then zipped and uploaded to the
+            // Portal by hand (or a single curl step). See docs/dev/PUBLISHING.md.
+            //
+            // All published modules deploy into ONE shared root directory so the
+            // whole closure can be bundled together:
+            //   <root>/build/central-staging/
+            repositories {
+                maven {
+                    name = 'CentralStaging'
+                    url = rootProject.layout.buildDirectory.dir('central-staging')
+                }
+            }
+        }
+
+        // Artifact signing (first-party `signing` plugin).
+        //
+        // The signing key + passphrase are read from Gradle properties
+        // `signingKey` (ASCII-armored in-memory PGP private key) and
+        // `signingPassword`. In CI, provide them WITHOUT committing anything by
+        // exporting the Gradle-property env vars:
+        //   ORG_GRADLE_PROJECT_signingKey       = <armored private key>
+        //   ORG_GRADLE_PROJECT_signingPassword  = <key passphrase>
+        // Gradle maps any ORG_GRADLE_PROJECT_<name> env var to project property
+        // <name>, so no build-script change is needed to feed CI secrets.
+        //
+        // Signing is wired only when a key is present, so a credential-free
+        // `.\gradlew build` neither signs nor fails.
+        signing {
+            def signingKey = findProperty('signingKey') as String
+            def signingPassword = findProperty('signingPassword') as String
+            // Two mutually exclusive signing modes:
+            //   1. In-memory ASCII-armored key via `signingKey` / `signingPassword`
+            //      (best for CI: no gpg binary or keyring needed). NOTE: a key
+            //      exported by a very recent GnuPG (2.4+/2.5+) can be unreadable
+            //      by the BouncyCastle bundled in Gradle's signing plugin
+            //      ("no configured signatory"); if you hit that, use mode 2.
+            //   2. The local `gpg` CLI, enabled with `-PsignWithGpgCmd`. Gradle
+            //      shells out to gpg, so it signs with whatever key gpg itself
+            //      resolves (respecting GNUPGHOME / gpg.conf). This side-steps the
+            //      BouncyCastle parse issue and is the reliable path on a box with
+            //      a modern gpg installed.
+            if (findProperty('signWithGpgCmd') != null) {
+                useGpgCmd()
+                sign publishing.publications.mavenJava
+            } else if (signingKey) {
+                useInMemoryPgpKeys(signingKey, signingPassword)
+                sign publishing.publications.mavenJava
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Devstack / Live Server JaCoCo Report & Extraction tasks
+// ---------------------------------------------------------------------------
+apply plugin: 'jacoco'
+jacoco { toolVersion = libs.versions.jacoco.get() }
+
+tasks.register('extractJacocoAgent', Copy) {
+    description = 'Extracts the JaCoCo javaagent jar into devstack/jacoco/ for runtime server profiling.'
+    group = 'verification'
+    from {
+        zipTree(configurations.jacocoAgent.singleFile)
+    }
+    include '**/jacocoagent.jar'
+    into layout.projectDirectory.dir('devstack/jacoco')
+    eachFile { fcd ->
+        fcd.path = 'jacocoagent.jar'
+    }
+    includeEmptyDirs = false
+}
+
+tasks.register('jacocoServerReport', JacocoReport) {
+    description = 'Generates JaCoCo coverage report for live server/devstack test execution data.'
+    group = 'verification'
+
+    executionData = fileTree(dir: rootDir, includes: [
+            'devstack/jacoco/backend*.exec',
+            '**/build/jacoco/*.exec',
+            '**/build/jacoco/server*.exec',
+            '**/build/jacoco/backend*.exec'
+    ])
+
+    def serverProjects = subprojects.findAll {
+        !it.name.toLowerCase().contains('fabric') && !it.name.toLowerCase().contains('neoforge')
+    }
+
+    sourceDirectories.from = files(serverProjects.collect { it.sourceSets.main.allSource.srcDirs })
+
+        include 'LeafRTP-Pro-*.jar'
+        exclude '*-dev.jar'
+    }
+    def addonClassTrees = serverProjects.findAll { it.path.startsWith(':addons') }.collect {
+        it.fileTree(dir: it.layout.buildDirectory, includes: ['classes/java/main/**', 'classes/kotlin/main/**'])
+    }
+
+    if (!pluginJar.empty) {
+        classDirectories.from = files(
+                zipTree(pluginJar.files.max { it.lastModified() }).matching {
+                    include 'io/github/dailystruggle/rtp/**'
+                    exclude(
+                            '**/unobf/**', '**/*Unobf*', '**/*unobf*', '**/neoforge/**', '**/*NeoForge*',
+                            // Multi-version adapter deduplication: dormant legacy NMS/carrier shims
+                            // that are structurally isomorphic to the active test platform (1.21.11)
+                            '**/bukkit/v1_20*/**', '**/bukkit/v1_21_R1/**', '**/bukkit/v1_21_R5/**',
+                            '**/fabric/v1_20*/**', '**/fabric/v1_21_R1/**', '**/fabric/v1_21_R5/**', '**/v26_*/**'
+                    )
+                },
+                addonClassTrees
+        )
+    } else {
+        classDirectories.from = files(serverProjects.collect {
+            it.fileTree(dir: it.layout.buildDirectory,
+                    includes: ['classes/java/main/**', 'classes/kotlin/main/**'],
+                    excludes: [
+                            '**/unobf/**', '**/*Unobf*', '**/*unobf*', '**/neoforge/**', '**/*NeoForge*',
+                            '**/bukkit/v1_20*/**', '**/bukkit/v1_21_R1/**', '**/bukkit/v1_21_R5/**',
+                            '**/fabric/v1_20*/**', '**/fabric/v1_21_R1/**', '**/fabric/v1_21_R5/**', '**/v26_*/**'
+                    ])
+        })
+    }
+
+    reports {
+        html.required = true
+        html.outputLocation = layout.buildDirectory.dir('reports/jacoco/server/html')
+        xml.required = true
+        xml.outputLocation = layout.buildDirectory.file('reports/jacoco/server/jacocoServerReport.xml')
+    }
+}
+
+sonar {
+    properties {
+        property 'sonar.projectKey', 'DailyStruggle_RTP'
+        property 'sonar.organization', 'dailystruggle'
+        property 'sonar.host.url', 'https://sonarcloud.io'
+        property 'sonar.coverage.exclusions', [
+                '**/test/**',
+                '**/testFixtures/**',
+                '**/*Test*.java',
+                '**/*Benchmark*.java',
+                '**/testing/**',
+                '**/mock/**'
+        ].join(',')
+        // The root project produces no executable classes/sources; ensure JaCoCo XML report
+        // is not expected or scanned for root.
+        property 'sonar.coverage.jacoco.xmlReportPaths', ''
+        // Exclude test fixtures, platform adapters, version shims, unobf carrier mirrors,
+        // and platform-specific implementations from cross-module CPD duplication checks.
+        property 'sonar.cpd.exclusions', [
+                '**/test/**',
+                '**/testFixtures/**',
+                '**/*Test*.java',
+                '**/*Benchmark*.java',
+                '**/testing/**',
+                '**/mock/**',
+                'platforms/**',
+                'addons/**',
+                'helpers/**',
+                'rtp-plugin/**',
+                'api/**/*unobf/**',
+                'api/**/*Unobf/**',
+                '**/server/ServerAccessorImpl.java'
+        ].join(',')
+        // ADR-094: Ignore architectural patterns and intentional conventions globally across Sonar analysis:
+        // - java:S3077: volatile reference publication pattern (spatial caches, config reloads).
+        // - java:S2975: public clone() implementations across Cloneable domain models.
+        // - java:S2176: per-version adapter subclasses sharing common interface/scheduler names.
+        // - java:S1452: public SPI wildcard return types (RTPWorld<?>, FactoryValue<?>).
+        // - java:S2696: singleton instance initialization updating static fields.
+        // - java:S1186: empty methods in test mocks/listeners/stubs.
+        // - java:S1192: repeated string literals across test suites, codecs, and command trees.
+        // - java:S115: YAML/config/message enums using lowerCamelCase for YAML key alignment.
+        // - java:S3776: cognitive complexity across spatial math, polygon verification, and version bridges.
+        // - java:S1181: catching Throwable for multi-platform / multi-version isolation and task loops.
+        // - java:S3011: audited reflection accessibility across platform bridges and NMS accessors (ADR-026).
+        // - java:S1141: nested try blocks across multi-version fallbacks and deserializers.
+        // - java:S5785: assertEquals/assertNotEquals in test assertions.
+        // - java:S5778: assertThrows single-invocation constraint in test suites.
+        // - java:S2925: Thread.sleep in asynchronous, transport, and benchmark stress tests.
+        // - java:S3516: onCommand and command handlers intentionally returning boolean flag.
+        // - java:S1845: command permission constants and static factory methods.
+        // - javaarchitecture:S7788: package/class slice disentanglement is governed by ArchUnit Rules 11-32 (ADR-115).
+        // - java:S9395: explicit long-to-double cast suggestion conflicts with java:S1905 and Qodana RedundantCast.
+        // - java:S107: immutable telemetry/snapshot records and multi-parameter constructors.
+        // - java:S108: empty catch (... ignored) blocks on multi-version reflection probes and best-effort fallbacks.
+        // - java:S135: guard-clause break/continue in bounded hot-cache, Anvil scan, and water-filling loops.
+        // - java:S1659: paired coordinate and least-squares accumulator declarations on one line.
+        // - java:S6213: domain methods and parameters named record (EwmaLinearFit#record, LogRecord record).
+        // - java:S5961: comprehensive unit test methods with more than 25 assertions.
+        // - java:S1172: third-party claim-plugin stand-in test stubs retaining external method signatures.
+        // - java:S9435: != 0 lexicographical comparator ternary idiom.
+        // - java:S3398: outer-class private static helpers shared with nested classes.
+        // - java:S9149: static forwarding methods on ClaimAnchoredRegionTracker and DistanceParameter.
+        // - java:S1185: rtp-api Javadoc and binary-compatibility bridge overrides (ProgressBar, DispatchingPlayerLifecycleHook).
+        // - java:S125: prose explanatory comments falsely flagged as commented-out code.
+        // - java:S2629: pre-formatted console log strings across platform bridges.
+        // - java:S6206: non-record public API classes (StoredLocation, GenericConstraintCheck).
+        // - java:S120: camelCase package naming (networkTimeSeries).
+        // - java:S1133: deprecated transitional SPI bridges (HandleProvider, HandleRegistry; ADR-116).
+        // - java:S9358: explicit per-branch call expressions in ternaries.
+        // - java:S2160: AbstractMap view (GroupAllocationMapView) and AbstractVerticalAdjustor inheriting super equals.
+        // - java:S9398: lazy initialization Holder class inside MetricTimeSeriesPublisher SPI interface.
+        // - java:S1119: labeled break (outer:) in bounded 2D grid and stress loops.
+        // - java:S9439: explicit new T[]{...} array initializer syntax.
+        // - java:S9412: Collections.sort(list) vs list.sort(null) stylistic preference.
+        def ignoredRuleExceptions = [
+                s3077: [rule: 'java:S3077'],
+                s2975: [rule: 'java:S2975'],
+                s2176: [rule: 'java:S2176'],
+                s1452: [rule: 'java:S1452'],
+                s2696: [rule: 'java:S2696'],
+                s1186test: [rule: 'java:S1186', resource: '**/src/test/**/*'],
+                s1192: [rule: 'java:S1192'],
+                s115: [rule: 'java:S115'],
+                s3776: [rule: 'java:S3776'],
+                s1181: [rule: 'java:S1181'],
+                s3011: [rule: 'java:S3011'],
+                s1141: [rule: 'java:S1141'],
+                s5785test: [rule: 'java:S5785', resource: '**/src/test/**/*'],
+                s5778test: [rule: 'java:S5778', resource: '**/src/test/**/*'],
+                s2925test: [rule: 'java:S2925', resource: '**/src/test/**/*'],
+                s3516: [rule: 'java:S3516'],
+                s1845: [rule: 'java:S1845'],
+                s7788: [rule: 'javaarchitecture:S7788'],
+                s9395: [rule: 'java:S9395'],
+                s107: [rule: 'java:S107'],
+                s108: [rule: 'java:S108'],
+                s135: [rule: 'java:S135'],
+                s1659: [rule: 'java:S1659'],
+                s6213: [rule: 'java:S6213'],
+                s5961test: [rule: 'java:S5961', resource: '**/src/test/**/*'],
+                s1172test: [rule: 'java:S1172', resource: '**/src/test/**/*'],
+                s9435: [rule: 'java:S9435'],
+                s3398: [rule: 'java:S3398'],
+                s9149: [rule: 'java:S9149'],
+                s1185: [rule: 'java:S1185'],
+                s125: [rule: 'java:S125'],
+                s2629: [rule: 'java:S2629'],
+                s6206: [rule: 'java:S6206'],
+                s120: [rule: 'java:S120'],
+                s1133: [rule: 'java:S1133'],
+                s9358: [rule: 'java:S9358'],
+                s2160: [rule: 'java:S2160'],
+                s9398: [rule: 'java:S9398'],
+                s1119: [rule: 'java:S1119'],
+                s9439: [rule: 'java:S9439'],
+                s9412: [rule: 'java:S9412'],
+                s6416: [rule: 'javabugs:S6416', resource: '**/TestSemaphore.java']
+        ]
+        property 'sonar.issue.ignore.multicriteria', ignoredRuleExceptions.keySet().join(',')
+        ignoredRuleExceptions.each { key, cfg ->
+            property "sonar.issue.ignore.multicriteria.${key}.ruleKey", cfg.rule
+            property "sonar.issue.ignore.multicriteria.${key}.resourceKey", cfg.resource ?: '**/*'
+        }
+    }
+}
+
+subprojects {
+    if (project.path.startsWith(':helpers:stresstest-') ||
+            project.path == ':helpers:StressTestRTP') {
+        sonar {
+            skipProject = true
+        }
+    }
+    afterEvaluate {
+        if (sourceSets.main.allJava.isEmpty() && sourceSets.test.allJava.isEmpty()) {
+            sonar {
+                skipProject = true
+            }
+        }
+    }
+    sonar {
+        properties {
+            if ((sourceSets.main.allJava.isEmpty() && sourceSets.test.allJava.isEmpty()) ||
+                    project.path.startsWith(':helpers:stresstest-') ||
+                    project.path == ':helpers:StressTestRTP') {
+                property 'sonar.skip', 'true'
+            }
+
+            def isPlatformOrAddon = project.projectDir.canonicalPath.contains(File.separator + 'platforms' + File.separator) ||
+                    project.projectDir.canonicalPath.contains(File.separator + 'addons' + File.separator) ||
+                    project.projectDir.canonicalPath.contains(File.separator + 'helpers' + File.separator) ||
+                    project.path.startsWith(':bukkit') ||
+                    project.path.startsWith(':paper') ||
+                    project.path.startsWith(':folia') ||
+                    project.path.startsWith(':fabric') ||
+                    project.path.startsWith(':neoforge') ||
+                    project.path == ':rtp-neoforge' ||
+                    project.path.startsWith(':addons') ||
+                    project.path.startsWith(':helpers') ||
+                    project.path.startsWith(':plugins') ||
+                    project.path == ':rtp-plugin' ||
+                    project.path == ':proxy:proxy-velocity' ||
+                    project.path == ':effects-api:effects-api-fabric-unobf'
+
+            if (isPlatformOrAddon) {
+                property 'sonar.coverage.exclusions', '**/*'
+                property 'sonar.cpd.exclusions', '**/*'
+            }
+
+            def isVersionAdapterOrCarrier = project.name.matches('v[0-9]+.*') ||
+                    project.name.contains('unobf') ||
+                    project.path.matches('.*:(v[0-9]+.*|.*unobf.*)')
+            if (isVersionAdapterOrCarrier) {
+                property 'sonar.cpd.exclusions', '**/*'
+            }
+
+            // External PMD issues for SonarCloud: custom Java rule plugins cannot be
+            // installed on SonarCloud, so project-specific PMD rules surface this way.
+            if (project.hasProperty('staticAnalysis') || project.hasProperty('regexAnalysis')) {
+                def pmdReports = [layout.buildDirectory.file('reports/pmd/regexMain.xml').get().asFile]
+                if (project.hasProperty('staticAnalysis')) {
+                    pmdReports << layout.buildDirectory.file('reports/pmd/main.xml').get().asFile
+                }
+                property 'sonar.java.pmd.reportPaths', pmdReports*.absolutePath.join(',')
+            }
+
+            if (!isPlatformOrAddon) {
+                def jacocoReport = layout.buildDirectory.file('reports/jacoco/test/jacocoTestReport.xml').get().asFile
+                if (jacocoReport.exists()) {
+                    property 'sonar.coverage.jacoco.xmlReportPaths', jacocoReport.absolutePath
+                }
+            }
+        }
+    }
+}

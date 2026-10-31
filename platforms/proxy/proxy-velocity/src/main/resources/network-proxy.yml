@@ -1,0 +1,252 @@
+# RTP Network Mode (Velocity proxy adapter)
+#
+# Phase 2 of MULTI_SERVER_PLAN.md. Disabled by default; flipping
+# `network.enabled: true` opts this proxy into the cross-server network.
+# See rtp-proxy-ADR-002 for the full schema, rtp-proxy-ADR-005 for the
+# Redis binding, and rtp-proxy-ADR-011 for the SQL binding.
+#
+# REQ-RTP-NET-002 (Behavioural Parity When Disabled): when `enabled: false`
+# this file is read, validated, and otherwise ignored - no threads start,
+# no transport opens, no commands register. The proxy behaves
+# byte-identically to a build that does not ship this adapter.
+network:
+  enabled: false
+  schemaVersion: 1
+
+  # Stable proxy identity. Required when `enabled: true`. No default - the
+  # operator MUST supply one; two proxies sharing a proxyId will overwrite
+  # each other's heartbeat row. Must be non-empty.
+  proxyId: ""
+
+  # Proxy role. `auto` lets the adapter take part as a participant proxy
+  # (the only role shipped in Phase 2). `proxy` is reserved for future
+  # multi-role topologies. Backends use `role: backend` in their own
+  # network.yml; do not set that value here.
+  role: auto
+
+  # Environment variable holding the shared HMAC secret.
+  # Value: Base64 of at least 32 random bytes (`openssl rand -base64 32`).
+  # Required when `enabled: true` with `transport.type: redis` or `sql`, or
+  # when the proxy-direct listener is on. A missing, non-Base64, or short
+  # secret disables network mode with an ERROR - there is no unsigned mode.
+  secretEnv: RTP_NET_SECRET
+
+  # ADR-015 / REQ-RTP-NET-015: shared cross-proxy wait-list. When enabled,
+  # /rtp requests that cannot be placed on any backend right now (every
+  # peer kill-switched, no `networkKeptCount`, etc.) are parked on a shared
+  # store instead of failing terminally; a periodic drainer reinjects them
+  # as capacity appears, mirroring the per-backend queue UX. On multi-proxy
+  # deployments with `transport.type: redis` only one proxy drains at a
+  # time via a Redis-backed leader lease (RedisLeaderLease, SET NX PX).
+  waitlist:
+    # Master switch. Set to false to use the path where
+    # no-backend resolves as terminal FAILED.
+    enabled: true
+
+    # Hard cap on the shared waitlist. Over-cap enrolments reject as
+    # REJECTED_FULL rather than silently consuming proxy memory during an
+    # extended outage.
+    maxSize: 1024
+
+    # Drainer pulse cadence in millis. Should track `heartbeat.intervalMs`
+    # since BackendHeartbeat.networkKeptCount is the per-backend cap input.
+    # Supports duration units (e.g. 24h, 1d).
+    drainIntervalMs: 1000
+
+    # Backoff window after a total-failure pulse (every drained envelope
+    # failed dispatch). The drainer refreshes every entry's TTL so the
+    # reaper does not chew through valid entries during a network outage.
+    # Supports duration units (e.g. 24h, 1d).
+    drainPauseMs: 2000
+
+    # Redis-backed leader lease TTL. Lease is re-acquired on every pulse.
+    # On `transport.type: in-memory` (or sql) the lease is always-leader,
+    # which is safe only on single-proxy installs.
+    # Supports duration units (e.g. 24h, 1d).
+    leaderLeaseHoldMs: 5000
+
+    # Reaper pulse cadence in millis. Catches orphan entries from crashed
+    # proxies; see ADR-015 "stale-entry concern" section.
+    # Supports duration units (e.g. 24h, 1d).
+    reapIntervalMs: 10000
+
+    # Maximum age before an entry is reaped on quit-event miss. Longer than
+    # any reasonable network blip but short enough to free up the slot when
+    # a proxy genuinely crashed mid-request.
+    # Supports duration units (e.g. 24h, 1d).
+    reapMaxAgeMs: 60000
+transport:
+  # Backing store for cross-process state.
+  # - `in-memory`: development only; nothing leaves the JVM. Use this when
+  #   you want to load the adapter but not actually cross-talk with peers.
+  # - `redis`: Jedis-backed heartbeats + pub/sub fan-out (rtp-proxy-ADR-005).
+  #   Recommended for production; project goal is redis-first.
+  # - `sql`: DB-as-bus (rtp-proxy-ADR-011). The proxy does not own a JDBC
+  #   pool by default, so picking `sql` here will fall back to `in-memory`
+  #   for this session with a WARN. Operators who want cross-process state
+  #   should use `redis` on the proxy and either `redis` or `sql` on the
+  #   backends.
+  type: redis
+  redis:
+    # Required when `type: redis`. Hostname or IP of the Redis instance
+    # shared by every backend and proxy in the network.
+    host: localhost
+
+    # Default Redis port. Override if your deployment uses a non-standard one.
+    port: 6379
+
+    # Encrypt the Redis connection with TLS (hostname-verified).
+    # Uses the JVM default trust store (`-Djavax.net.ssl.trustStore=...` for a
+    # private CA). Equivalent to writing `host: rediss://<host>`.
+    tls: false
+
+    # Redis 6+ ACL username. Empty = legacy `AUTH <password>`.
+    # When set, the proxy sends `AUTH <username> <password>`.
+    username: ""
+
+    # Environment variable holding the Redis password (preferred).
+    # Checked first; falls back to `password` below when unset.
+    passwordEnv: "RTP_REDIS_PASSWORD"
+
+    # Redis password in plain YAML. Empty = none.
+    # Prefer `passwordEnv`; a non-empty value here logs a one-time WARNING.
+    # The password is never logged.
+    password: ""
+  # Proxy-direct listener: backends dial this proxy over TCP (rtp-proxy-ADR-017).
+  # Enabled by `enabled: true` here or by `transport.type: proxy-direct`.
+  # Always requires `network.secretEnv`; every frame is HMAC-signed.
+  direct:
+    # Turn the proxy-direct listener on.
+    enabled: false
+
+    # TCP port backends connect to (their `transport.proxies` entries).
+    port: 25599
+
+    # Address to listen on. Default loopback (same-host backends only).
+    # Any other address requires `tls: true`, or an explicit `tls: false`
+    # to accept plain TCP (logged as a startup WARNING).
+    bindHost: "127.0.0.1"
+
+    # Client IPs / CIDR blocks allowed to connect. Empty = any.
+    # IP literals only (no hostnames), e.g. ["10.0.0.0/24", "192.168.1.20"].
+    # A malformed entry keeps the listener off.
+    allowedClients: []
+
+    # Serve TLS on the listener. Leave unset to allow loopback-only plain TCP.
+    # true = TLS with `keystore`; false = explicit plain TCP on any bindHost.
+    # tls: true
+
+    # PKCS12 keystore with this proxy's certificate + key (TLS only).
+    keystore: ""
+
+    # Environment variable holding the keystore password.
+    # Falls back to `keystorePassword` (YAML, logs a WARNING) when unset.
+    keystorePasswordEnv: "RTP_DIRECT_KEYSTORE_PASSWORD"
+
+    # PKCS12 truststore of backend client certificates (TLS only).
+    # Set = mutual TLS: backends must present a trusted client cert.
+    truststore: ""
+
+    # Environment variable holding the truststore password.
+    truststorePasswordEnv: "RTP_DIRECT_TRUSTSTORE_PASSWORD"
+heartbeat:
+  # How often this proxy publishes its state row. 1000ms is the default
+  # used by both proxy-side and backend-side publishers; peers must
+  # observe rows within `staleAfterMs` to consider them live.
+  # Supports duration units (e.g. 24h, 1d).
+  intervalMs: 1000
+  # Supports duration units (e.g. 24h, 1d).
+  staleAfterMs: 5000
+
+# Proxy-cache availability store (DB-free tier). When a backend selects
+# `transport.type: proxy-cache` (or `auto` with this proxy companion present)
+# this proxy answers each backend's snapshot request with the merged view of:
+#   1) live heartbeats backends pushed while they had a player online, and
+#   2) the operator-declared server -> regions map below.
+# The declared map lets a lobby populate cross-server `/rtp region=`
+# tab-completion as `<server>:<region>` even when a backend is currently
+# player-empty (and therefore not pushing a live heartbeat). A fresh live
+# heartbeat always supersedes the declared entry for the same server.
+# Optional: omit the whole block to rely on live heartbeats only.
+# servers:
+#  backend-a:
+#    regions: [default]
+#  backend-b:
+#    regions: [default, nether]
+# Load balancer scoring table (rtp-proxy-ADR-004). The reference selector
+# (WeightedAverageBackendSelector) scores each candidate backend as
+#   score(b) = ( Sigma_i  weight_i * curve_i( normalize_i( metric_i(b) ) ) ) / backendWeight(b)
+# and picks the lowest score; ties break by serverId ascending.
+#
+# Two configuration shapes are accepted; the proxy reads whichever is present.
+#
+# 1) Sub-configuration `terms` block (preferred). Each term is a map keyed by
+#    a free-form label, with `input`, `weight`, and a nested `curve` sub-map.
+#    Supported inputs: mspt, queueDepth, heapUsed, heapFree, playerCount,
+#    keptCount, tps. Supported curves: linear, exponential (k), logarithmic
+#    (k), sigmoid (k, x0), step (threshold), power (p). Parameter bounds:
+#    k in [0.1, 20], p in [0.1, 8], x0/threshold in [0, 1].
+#
+# 2) Legacy flat weights (msptWeight, queueDepthWeight, heapWeight,
+#    playerCountWeight) are synthesized to linear terms for back-compat.
+#
+# The block below ships ACTIVE so operator support is "edit values" not
+# "first uncomment, then edit". The defaults mirror the lobby-side block
+# in rtp-plugin/network.yml so a single tuned schema covers both code
+# paths (proxy WeightedAverageBackendSelector + lobby/proxy
+# RegionAwareSelector).
+# Five terms, one per metric (no doubled constraints). The curve carries
+# the soft-vs-hard expression: `step` near the top of its range acts as a
+# gate that only fires when the metric is critical, but the candidate can
+# still win if every alternative is even worse (graceful degradation).
+#   - mspt:   sigmoid x0=0.6 (production knee; fires when tick is under pressure)
+#   - queue:  exponential (small queues silent, large ones explode)
+#   - heap:   step at heapUsed >= 0.85, weight 5.0 (effective gate)
+#   - region: step at keptRegion >= 0.95, weight 5.0 (effective gate)
+#   - kept:   logarithmic, weight 0.25 (gentle tie-breaker)
+# regionScarcityWeight is 0 because the explicit `region` term below owns
+# the kept-region signal. The `backends:` block is optional per-server
+# weight overrides; uncomment and adjust to bias the selector toward a
+# specific backend without re-running the curve math.
+loadBalancer:
+  # Supports duration units (e.g. 24h, 1d).
+  staleAfterMs: 30000
+  regionScarcityWeight: 0
+  terms:
+    mspt:
+      input: mspt
+      weight: 1.0
+      curve:
+        type: sigmoid
+        k: 8.0
+        x0: 0.6
+    queue:
+      input: queueDepth
+      weight: 1.0
+      curve:
+        type: exponential
+        k: 3.0
+    heap:
+      input: heapUsed
+      weight: 5.0
+      curve:
+        type: step
+        threshold: 0.85
+    region:
+      input: keptRegion
+      weight: 5.0
+      curve:
+        type: step
+        threshold: 0.95
+    kept:
+      input: keptCount
+      weight: 0.25
+      curve:
+        type: logarithmic
+        k: 9.0
+
+#  backends:
+#    backend-a:
+#      weight: 1.0
+#    backend-b:
+#      weight: 1.0

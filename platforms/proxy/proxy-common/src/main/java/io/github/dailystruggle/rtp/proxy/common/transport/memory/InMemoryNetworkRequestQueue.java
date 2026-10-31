@@ -1,0 +1,331 @@
+package io.github.dailystruggle.rtp.proxy.common.transport.memory;
+
+import io.github.dailystruggle.rtp.proxy.common.spi.NetworkRequestQueue;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * Reference {@link NetworkRequestQueue} implementation backed by in-process
+ * concurrent collections.
+ *
+ * <p><strong>Production use is unsupported.</strong> State lives in this JVM
+ * only. Intended for: unit tests of the dispatcher / status sink, and the
+ * no-op fallback path of {@code NetworkBindings} when
+ * {@code transport.kind = memory}.</p>
+ *
+ * <p>Async semantics mirror {@link InMemoryNetworkStateBinding}: every SPI
+ * call hops off the caller's thread onto an internal single-thread pool, so
+ * a consumer that blocks on a returned future will deadlock the same way it
+ * would against a real binding.</p>
+ *
+ * <p>Capacity: at most {@link #MAX_READY_DEPTH} undequeued envelopes; further
+ * enrolments resolve {@link EnrolOutcome#REJECTED} so the backend buffer retries
+ * later. Correlation ids leave the idempotency set on terminal transition or
+ * cancel (parity with {@code transition.lua}), and the set is compacted past
+ * {@link #MAX_SEEN_CORRELATIONS}.</p>
+ *
+ * <p>One pending request per player: a second correlation id for a player
+ * with an undequeued envelope is rejected ({@link #enrol}) or skipped with a
+ * WARNING ({@link #flushPending}). No HMAC: state never leaves this JVM.</p>
+ */
+public final class InMemoryNetworkRequestQueue implements NetworkRequestQueue {
+
+    private static final Logger LOG = Logger.getLogger(InMemoryNetworkRequestQueue.class.getName());
+
+    /** Hard cap on undequeued envelopes. */
+    static final int MAX_READY_DEPTH = 10_000;
+    /** Compaction threshold for {@link #seenCorrelations}. */
+    static final int MAX_SEEN_CORRELATIONS = 65_536;
+
+    /** FIFO of envelopes awaiting proxy dequeue. */
+    private final ConcurrentLinkedDeque<QueueEnvelope> ready = new ConcurrentLinkedDeque<>();
+
+    /**
+     * Per-player live row. Linked map only so {@link #pollStatus} returns
+     * a deterministic order; concurrent reads are guarded by synchronized
+     * blocks on {@code statuses} for transition CAS-equivalence.
+     */
+    private final Map<UUID, QueueStatus> statuses = new LinkedHashMap<>();
+
+    /** Correlation ids we've already accepted (idempotency guard). */
+    private final Set<UUID> seenCorrelations = ConcurrentHashMap.newKeySet();
+
+    /** Live correlation id per player, so a terminal transition can scrub {@link #seenCorrelations}. */
+    private final Map<UUID, UUID> cidByPlayer = new ConcurrentHashMap<>();
+
+    private final ExecutorService executor;
+    private final AtomicBoolean closed = new AtomicBoolean(false);
+
+    public InMemoryNetworkRequestQueue() {
+        this.executor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "rtp-inmem-network-request-queue");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    @Override
+    public CompletableFuture<EnrolOutcome> enrol(EnrolmentEnvelope envelope) {
+        Objects.requireNonNull(envelope, "envelope");
+        return runAsync(() -> {
+            if (closed.get()) return EnrolOutcome.REJECTED;
+            if (hasOtherPending(envelope)) return EnrolOutcome.REJECTED;
+            if (seenCorrelations.contains(envelope.correlationId())) {
+                // idempotent replay
+                return EnrolOutcome.ACCEPTED;
+            }
+            if (atCapacity()) return EnrolOutcome.REJECTED;
+            seenCorrelations.add(envelope.correlationId());
+            cidByPlayer.put(envelope.playerId(), envelope.correlationId());
+            long now = System.currentTimeMillis();
+            QueueEnvelope qe = new QueueEnvelope(
+                    envelope.playerId(),
+                    envelope.correlationId(),
+                    envelope.regionKey(),
+                    envelope.serverHint(),
+                    envelope.createdAtMs(),
+                    0L);
+            ready.add(qe);
+            putStatus(new QueueStatus(
+                    envelope.playerId(),
+                    QueueState.QUEUED,
+                    0,
+                    Optional.empty(),
+                    envelope.regionKey(),
+                    now));
+            return EnrolOutcome.ACCEPTED;
+        });
+    }
+
+    @Override
+    public CompletableFuture<EnrolOutcome> flushPending(List<EnrolmentEnvelope> batch) {
+        Objects.requireNonNull(batch, "batch");
+        if (batch.isEmpty()) return CompletableFuture.completedFuture(EnrolOutcome.ACCEPTED);
+        return runAsync(() -> {
+            if (closed.get()) return EnrolOutcome.REJECTED;
+            long now = System.currentTimeMillis();
+            boolean full = false;
+            for (EnrolmentEnvelope env : batch) {
+                if (env == null) continue;
+                if (hasOtherPending(env)) continue;
+                if (seenCorrelations.contains(env.correlationId())) continue;
+                if (atCapacity()) {
+                    // REJECTED makes the backend retry the batch; accepted rows replay idempotently.
+                    full = true;
+                    continue;
+                }
+                seenCorrelations.add(env.correlationId());
+                cidByPlayer.put(env.playerId(), env.correlationId());
+                ready.add(new QueueEnvelope(
+                        env.playerId(),
+                        env.correlationId(),
+                        env.regionKey(),
+                        env.serverHint(),
+                        env.createdAtMs(),
+                        0L));
+                putStatus(new QueueStatus(
+                        env.playerId(),
+                        QueueState.QUEUED,
+                        0,
+                        Optional.empty(),
+                        env.regionKey(),
+                        now));
+            }
+            if (full) {
+                LOG.log(Level.WARNING, "InMemoryNetworkRequestQueue: ready depth reached " + MAX_READY_DEPTH
+                        + "; rejecting the remainder of the batch for retry (REQ-RTP-S-004)");
+                return EnrolOutcome.REJECTED;
+            }
+            return EnrolOutcome.ACCEPTED;
+        });
+    }
+
+    @Override
+    public CompletableFuture<List<QueueStatus>> pollStatus(List<UUID> playerIds) {
+        Objects.requireNonNull(playerIds, "playerIds");
+        return runAsync(() -> {
+            List<QueueStatus> out = new ArrayList<>(playerIds.size());
+            synchronized (statuses) {
+                for (UUID id : playerIds) {
+                    if (id == null) continue;
+                    QueueStatus s = statuses.get(id);
+                    if (s != null) out.add(s);
+                }
+            }
+            return Collections.unmodifiableList(out);
+        });
+    }
+
+    @Override
+    public CompletableFuture<Optional<QueueEnvelope>> dequeueReady(Duration blockFor) {
+        Objects.requireNonNull(blockFor, "blockFor");
+        return CompletableFuture.supplyAsync(() -> {
+            long deadlineNs = System.nanoTime() + Math.max(0L, blockFor.toNanos());
+            while (true) {
+                if (closed.get()) return Optional.<QueueEnvelope>empty();
+                QueueEnvelope head = ready.pollFirst();
+                if (head != null) {
+                    long now = System.currentTimeMillis();
+                    QueueEnvelope stamped = new QueueEnvelope(
+                            head.playerId(), head.correlationId(),
+                            head.regionKey(), head.serverHint(),
+                            head.enrolledAtMs(), now);
+                    return Optional.of(stamped);
+                }
+                long remaining = deadlineNs - System.nanoTime();
+                if (remaining <= 0L) return Optional.<QueueEnvelope>empty();
+                try {
+                    // simple poll cadence; production binding uses real BLPOP
+                    Thread.sleep(Math.min(25L, Math.max(1L, remaining / 1_000_000L)));
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return Optional.<QueueEnvelope>empty();
+                }
+            }
+        }, executor);
+    }
+
+    @Override
+    public CompletableFuture<Optional<QueueStatus>> transition(
+            UUID playerId, QueueState next, Optional<String> reason) {
+        Objects.requireNonNull(playerId, "playerId");
+        Objects.requireNonNull(next, "next");
+        Objects.requireNonNull(reason, "reason");
+        return runAsync(() -> {
+            synchronized (statuses) {
+                QueueStatus prev = statuses.get(playerId);
+                if (prev == null) return Optional.<QueueStatus>empty();
+                QueueStatus updated = new QueueStatus(
+                        prev.playerId(),
+                        next,
+                        prev.positionInQueue(),
+                        prev.serverId(),
+                        prev.regionKey(),
+                        System.currentTimeMillis());
+                if (isTerminal(next)) {
+                    statuses.remove(playerId);
+                    forgetCorrelation(playerId);
+                } else {
+                    statuses.put(playerId, updated);
+                }
+                return Optional.of(updated);
+            }
+        });
+    }
+
+    @Override
+    public CompletableFuture<Void> cancel(UUID playerId, CancelReason reason) {
+        Objects.requireNonNull(playerId, "playerId");
+        Objects.requireNonNull(reason, "reason");
+        return runAsync(() -> {
+            synchronized (statuses) {
+                statuses.remove(playerId);
+            }
+            // best-effort scrub of any unpopped ready entry
+            ready.removeIf(q -> playerId.equals(q.playerId()));
+            forgetCorrelation(playerId);
+            return null;
+        });
+    }
+
+    /** Visible for tests. */
+    public int readyDepth() { return ready.size(); }
+
+    /** Visible for tests. */
+    public int statusCount() {
+        synchronized (statuses) { return statuses.size(); }
+    }
+
+    /** Visible for tests. Snapshot copy. */
+    public Set<UUID> trackedPlayers() {
+        synchronized (statuses) { return new HashSet<>(statuses.keySet()); }
+    }
+
+    /** Idempotent. */
+    public void shutdown() {
+        if (!closed.compareAndSet(false, true)) return;
+        executor.shutdownNow();
+        ready.clear();
+        synchronized (statuses) { statuses.clear(); }
+        seenCorrelations.clear();
+        cidByPlayer.clear();
+    }
+
+    /** Visible for tests. */
+    int seenCorrelationCount() {
+        return seenCorrelations.size();
+    }
+
+    private void forgetCorrelation(UUID playerId) {
+        UUID cid = cidByPlayer.remove(playerId);
+        if (cid != null) seenCorrelations.remove(cid);
+    }
+
+    /**
+     * {@code true} when the ready FIFO is full. Also compacts the idempotency
+     * set past its threshold, keeping only ids that are queued or still live.
+     */
+    private boolean atCapacity() {
+        if (seenCorrelations.size() > MAX_SEEN_CORRELATIONS) {
+            Set<UUID> keep = new HashSet<>(cidByPlayer.values());
+            for (QueueEnvelope q : ready) keep.add(q.correlationId());
+            seenCorrelations.retainAll(keep);
+        }
+        return ready.size() >= MAX_READY_DEPTH;
+    }
+
+    /** {@code true} (WARNING logged) when the player already has an undequeued envelope under another cid. */
+    private boolean hasOtherPending(EnrolmentEnvelope env) {
+        for (QueueEnvelope q : ready) {
+            if (env.playerId().equals(q.playerId()) && !env.correlationId().equals(q.correlationId())) {
+                LOG.log(Level.WARNING, "InMemoryNetworkRequestQueue: player " + env.playerId()
+                        + " already has a pending request; skipping correlationId="
+                        + env.correlationId() + " (REQ-RTP-S-004)");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void putStatus(QueueStatus s) {
+        synchronized (statuses) {
+            statuses.put(s.playerId(), s);
+        }
+    }
+
+    private <T> CompletableFuture<T> runAsync(java.util.concurrent.Callable<T> body) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return body.call();
+            } catch (RuntimeException re) {
+                throw re;
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }, executor);
+    }
+
+    private static boolean isTerminal(QueueState s) {
+        return s == QueueState.COMPLETED
+                || s == QueueState.FAILED
+                || s == QueueState.CANCELLED;
+    }
+}

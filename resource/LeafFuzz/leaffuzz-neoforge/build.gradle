@@ -1,0 +1,28 @@
+plugins {
+    id 'net.neoforged.moddev'
+}
+
+group = 'net.leaf'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+neoForge {
+    version = '26.1.2.71'
+
+    mods {
+        leaffuzz {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    implementation project(':resource:LeafFuzz:leaffuzz-common')
+    implementation(project(':neoforge:neoforge-v26_1_R1')) { transitive = false }
+    compileOnly 'com.mojang:brigadier:1.3.10'
+}

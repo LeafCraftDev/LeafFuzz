@@ -1,0 +1,20 @@
+// LeafFuzz - container (aggregator) project only.
+//
+// The installable multi-loader artifact is produced by
+// `:resource:LeafFuzz:leaffuzz-plugin` as `LeafFuzz-<version>.jar`.
+group = 'net.leaf'
+version = '0.1.0'
+
+jar.enabled = false
+
+tasks.named('build') {
+    dependsOn ':resource:LeafFuzz:leaffuzz-common:build'
+    dependsOn ':resource:LeafFuzz:leaffuzz-paper:build'
+    dependsOn ':resource:LeafFuzz:leaffuzz-plugin:build'
+    if (findProject(':resource:LeafFuzz:leaffuzz-fabric') != null) {
+        dependsOn ':resource:LeafFuzz:leaffuzz-fabric:build'
+    }
+    if (findProject(':resource:LeafFuzz:leaffuzz-neoforge') != null) {
+        dependsOn ':resource:LeafFuzz:leaffuzz-neoforge:build'
+    }
+}

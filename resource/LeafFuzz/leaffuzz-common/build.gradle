@@ -1,0 +1,42 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'net.leaf'
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    maven {
+        name = 'Minecraft Libraries'
+        url = 'https://libraries.minecraft.net/'
+    }
+}
+
+dependencies {
+    api "io.github.dailystruggle:server-api:${rootProject.version}"
+    api "io.github.dailystruggle:yaml-api:${rootProject.version}"
+    api "io.github.dailystruggle:units-api:${rootProject.version}"
+    api "io.github.dailystruggle:bit-api:${rootProject.version}"
+    api "io.github.dailystruggle:config-bit-api:${rootProject.version}"
+    api "io.github.dailystruggle:commands-api:${rootProject.version}"
+    api "io.github.dailystruggle:menu-api:${rootProject.version}"
+    api "io.github.dailystruggle:effects-api:${rootProject.version}"
+    api "io.github.dailystruggle:predict-api:${rootProject.version}"
+    api project(':helpers:stresstest-core')
+    compileOnly 'com.mojang:brigadier:1.2.9'
+
+    testImplementation 'com.mojang:brigadier:1.2.9'
+    testImplementation rootProject.libs.jqwik
+    testImplementation rootProject.libs.jazzer.junit
+}
+
+test {
+    useJUnitPlatform {
+        includeEngines 'junit-jupiter', 'jqwik'
+    }
+}

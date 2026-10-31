@@ -1,0 +1,443 @@
+package io.github.dailystruggle.rtp.proxy.common.config;
+
+import io.github.dailystruggle.rtp.common.selection.region.util.DurationParser;
+import io.github.dailystruggle.rtp.common.selection.region.util.TemporalUnit;
+import io.github.dailystruggle.rtp.proxy.common.RTPProxyAccessor;
+import io.github.dailystruggle.rtp.proxy.common.Role;
+import io.github.dailystruggle.rtp.proxy.common.security.HmacVerifier;
+import io.github.dailystruggle.rtp.proxy.common.transport.redis.resp.RespEndpoint;
+
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * Parsed, validated view of {@code network.yml}. Only the
+ * keys the adapter shell + heartbeat publisher need today. The full closed
+ * schema lives in rtp-proxy-ADR-002; additional sections land as the
+ * features that consume them ship (transport binding, load balancer,
+ * reservation TTL, etc.).
+ *
+ * <p>Construction goes through {@link #fromMap(Map, RTPProxyAccessor)}: the
+ * adapter parses {@code network.yml} into a nested {@code Map<String,Object>}
+ * (its own YAML library choice; {@code rtp-proxy-common} is vendor-free) and
+ * hands the map plus the registered accessor here. The accessor supplies the
+ * adapter's hard-coded {@link Role} for {@code role: auto} resolution per
+ * ADR-013.</p>
+ *
+ * <p>Validation is fail-fast: an invalid combination throws
+ * {@link NetworkConfigException}; the adapter is expected to log a configurable
+ * WARNING and leave the host running with {@code enabled} treated as false
+ * (REQ-RTP-NET-002 parity).</p>
+ */
+public final class NetworkConfig {
+
+    private static final Logger LOG = Logger.getLogger(NetworkConfig.class.getName());
+
+    /** One-time guard for the "Redis password in YAML" WARNING. */
+    private static final AtomicBoolean YAML_PASSWORD_WARNED = new AtomicBoolean(false);
+
+    private final boolean enabled;
+    private final int schemaVersion;
+    private final String serverId;
+    private final String proxyId;
+    private final Role role;
+    private final String secretEnv;
+    private final boolean allowUnsigned;
+    private final String transportType;
+    private final long heartbeatIntervalMs;
+    private final long heartbeatStaleAfterMs;
+    private final String redisHost;
+    private final int redisPort;
+    private final String redisPassword;
+    private final boolean redisTls;
+    private final String redisUsername;
+    private final long reservationReapIntervalMs;
+    private final boolean waitlistEnabled;
+    private final int waitlistMaxSize;
+    private final long waitlistDrainIntervalMs;
+    private final long waitlistDrainPauseMs;
+    private final long waitlistLeaderLeaseHoldMs;
+    private final long waitlistReapIntervalMs;
+    private final long waitlistReapMaxAgeMs;
+
+    private NetworkConfig(Builder b) {
+        this.enabled = b.enabled;
+        this.schemaVersion = b.schemaVersion;
+        this.serverId = b.serverId;
+        this.proxyId = b.proxyId;
+        this.role = Objects.requireNonNull(b.role, "role");
+        this.secretEnv = b.secretEnv;
+        this.allowUnsigned = b.allowUnsigned;
+        this.transportType = Objects.requireNonNull(b.transportType, "transportType");
+        this.heartbeatIntervalMs = b.heartbeatIntervalMs;
+        this.heartbeatStaleAfterMs = b.heartbeatStaleAfterMs;
+        this.redisHost = b.redisHost;
+        this.redisPort = b.redisPort;
+        this.redisPassword = b.redisPassword;
+        this.redisTls = b.redisTls;
+        this.redisUsername = b.redisUsername;
+        this.reservationReapIntervalMs = b.reservationReapIntervalMs;
+        this.waitlistEnabled = b.waitlistEnabled;
+        this.waitlistMaxSize = b.waitlistMaxSize;
+        this.waitlistDrainIntervalMs = b.waitlistDrainIntervalMs;
+        this.waitlistDrainPauseMs = b.waitlistDrainPauseMs;
+        this.waitlistLeaderLeaseHoldMs = b.waitlistLeaderLeaseHoldMs;
+        this.waitlistReapIntervalMs = b.waitlistReapIntervalMs;
+        this.waitlistReapMaxAgeMs = b.waitlistReapMaxAgeMs;
+    }
+
+    public boolean enabled() { return enabled; }
+    public int schemaVersion() { return schemaVersion; }
+    public String serverId() { return serverId; }
+    public String proxyId() { return proxyId; }
+    public Role role() { return role; }
+    public String secretEnv() { return secretEnv; }
+    /**
+     * {@code network.allowUnsigned} (default {@code false}): operator opt-in to
+     * accept unauthenticated {@code rtp:net} cache pushes when the secret is not
+     * a usable HMAC key. Mirrors the backend key of the same name
+     * (REQ-RTP-PROXY-007).
+     */
+    public boolean allowUnsigned() { return allowUnsigned; }
+    public String transportType() { return transportType; }
+    public long heartbeatIntervalMs() { return heartbeatIntervalMs; }
+    public long heartbeatStaleAfterMs() { return heartbeatStaleAfterMs; }
+    /**
+     * Redis connection host. Bare host when plain + no ACL user; otherwise a
+     * secret-free {@code redis[s]://[user@]host:port} URL that
+     * {@code RespPool} understands, so TLS / username reach every binding.
+     */
+    public String redisHost() { return redisHost; }
+    public int redisPort() { return redisPort; }
+    /** Resolved password ({@code passwordEnv} first, YAML fallback). Never log. */
+    public String redisPassword() { return redisPassword; }
+    public boolean redisTls() { return redisTls; }
+    /** Redis 6 ACL username, or {@code null}. */
+    public String redisUsername() { return redisUsername; }
+
+    /**
+     * Periodic sweep cadence for {@code ReservationTokenReaper}
+     * (REQ-RTP-NET-011). Defaults to 30 seconds. Must be a positive value;
+     * non-positive values are clamped to the default at parse time so a
+     * misconfigured {@code reservation.reapIntervalMs: 0} cannot disable
+     * reaping silently.
+     */
+    public long reservationReapIntervalMs() { return reservationReapIntervalMs; }
+
+    /**
+     * ADR-015 / REQ-RTP-NET-015. When {@code true}, the proxy-side dispatcher
+     * parks no-backend envelopes on a shared {@link io.github.dailystruggle.rtp.proxy.common.spi.NetworkWaitlist}
+     * instead of resolving as terminal {@code FAILED}, and a periodic
+     * {@link io.github.dailystruggle.rtp.proxy.common.dispatch.NetworkWaitlistDrainer}
+     * pulse reinjects parked envelopes as capacity appears.
+     */
+    public boolean waitlistEnabled() { return waitlistEnabled; }
+
+    /** Hard cap on the shared waitlist; over-cap enrolments reject as {@code REJECTED_FULL}. */
+    public int waitlistMaxSize() { return waitlistMaxSize; }
+
+    /** Drainer pulse cadence in millis; should track {@link #heartbeatIntervalMs()}. */
+    public long waitlistDrainIntervalMs() { return waitlistDrainIntervalMs; }
+
+    /** Drainer backoff window after a total-failure pulse (ADR-015). */
+    public long waitlistDrainPauseMs() { return waitlistDrainPauseMs; }
+
+    /** Leader-lease TTL in millis; lease is re-extended on every successful pulse. */
+    public long waitlistLeaderLeaseHoldMs() { return waitlistLeaderLeaseHoldMs; }
+
+    /** Reaper pulse cadence in millis; catches orphan entries from crashed proxies. */
+    public long waitlistReapIntervalMs() { return waitlistReapIntervalMs; }
+
+    /** Maximum age before an entry is reaped on quit-event miss. */
+    public long waitlistReapMaxAgeMs() { return waitlistReapMaxAgeMs; }
+
+    /**
+     * Parse a raw {@code network.yml} document into a {@code NetworkConfig}.
+     *
+     * <p>Fail-fast rules enforced here (ADR-002 section Validation Rules):
+     * <ul>
+     *   <li>{@code role: auto} resolves via {@code accessor.role()}.</li>
+     *   <li>If the resolved role is a proxy, {@code network.proxyId} must be
+     *       a non-empty string.</li>
+     *   <li>If {@code network.enabled: true} and {@code network.secretEnv}
+     *       is unset, not Base64, or decodes to fewer than
+     *       {@link HmacVerifier#MIN_SECRET_BYTES} bytes, fail (ADR-010).</li>
+     *   <li>{@code transport.redis}: {@code host} (bare or {@code redis[s]://}
+     *       URL), {@code port}, {@code tls}, {@code username},
+     *       {@code passwordEnv} (preferred), {@code password} (fallback,
+     *       one-time WARNING).</li>
+     * </ul>
+     * Other validation (closed-schema rejection of unknown keys, weight
+     * ranges, schemaVersion negotiation) deferred to later phases.
+     */
+    public static NetworkConfig fromMap(Map<String, Object> root, RTPProxyAccessor accessor) {
+        return fromMap(root, accessor, System::getenv);
+    }
+
+    /** As {@link #fromMap(Map, RTPProxyAccessor)} with an injectable env lookup (Redis password). */
+    static NetworkConfig fromMap(Map<String, Object> root, RTPProxyAccessor accessor,
+                                 Function<String, String> env) {
+        Objects.requireNonNull(root, "root");
+        Objects.requireNonNull(accessor, "accessor");
+
+        Map<String, Object> network   = asMap(root, "network");
+        Map<String, Object> transport = asMap(root, "transport");
+        Map<String, Object> heartbeat = asMap(root, "heartbeat");
+
+        Builder b = new Builder();
+        b.enabled       = asBool(network, "enabled", false);
+        b.schemaVersion = asInt(network, "schemaVersion", 1);
+        b.serverId      = asStringOrNull(network, "serverId");
+        b.proxyId       = asStringOrNull(network, "proxyId");
+        b.secretEnv     = asString(network, "secretEnv", "RTP_NET_SECRET");
+        b.allowUnsigned = asBool(network, "allowUnsigned", false);
+
+        String roleStr = asString(network, "role", "auto").toLowerCase(Locale.ROOT);
+        Role declared;
+        switch (roleStr) {
+            case "auto":
+                declared = accessor.role();
+                break;
+            case "proxy":
+                declared = accessor.role();
+                if (declared == Role.BACKEND) {
+                    throw new NetworkConfigException(
+                            "network.role=proxy but the registered RTPProxyAccessor reports BACKEND; "
+                                    + "the loaded jar disagrees with the configured role.");
+                }
+                break;
+            case "backend":
+                declared = Role.BACKEND;
+                break;
+            default:
+                throw new NetworkConfigException("network.role: unrecognised value '" + roleStr + "'");
+        }
+        b.role = declared;
+
+        b.transportType         = asString(transport, "type", "in-memory");
+        b.heartbeatIntervalMs   = asDurationMs(heartbeat, "intervalMs", 1000L);
+        b.heartbeatStaleAfterMs = asDurationMs(heartbeat, "staleAfterMs", 5000L);
+
+        Map<String, Object> redis = asMap(transport, "redis");
+        parseRedis(redis, b, env);
+
+        // REQ-RTP-NET-011: reservation token reaper cadence. Defaults to 30s;
+        // non-positive values clamp to the default so a misconfigured zero/
+        // negative knob cannot silently disable reaping.
+        Map<String, Object> reservation = asMap(root, "reservation");
+        long reapMs = asDurationMs(reservation, "reapIntervalMs", 30_000L);
+        b.reservationReapIntervalMs = reapMs > 0 ? reapMs : 30_000L;
+
+        // ADR-015 / REQ-RTP-NET-015: shared cross-proxy waitlist knobs.
+        // Non-positive cadences clamp to the default so a misconfigured zero
+        // cannot silently disable the drainer/reaper.
+        Map<String, Object> waitlist = asMap(network, "waitlist");
+        b.waitlistEnabled = asBool(waitlist, "enabled", true);
+        int maxSize = asInt(waitlist, "maxSize", 1024);
+        b.waitlistMaxSize = maxSize > 0 ? maxSize : 1024;
+        long drainMs = asDurationMs(waitlist, "drainIntervalMs", 1000L);
+        b.waitlistDrainIntervalMs = drainMs > 0 ? drainMs : 1000L;
+        long pauseMs = asDurationMs(waitlist, "drainPauseMs", 2000L);
+        b.waitlistDrainPauseMs = pauseMs >= 0 ? pauseMs : 2000L;
+        long leaseMs = asDurationMs(waitlist, "leaderLeaseHoldMs", 5000L);
+        b.waitlistLeaderLeaseHoldMs = leaseMs > 0 ? leaseMs : 5000L;
+        long reapEveryMs = asDurationMs(waitlist, "reapIntervalMs", 10_000L);
+        b.waitlistReapIntervalMs = reapEveryMs > 0 ? reapEveryMs : 10_000L;
+        long reapMaxMs = asDurationMs(waitlist, "reapMaxAgeMs", 60_000L);
+        b.waitlistReapMaxAgeMs = reapMaxMs > 0 ? reapMaxMs : 60_000L;
+
+        // Fail-fast: redis transport requires a host.
+        if (b.enabled && "redis".equalsIgnoreCase(b.transportType)
+                && (b.redisHost == null || b.redisHost.isEmpty())) {
+            throw new NetworkConfigException(
+                    "transport.type=redis requires transport.redis.host to be set; "
+                            + "refusing to enable network mode.");
+        }
+
+        // proxyId is optional: when role resolves to a proxy and no proxyId is
+        // configured, default to the local hostname. A Velocity/BungeeCord proxy
+        // has no intrinsic self-name, so an operator running a single proxy need
+        // not invent one; multi-proxy deployments should still set proxyId
+        // explicitly so each proxy has a stable, human-readable identity.
+        if ((declared == Role.PROXY_VELOCITY || declared == Role.PROXY_BUNGEE)
+                && (b.proxyId == null || b.proxyId.isEmpty())) {
+            b.proxyId = defaultProxyId();
+        }
+
+        // secretEnv check only when enabled. Signing transports get the full
+        // decode + >= 32-byte check so a weak secret fails here, closed, instead
+        // of surfacing later as a silent binding downgrade; JVM-local tiers keep
+        // the presence check (they never sign).
+        if (b.enabled) {
+            if (isSigningTransport(b.transportType, transport)) {
+                try (HmacVerifier probe = HmacVerifier.loadFromEnv(b.secretEnv, b.schemaVersion, b.schemaVersion)) {
+                    Objects.requireNonNull(probe);
+                } catch (NetworkConfigException e) {
+                    throw new NetworkConfigException(e.getMessage()
+                            + " Network mode disabled (REQ-RTP-PROXY-007).");
+                }
+            } else {
+                String secretValue = System.getenv(b.secretEnv);
+                if (secretValue == null || secretValue.isEmpty()) {
+                    throw new NetworkConfigException(
+                            "network.secretEnv='" + b.secretEnv
+                                    + "' is unset or empty in the environment; cannot enable network mode (REQ-RTP-PROXY-007).");
+                }
+            }
+        }
+
+        return new NetworkConfig(b);
+    }
+
+    /** Transports whose payloads are HMAC-signed (need a real >= 32-byte secret). */
+    private static boolean isSigningTransport(String type, Map<String, Object> transport) {
+        String t = type == null ? "" : type.toLowerCase(Locale.ROOT);
+        if (t.equals("redis") || t.equals("sql") || t.equals("proxy-direct") || t.equals("proxydirect")) {
+            return true;
+        }
+        return asBool(asMap(transport, "direct"), "enabled", false);
+    }
+
+    /** Parse {@code transport.redis}; password never logged. */
+    private static void parseRedis(Map<String, Object> redis, Builder b, Function<String, String> env) {
+        String hostRaw = asString(redis, "host", "localhost");
+        boolean tlsFlag = asBool(redis, "tls", false);
+        boolean tlsDetected = tlsFlag || hostRaw.trim().toLowerCase(Locale.ROOT).startsWith("rediss://");
+        int defaultPort = tlsDetected ? 6380 : 6379;
+        int port = (redis != null && redis.get("port") != null) ? asInt(redis, "port", defaultPort) : defaultPort;
+        String username = asStringOrNull(redis, "username");
+        if (hostRaw.isBlank()) {
+            // Left for the redis-specific "host required" check below.
+            b.redisHost = "";
+            b.redisPort = port;
+            b.redisTls = tlsFlag;
+            b.redisUsername = username;
+        } else {
+            RespEndpoint ep;
+            try {
+                ep = RespEndpoint.parse(hostRaw, port);
+                boolean tls = ep.tls() || tlsFlag;
+                String user = ep.username() != null ? ep.username() : username;
+                ep = new RespEndpoint(ep.host(), ep.port(), tls, user);
+            } catch (IllegalArgumentException e) {
+                throw new NetworkConfigException("transport.redis.host: " + e.getMessage());
+            }
+            b.redisTls = ep.tls();
+            b.redisUsername = ep.username();
+            b.redisPort = ep.port();
+            b.redisHost = (ep.tls() || ep.username() != null) ? ep.toUri() : ep.host();
+        }
+
+        String passwordEnv = asStringOrNull(redis, "passwordEnv");
+        String fromEnv = passwordEnv == null ? null : env.apply(passwordEnv);
+        if (fromEnv != null && !fromEnv.isEmpty()) {
+            b.redisPassword = fromEnv;
+            return;
+        }
+        String yaml = asStringOrNull(redis, "password");
+        if (yaml != null && YAML_PASSWORD_WARNED.compareAndSet(false, true)) {
+            LOG.log(Level.WARNING, "transport.redis.password is set in YAML"
+                    + (passwordEnv != null ? " and env var '" + passwordEnv + "' is unset" : "")
+                    + "; prefer transport.redis.passwordEnv so the secret stays out of config files.");
+        }
+        b.redisPassword = yaml;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asMap(Map<String, Object> parent, String key) {
+        Object v = parent.get(key);
+        if (v instanceof Map) {
+            return (Map<String, Object>) v;
+        }
+        return Map.of();
+    }
+
+    private static String asString(Map<String, Object> m, String key, String def) {
+        Object v = m.get(key);
+        return v == null ? def : String.valueOf(v);
+    }
+
+    private static String asStringOrNull(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        if (v == null) return null;
+        String s = String.valueOf(v);
+        return s.isEmpty() ? null : s;
+    }
+
+    private static boolean asBool(Map<String, Object> m, String key, boolean def) {
+        Object v = m.get(key);
+        if (v instanceof Boolean) return (Boolean) v;
+        if (v == null) return def;
+        return Boolean.parseBoolean(String.valueOf(v));
+    }
+
+    private static int asInt(Map<String, Object> m, String key, int def) {
+        Object v = m.get(key);
+        if (v instanceof Number) return ((Number) v).intValue();
+        if (v == null) return def;
+        try { return Integer.parseInt(String.valueOf(v)); }
+        catch (NumberFormatException e) { throw new NetworkConfigException(key + ": expected integer, got '" + v + "'"); }
+    }
+
+    private static long asDurationMs(Map<String, Object> m, String key, long def) {
+        Object v = m.get(key);
+        if (v == null) return def;
+        DurationParser.ParsedDuration parsed =
+                DurationParser.parse(String.valueOf(v), TemporalUnit.MILLISECOND);
+        double millis = parsed == null ? Double.NaN : parsed.toMillis();
+        if (!Double.isFinite(millis) || millis < -0x1.0p63 || millis >= 0x1.0p63) {
+            throw new NetworkConfigException(key + ": expected duration, got '" + v + "'");
+        }
+        return Math.round(millis);
+    }
+
+    /**
+     * Best-effort stable identity for a proxy that did not configure
+     * {@code network.proxyId}. Uses the local hostname; falls back to
+     * {@code "proxy"} if the hostname cannot be resolved. Never returns null
+     * or empty so the proxy-role contract (non-empty proxyId) still holds.
+     */
+    private static String defaultProxyId() {
+        try {
+            String host = java.net.InetAddress.getLocalHost().getHostName();
+            if (host != null && !host.isEmpty()) {
+                return host;
+            }
+        } catch (java.net.UnknownHostException | RuntimeException ignored) {
+            // fall through to the static default
+        }
+        return "proxy";
+    }
+
+    /** Mutable builder used internally by {@link #fromMap}. */
+    private static final class Builder {
+        boolean enabled;
+        int schemaVersion;
+        String serverId;
+        String proxyId;
+        Role role;
+        String secretEnv;
+        boolean allowUnsigned;
+        String transportType;
+        long heartbeatIntervalMs;
+        long heartbeatStaleAfterMs;
+        String redisHost;
+        int redisPort;
+        String redisPassword;
+        boolean redisTls;
+        String redisUsername;
+        long reservationReapIntervalMs;
+        boolean waitlistEnabled;
+        int waitlistMaxSize;
+        long waitlistDrainIntervalMs;
+        long waitlistDrainPauseMs;
+        long waitlistLeaderLeaseHoldMs;
+        long waitlistReapIntervalMs;
+        long waitlistReapMaxAgeMs;
+    }
+}

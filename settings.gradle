@@ -1,0 +1,426 @@
+// pluginManagement provides fabric-loom for :rtp-fabric:** and :rtp-plugin
+// (per ADR-022 section 3 Build Discipline). Loom is published only on FabricMC's Maven,
+// so we register it explicitly here. Plugin Portal stays as the default fallback
+// for shadow / spotless / etc.
+pluginManagement {
+    repositories {
+        maven {
+            name = 'Fabric'
+            url = 'https://maven.fabricmc.net/'
+        }
+        // NeoForged Maven hosts the ModDevGradle (net.neoforged.moddev) plugin
+        // implementation and its transitive dependencies. The gradlePluginPortal
+        // below only carries the plugin *marker*; without this repo Gradle
+        // resolves the marker for `net.neoforged.moddev` but then fails to find
+        // the plugin's own dependency artifacts, surfacing as
+        //   "Plugin [id: 'net.neoforged.moddev', version: '...'] was not found
+        //    in any of the following sources".
+        maven {
+            name = 'NeoForged'
+            url = 'https://maven.neoforged.net/releases'
+        }
+        gradlePluginPortal()
+    }
+    // Declare fabric-loom's default version once here so every subproject
+    // that applies it shares a single plugin classloader. Applying the same
+    // plugin from independent `plugins { id '...' version '...' }` blocks
+    // in multiple subprojects causes Gradle to load Loom into separate
+    // classloaders, which surfaces as:
+    //   `LoomGradleExtensionImpl_Decorated cannot be cast to LoomGradleExtension`
+    // Subprojects now apply with a bare `id 'fabric-loom'` (no version).
+    // The exception is :rtp-fabric:rtp-fabric-v26_1_R1 which pins Loom 1.15+
+    // (required by deobf-26.1) — it declares its own version override and
+    // therefore does load in a separate classloader, which is acceptable
+    // because v26_1_R1 is a leaf module that no other Loom-using subproject
+    // depends on at configuration time.
+    // Loom 1.15-SNAPSHOT (2026-05-07): bumped from 1.11-SNAPSHOT to support
+    // the deobfuscated MC 26.1 submodule (rtp-fabric-v26_1_R1). Loom 1.11
+    // already required Java 21 to RUN Gradle but mods could target lower
+    // bytecode; per the Loom 1.15 release notes, the same forward
+    // compatibility holds — older-MC submodules still pin their own
+    // toolchain (Java 21) and `modImplementation` / `modCompileOnly` /
+    // `mappings loom.officialMojangMappings()` remain supported. v26_1_R1
+    // no longer needs its own version override (deleted from its
+    // build.gradle alongside this bump). See settings.gradle history for
+    // the prior side-build attempt that this supersedes.
+    // Loom 1.15+ exposes TWO plugin IDs from one artifact:
+    //   * net.fabricmc.fabric-loom        — for UNOBFUSCATED MC (26.1+)
+    //   * net.fabricmc.fabric-loom-remap  — for OBFUSCATED MC (1.21.11 and older)
+    // The legacy bare `fabric-loom` ID is supported only for the obfuscated
+    // path. Both IDs come from the same plugin artifact, so a single version
+    // pin keeps every Loom-using subproject in one classloader and avoids
+    // the LoomGradleExtension ClassCastException.
+    plugins {
+        // De-SNAPSHOTted to the released 1.15.x line for reproducible builds:
+        // a floating SNAPSHOT can move or be pruned, making old commits
+        // unbuildable. 1.15.5 is the latest published 1.15.x on maven.fabricmc.net
+        // and covers both the obfuscated-remap path (1.21.11 and older) and the
+        // unobfuscated deobf 26.x path (JDK 25). Bump within the 1.15.x line as
+        // needed; only advance to 1.16+/1.17+ after verifying the full JDK-25
+        // graph, since those lines change Gradle-compatibility guarantees.
+        id 'fabric-loom'                       version '1.15.5'
+        id 'net.fabricmc.fabric-loom'          version '1.15.5'
+        id 'net.fabricmc.fabric-loom-remap'    version '1.15.5'
+        // NeoForge ModDevGradle: pin the version once here so the default
+        // NeoForge carriers (rtp-neoforge-common + rtp-neoforge-v1_21_R1, the
+        // JDK-21 1.21.x line that ships in the unified jar) share a single
+        // plugin classloader and version. They apply it with a bare
+        // `id 'net.neoforged.moddev'` (no per-module version).
+        //
+        // Version is 2.0.141: the single ModDevGradle 2 version shared by
+        // EVERY NeoForge carrier (the JDK-21 1.21.x line AND the JDK-25 26.1
+        // line). MC 26.1 requires moddev 2.0.134+, so the 26.1 carrier cannot
+        // build on anything older; pinning the whole NeoForge set to 2.0.141
+        // keeps all carriers in ONE plugin classloader (no per-module version
+        // override, no dual-classloader split) and lets the default build
+        // produce every platform adapter, 1.21.x and 26.1 alike. 2.0.141 is the
+        // latest published moddev (Gradle Plugin Portal) and resolves from the
+        // NeoForged + portal repositories declared above.
+        //
+        // Hosts that genuinely cannot reach 2.0.141 (fully offline, portal-
+        // blocked) cannot build the NeoForge adapters at all and must drop them
+        // with -PexcludeNeoforge (whole platform) or -PexcludeJdk25 (just the
+        // JDK-25 26.1 carrier). Both leave the rest of the build untouched.
+        id 'net.neoforged.moddev'              version '2.0.141'
+    }
+}
+
+// Toolchain auto-provisioning: Gradle downloads a missing JDK 21 (the subprojects
+// javaToolchain) so hosts without one, such as the Qodana container, can still import.
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'LeafFuzz'
+
+// commands-api and effects-api are in-tree Gradle modules (under api/), consumed
+// by every plugin/adapter through plain project(':commands-api') /
+// project(':effects-api') edges. They were briefly extracted to sibling repos
+// (CommandsAPI / EffectsAPI) and consumed as published / composite-build
+// coordinates; that was reverted because (a) effects-api then applied fabric-loom
+// and a published intermediary jar could not satisfy RTP's mojmap Fabric modules,
+// and (b) co-evolving the API with its only consumer through a publish round-trip is
+// slower than an in-tree edge. See the include lines + projectDir overrides below.
+
+// JDK-25 / unobfuscated-Loom modules can be excluded from the build graph by
+// passing `-PexcludeJdk25` (or setting the JITPACK env var). These modules
+// (effects-api-fabric-unobf, rtp-fabric-common-unobf, rtp-fabric-v26_1_R1)
+// pin a Java 25 toolchain that is unavailable on JDK-21-only build hosts such
+// as JitPack. Merely *configuring* them forces Gradle to resolve their
+// `javaCompiler` toolchain, which fails the whole build even when the
+// requested tasks (the addon-API publish closure) do not depend on them.
+// The published closure (rtp-api/rtp-core + their project deps) never depends
+// on these modules, so excluding them is safe. Keep the list in sync with
+// jitpack.yml. See docs/dev/PUBLISHING.md.
+def excludeJdk25 = startParameter.projectProperties.containsKey('excludeJdk25') ||
+        System.getenv('JITPACK') != null
+
+// server-api -- reusable, platform-neutral server identity and logging SPI.
+// Non-rtp-exclusive, platform-neutral API modules are grouped under the
+// api/ folder to declutter the repo root. The Gradle project paths and
+// Maven coordinates are intentionally KEPT FLAT (':server-api', ':yaml-api',
+// ':effects-api', ':maps-api', ':metrics-api', ':units-api', and the nested
+// ':effects-api:effects-api-fabric-unobf'); only the on-disk location moves,
+// applied via projectDir overrides at the bottom of this section. This keeps
+// every existing project(':...') dependency, Maven coordinate, and ADR/doc
+// reference valid.
+// commands-api -- platform-neutral command-tree framework (commands-api-ADR-001).
+// In-tree module: consumed by rtp-api/rtp-core and every platform adapter via
+// project(':commands-api'). Pure Java (Brigadier as compileOnly), no Loom.
+// bit-api -- generic built-in test contract for plugin-agnostic BIT consumers.
+// yaml-api -- in-house zero-dependency YAML substrate (ADR-025), extracted from
+// rtp-core so rtp-api can host the configurable selection model without a core
+// dependency. Pure Java, no platform/Loom dependency.
+// units-api -- dependency-free general-purpose temporal, spatial, and data-size
+// parsers, extracted from rtp-core and re-exported by rtp-api.
+// effects-api -- platform-neutral effects SPI + Bukkit runtime
+// (effects-api-ADR-003). Pure Java, no Loom: Minecraft-typed effect code lives
+// in the Fabric / NeoForge platform carriers. Consumed via project(':effects-api').
+// effects-api-fabric-unobf -- nested Mojmap-unobf carrier for the deobf MC 26.x
+// runtime (effects-api-ADR-006, rtp-fabric-ADR-009). Requires JDK 25 + Loom
+// 1.15; excluded on JDK-21-only hosts alongside the other JDK-25 modules.
+// maps-api — runtime cartography SPI (ADR-046, maps-api-ADR-001).
+// Pure Java SPI: no Bukkit / Fabric / Loom dependency. Concrete bindings
+// (BukkitMapBinding, FoliaMapBinding, FabricMapBinding) land in Stage 2/3
+// inside the platform adapters; this module ships only the platform-neutral
+// SPI + NoopMapBinding + HeatmapRenderer + ChartModel hierarchy.
+// metrics-api — platform-portable metrics SPI (metrics-api-ADR-001,
+// extracted 2026-05-17). Pure Java SPI: no Bukkit / Fabric / Loom dependency.
+// Designed for monorepo reuse — sibling plugins can consume without rtp-core
+// (per metrics-api-ADR-001). Concrete bindings (PaperMetricsBinding,
+// BukkitTpsSampler, FoliaMetricsBinding + FoliaRegionTpsSampler,
+// FabricMetricsBinding) stay in their respective platform adapters.
+// bstats-api -- dependency-free bStats v2 client (bstats-api-ADR-001). Pure
+// Java, no RTP-module or platform dependency, so sibling plugins (backend or
+// proxy) can reuse it; hosts supply scheduler + logger through its SPI.
+// anvil-api -- platform-neutral vanilla Anvil region-file decode / NBT
+// pre-filter (ADR-016). No RTP-module or platform dependency, so it groups
+// under api/ with the other non-rtp-exclusive modules. Renamed from the
+// former ':rtp-anvil' coordinate; on-disk at api/anvil-api.
+// tags-api -- platform-neutral Minecraft block-tag JSON resolver (ADR-017).
+// No RTP-module or platform dependency (hand-rolled JSON reader, no third-party
+// JSON lib), so it groups under api/ with the other non-rtp-exclusive modules.
+// Renamed from the former ':rtp-tags' coordinate; on-disk at api/tags-api.
+// predict-api -- zero-dependency stochastic estimation and control toolkit (ADR-115).
+// config-bit-api -- declarative YAML directive and constraint PBIT library (ADR-064, ADR-121).
+// menu-api -- cross-platform declarative menu, session, token, and prompt SPI (ADR-035, ADR-044, ADR-048).
+// database-api -- zero-dependency SQL connection pooling, dialect abstraction, and Redis RESP2 client (leafrtp-ADR-079).
+// schematics-api -- platform-neutral Sponge (.schem) and Litematica (.litematic) decoder, cache, and 3D placement planner (leafrtp-ADR-041).
+
+// Relocate the grouped api/ modules on disk while keeping their flat Gradle
+// project paths (see the comment block above the include lines). The nested
+// unobf carrier inherits no projectDir from its parent in Gradle, so it is
+// overridden explicitly.
+
+
+// Shared server-side and proxy platform modules are grouped under the
+// platforms/ folder (bukkit, paper, folia, fabric, neoforge, proxy).
+include 'bukkit:bukkit-common'
+include 'paper:paper-common'
+include 'folia:folia-common'
+
+include 'bukkit:bukkit-v1_20_R1'
+include 'paper:paper-v1_20_R1'
+include 'folia:folia-v1_20_R1'
+include 'bukkit:bukkit-v1_21_R1'
+include 'paper:paper-v1_21_R1'
+include 'folia:folia-v1_21_R1'
+include 'bukkit:bukkit-v26_1_R1'
+include 'paper:paper-v26_1_R1'
+include 'folia:folia-v26_1_R1'
+// rtp-plugin is the shaded Bukkit-family aggregator. It bundles the JDK-25
+// Fabric carriers (fabric-v26_1_R1 / *-unobf / effects-api-fabric-unobf)
+// via project(...) dependencies, so it cannot be configured when those modules
+// are excluded. It is not part of the addon-API publish closure and nothing
+// depends on it, so it is dropped alongside the JDK-25 modules.
+
+// Fabric platform adapter — first-class in-scope as of 2026-04-30 per ADR-022.
+// fabric-common applies fabric-loom (see its build.gradle); Loom is
+// scoped per ADR-022 section 3 to platforms/fabric/** and rtp-plugin only — it must
+// not leak into rtp-core, rtp-api, commands-api, effects-api, or any
+// Bukkit-family adapter.
+//
+// Per rtp-fabric-ADR-001 (Fabric multiversion submodule layout, 2026-05-01) the Fabric
+// platform mirrors the Bukkit-family <platform>-vXX_YY_R1 split: common
+// holds version-agnostic glue (with MC + fabric-api as modCompileOnly so
+// no MC classes ship from common), and each v-submodule supplies the
+// actual runtime mod jar pinned to its MC version. v1_21_R1 is the
+// reference implementation; v1_20_R1 and v26_1_R1 ship as build-correct
+// stubs and are filled in as Phase 2.5 follow-ups. Note v26_1_R1 requires
+// JDK 25 + Loom 1.15 because MC 26.1 is deobfuscated; contributors without
+// JDK 25 will see only that submodule fail toolchain provisioning.
+include 'fabric:fabric-common'
+// fabric-common-unobf -- mojmap-bytecode sibling of fabric-common
+// (rtp-fabric-ADR-009, paired with effects-api-ADR-006). Compiled under
+// unobfuscated 1.15 Loom (same regime as fabric-v26_1_R1) so its NM
+// constant-pool entries survive on a deobf MC 26.x runtime; consumed by
+// V26_*_R1FabricVersionAdapter via `api project(...)`. Requires JDK 25 +
+// fabric-loom 1.15+ (same toolchain as v26_1_R1).
+if (!excludeJdk25) {
+    include 'fabric:fabric-common-unobf'
+}
+include 'fabric:fabric-v1_20_R1'
+include 'fabric:fabric-v1_21_R1'
+include 'fabric:fabric-v1_21_R5'
+// fabric-v1_21_R11 — re-included 2026-05-06 after rtp-fabric-ADR-007
+// (Mojmap-name-decoupling) landed. The FabricVersionAdapter SPI now uses
+// project-owned wrapper records (RTPLevelHandle / RTPBlockHandle / etc.)
+// instead of net.minecraft.* types whose Mojmap names drift across point
+// releases (notably ResourceLocation -> Identifier at 1.21.11). The R11
+// adapter has been ported to the new contract and uses the new
+// TicketType(long expiryTicks, int flags) constructor with flags = 14
+// (FOR_LOADING | FOR_SIMULATION | RESETS_IDLE_TIMEOUT) — vanilla FORCED
+// minus the SERIALIZE bit, S-002 safe.
+include 'fabric:fabric-v1_21_R11'
+// v26_1_R1 -- pinned to MC 26.1 (deobfuscated). Requires JDK 25 + fabric-loom 1.15+.
+// Re-enabled 2026-05-07 to test the inline-dependency hypothesis: per
+// rtp-fabric-ADR-001, the prior reason for excluding it was the
+// `LoomGradleExtensionImpl_Decorated cannot be cast to LoomGradleExtension`
+// error that appears when two Loom plugin versions are loaded into the
+// same Gradle plugin classloader. v26_1_R1 declares its own
+// `id 'net.fabricmc.fabric-loom' version '1.15-SNAPSHOT'` (independent
+// classloader, leaf module not configured by other Loom modules), so the
+// hypothesis is that the cast bug only fires when two Loom-using
+// subprojects share a classloader scope -- which is not the case here as
+// long as no rtp-plugin / fabric-common code path triggers Loom 1.11
+// to read v26_1_R1's LoomGradleExtension.
+//
+// JDK 25 is provisioned per-subproject via Gradle's toolchain plugin --
+// the rest of the build remains on JDK 21. CI must have JDK 25 installed
+// (or `org.gradle.java.installations.auto-download=true`).
+if (!excludeJdk25) {
+    include 'fabric:fabric-v26_1_R1'
+}
+// v26_2_R1 -- EARLY/EXPERIMENTAL, pinned to the MC 26.2 pre-release
+// (26.2-rc-2). Same deobf regime as v26_1_R1 (Loom 1.15, JDK 25, no
+// mappings), cloned from it. See rtp-fabric-ADR-014. Re-pin the MC /
+// loader / fabric-api versions when 26.2 reaches final.
+if (!excludeJdk25) {
+    include 'fabric:fabric-v26_2_R1'
+}
+// v26_3_R1 -- MC 26.3 release. Same deobf regime as v26_1_R1/v26_2_R1
+// (Loom 1.15, JDK 25, no mappings). See rtp-fabric-ADR-015.
+if (!excludeJdk25) {
+    include 'fabric:fabric-v26_3_R1'
+}
+// v26_4_R1 -- MC 26.4 release. Same deobf regime as v26_1_R1/v26_2_R1/v26_3_R1
+// (Loom 1.15, JDK 25, no mappings). See rtp-fabric-ADR-017.
+if (!excludeJdk25) {
+    include 'fabric:fabric-v26_4_R1'
+}
+
+// Relocate the grouped platforms/ adapters on disk while keeping their flat
+// Gradle project paths (see the comment block above the platform include lines).
+// Setting an intermediate parent's projectDir does not move its children in
+// Gradle, so every project (parent and per-version child) is overridden
+// explicitly. JDK-25 / unobf Fabric carriers are overridden only when included.
+project(':bukkit').projectDir                    = file('platforms/bukkit')
+project(':bukkit:bukkit-common').projectDir      = file('platforms/bukkit/bukkit-common')
+project(':bukkit:bukkit-v1_20_R1').projectDir    = file('platforms/bukkit/bukkit-v1_20_R1')
+project(':bukkit:bukkit-v1_21_R1').projectDir    = file('platforms/bukkit/bukkit-v1_21_R1')
+project(':bukkit:bukkit-v26_1_R1').projectDir    = file('platforms/bukkit/bukkit-v26_1_R1')
+
+project(':paper').projectDir                     = file('platforms/paper')
+project(':paper:paper-common').projectDir        = file('platforms/paper/paper-common')
+project(':paper:paper-v1_20_R1').projectDir      = file('platforms/paper/paper-v1_20_R1')
+project(':paper:paper-v1_21_R1').projectDir      = file('platforms/paper/paper-v1_21_R1')
+project(':paper:paper-v26_1_R1').projectDir      = file('platforms/paper/paper-v26_1_R1')
+
+project(':folia').projectDir                     = file('platforms/folia')
+project(':folia:folia-common').projectDir        = file('platforms/folia/folia-common')
+project(':folia:folia-v1_20_R1').projectDir      = file('platforms/folia/folia-v1_20_R1')
+project(':folia:folia-v1_21_R1').projectDir      = file('platforms/folia/folia-v1_21_R1')
+project(':folia:folia-v26_1_R1').projectDir      = file('platforms/folia/folia-v26_1_R1')
+
+project(':fabric').projectDir                    = file('platforms/fabric')
+project(':fabric:fabric-common').projectDir      = file('platforms/fabric/fabric-common')
+project(':fabric:fabric-v1_20_R1').projectDir    = file('platforms/fabric/fabric-v1_20_R1')
+project(':fabric:fabric-v1_21_R1').projectDir    = file('platforms/fabric/fabric-v1_21_R1')
+project(':fabric:fabric-v1_21_R5').projectDir    = file('platforms/fabric/fabric-v1_21_R5')
+project(':fabric:fabric-v1_21_R11').projectDir   = file('platforms/fabric/fabric-v1_21_R11')
+if (!excludeJdk25) {
+    project(':fabric:fabric-common-unobf').projectDir = file('platforms/fabric/fabric-common-unobf')
+    project(':fabric:fabric-v26_1_R1').projectDir     = file('platforms/fabric/fabric-v26_1_R1')
+    project(':fabric:fabric-v26_2_R1').projectDir     = file('platforms/fabric/fabric-v26_2_R1')
+    project(':fabric:fabric-v26_3_R1').projectDir     = file('platforms/fabric/fabric-v26_3_R1')
+    project(':fabric:fabric-v26_4_R1').projectDir     = file('platforms/fabric/fabric-v26_4_R1')
+}
+
+// Multi-server proxy support — umbrella ADR-036 Accepted 2026-05-14.
+// Phase 1: proxy-common ships the host-independent SPI, the reference
+// weighted-average BackendSelector (rtp-proxy-ADR-004), and the reference
+// InMemoryNetworkStateBinding (rtp-proxy-ADR-003). Pure-Java, no proxy-vendor
+// or backend-platform imports (rtp-proxy-ADR-001 section Package Boundary Rules).
+// proxy-velocity (Phase 2a) — no-op shell included 2026-05-18 after
+// rtp-proxy-ADR-006 was Accepted. Compile-only Velocity API dependency;
+// entry-point honors network.enabled:false as a strict no-op.
+// proxy-bungee (Phase 3) remains documentation-only until
+// rtp-proxy-ADR-008 ratifies (still Proposed).
+include 'proxy:proxy-common'
+include 'proxy:proxy-velocity'
+
+// Relocate the proxy tree on disk under platforms/ while keeping its flat
+// Gradle project paths. The implicit parent and each included child are
+// overridden explicitly (parent projectDir does not cascade to children).
+project(':proxy').projectDir                    = file('platforms/proxy')
+project(':proxy:proxy-common').projectDir       = file('platforms/proxy/proxy-common')
+project(':proxy:proxy-velocity').projectDir     = file('platforms/proxy/proxy-velocity')
+
+// NeoForge platform adapter — in-scope per ADR-033 and rtp-neoforge-ADR-001.
+// The NeoForge platform is part of the unified single-jar (rtp-plugin merges
+// its Mojmap bytecode + META-INF/neoforge.mods.toml post-remap, so one
+// LeafRTP-Pro-<ver>.jar loads on Bukkit/Fabric/Velocity AND NeoForge).
+//
+// The NeoForge toolchain (ModDevGradle, net.neoforged.moddev) resolves NeoForge
+// userdev artifacts from network repositories that are NOT available on every
+// build host (CI, JitPack, fully-offline sandboxes). Merely *configuring* these
+// modules forces ModDevGradle to resolve those artifacts, which would fail an
+// offline build — exactly like the JDK-25 Loom carriers above. So NeoForge is
+// included BY DEFAULT (network-capable hosts produce the full unified jar) and
+// can be dropped on network-constrained hosts by passing `-PexcludeNeoforge`
+// (or setting the EXCLUDE_NEOFORGE env var). When excluded, rtp-plugin omits
+// the NeoForge merge and the unified jar simply carries no neoforge.mods.toml.
+// See platforms/neoforge/docs/adr/rtp-neoforge-ADR-001-platform-in-scope.md.
+def excludeNeoforge = startParameter.projectProperties.containsKey('excludeNeoforge') ||
+        System.getenv('EXCLUDE_NEOFORGE') != null
+if (!excludeNeoforge) {
+    include 'neoforge:neoforge-common'
+    include 'neoforge:neoforge-v1_21_R1'
+
+    project(':neoforge').projectDir                     = file('platforms/neoforge')
+    project(':neoforge:neoforge-common').projectDir     = file('platforms/neoforge/neoforge-common')
+    project(':neoforge:neoforge-v1_21_R1').projectDir   = file('platforms/neoforge/neoforge-v1_21_R1')
+
+    // EARLY/EXPERIMENTAL 26.x carrier (MC 26.1, NeoForge 26.1.x). MC 26.1 runs
+    // on Java 25, so this carrier pins a Java 25 toolchain and is gated by
+    // `-PexcludeJdk25` (alongside the JDK-25 Fabric carriers above) - a
+    // JDK-21-only host drops it even when the rest of NeoForge is built. It
+    // shares the central moddev 2.0.141 pin (no per-module override). The
+    // 1.21.1 carrier (Java 21) is unaffected and keeps the unified jar
+    // NeoForge-capable on JDK-21 hosts. See
+    // platforms/neoforge/neoforge-v26_1_R1/build.gradle.
+    if (!excludeJdk25) {
+        include 'neoforge:neoforge-v26_1_R1'
+        project(':neoforge:neoforge-v26_1_R1').projectDir = file('platforms/neoforge/neoforge-v26_1_R1')
+    }
+}
+
+// Linear (.linear) region support is not built into anvil-api (ADR-077): a future
+// guarded reader ships as an addon registering a RegionFileReader with
+// RegionFormatRegistry.
+// LeafRTPRiftAddon - reference demo of effect registration. Registers a single
+// new effects-api prototype ("RIFT", a client-side "world deconstruction" warmup
+// animation) so it joins the built-in effects by name. Fully platform-neutral: the
+// effect drives the dissolve through the rtp-api client block-change SPI
+// (RTPPlayer#getClientBlock / #sendClientBlockChanges, binned) and has no platform
+// dependency, so it runs anywhere the SPI is implemented (Bukkit/Paper/Folia) and is
+// a harmless no-op elsewhere.
+// LeafRTPClaimAddon - bundles every claim/protection-plugin checker behind
+// per-plugin integrations.yml toggles and registers them as RTP safety
+// verifiers. Single Bukkit-only module (every checker is org.bukkit.*-based);
+// self-gates on PlatformFamily.BUKKIT so it is a no-op on Fabric/NeoForge.
+// LeafRTPActionAddon - platform-agnostic declarative scripted actions (ADR-093).
+// LeafRTPGuiAddon - DonutSMP-style destination picker, split on the project platform
+// model. rtp-gui-common is platform-neutral (menu model, config via RTP's
+// ConfigParser, the MenuRenderer render seam, and the teleport submit through
+// RTP.scheduler / serverAccessor); rtp-gui-bukkit, rtp-gui-fabric, and
+// rtp-gui-neoforge are the per-platform chest-inventory renderers, all bundled
+// into the single rtp-gui assembly jar. RTP owns validation
+// (getAllowedTargets / getTargetStatus / teleport); the addon owns presentation.
+// Single multi-loader assembly jar (shades common + every platform renderer +
+// all three loader descriptors), mirroring RTP's unified-jar model. Always built.
+// Fabric renderer carrier - deobf MC 26.x (Loom-unobf, JDK 25). Gated like the
+// RTP Fabric 26.x carriers: dropped on JDK-21-only / network-constrained hosts.
+// NeoForge renderer carrier - MC 26.x (ModDevGradle, JDK 25). Gated by both the
+// whole-NeoForge switch and the JDK-25 switch, matching rtp-neoforge-v26_1_R1.
+
+// Standalone helper plugins (no rtp-api / rtp-core dependency).
+// See helpers/PeriodicWorldSaver/README.md for the directory rationale.
+// Black-box stress-test driver for /rtp-style commands. Drives RTP, RTP-Pro,
+// and competitor plugins under identical workloads to fill the front-page
+// comparison table. See helpers/StressTestRTP/README.md and ADR-122.
+include 'helpers:stresstest-core'
+// Mock stub plugins for testing third-party item integrations (ItemsAdder, Oraxen, Nexo, HeadDatabase).
+
+// Standalone sibling resources (multi-loader plugins and mods) in the monorepo
+// (consume api/* SDK libraries directly; no rtp-api / rtp-core dependency).
+
+
+
+
+
+
+
+
+
+
+
+include 'resource:LeafFuzz:leaffuzz-common'
+include 'resource:LeafFuzz:leaffuzz-paper'
+include 'resource:LeafFuzz:leaffuzz-plugin'
+if (!excludeJdk25) {
+    include 'resource:LeafFuzz:leaffuzz-fabric'
+}
+if (!excludeNeoforge && !excludeJdk25) {
+    include 'resource:LeafFuzz:leaffuzz-neoforge'
+}

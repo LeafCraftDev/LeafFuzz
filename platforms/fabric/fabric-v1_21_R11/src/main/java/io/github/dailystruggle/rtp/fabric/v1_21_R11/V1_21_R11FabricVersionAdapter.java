@@ -1,0 +1,629 @@
+package io.github.dailystruggle.rtp.fabric.v1_21_R11;
+
+import io.github.dailystruggle.rtp.common.RTP;
+import io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapter;
+import io.github.dailystruggle.rtp.fabric.version.RTPChunkHandle;
+import io.github.dailystruggle.rtp.fabric.version.RTPLevelHandle;
+import io.github.dailystruggle.rtp.fabric.menu.FabricBookSpec;
+import io.github.dailystruggle.rtp.fabric.tools.FabricLegacyText;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.level.ChunkResult;
+import net.minecraft.server.level.ServerChunkCache;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.TicketType;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
+import net.minecraft.tags.TagKey;
+import org.jetbrains.annotations.Nullable;
+
+import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.logging.Level;
+
+/**
+ * MC 1.21.9+ implementation of {@link FabricVersionAdapter} - covers the
+ * post-{@code TicketUse} refactor. See {@code rtp-fabric-ADR-007}.
+ *
+ * <p><b>Why a separate module from {@code v1_21_R5}:</b> Mojang refactored
+ * {@code TicketType} in 1.21.9. The previous record shape
+ * {@code TicketType(long timeout, boolean persist, TicketUse use)} (1.21.5-1.21.8)
+ * was replaced by {@code TicketType(long timeout, int flags)} where
+ * {@code flags} is a bitfield over five named constants (Mojmap, verified
+ * via {@code javap} on the Loom-cached 1.21.11 merged jar):
+ * {@code FLAG_PERSIST} (0x1), {@code FLAG_LOADING} (0x2),
+ * {@code FLAG_SIMULATION} (0x4), {@code FLAG_KEEP_DIMENSION_ACTIVE} (0x8),
+ * and {@code FLAG_CAN_EXPIRE_IF_UNLOADED} (0x10). The inner enum
+ * {@code TicketType.TicketUse} no longer exists, so
+ * the R5 adapter's bytecode (which references it at {@code <clinit>}) fails
+ * to load on a 1.21.9+ runtime with {@code NoClassDefFoundError:
+ * net/minecraft/class_3230$class_10558}.</p>
+ *
+ * <p><b>Mojmap-name decoupling (ADR-007):</b> the chunk/ticket SPI is
+ * wrapper-typed - {@code RTPLevelHandle}, {@code RTPChunkHandle} - so
+ * 1.21.11's {@code ResourceLocation → Identifier} rename does not affect
+ * the interface. This adapter unwraps via {@code handle.as(MojmapType.class)}
+ * on entry and wraps results on exit.</p>
+ *
+ * <p><b>Implementation:</b> direct typed Mojang-mappings calls - no
+ * reflection - using {@link ServerChunkCache#addTicketWithRadius} /
+ * {@link ServerChunkCache#removeTicketWithRadius} with an RTP-owned
+ * {@link TicketType} constructed as
+ * {@code new TicketType(NO_TIMEOUT, FLAG_LOADING | FLAG_SIMULATION)}.
+ * That flag set ({@code = 6}) is identical to vanilla
+ * {@link TicketType#FORCED}'s flags <b>minus</b> {@code FLAG_PERSIST} and
+ * {@code FLAG_KEEP_DIMENSION_ACTIVE}, yielding a non-persistent (S-002
+ * safe), no-expiry ticket. The effective tier is gated by the radius below,
+ * not the flags.
+ * Radius {@code 1} resolves to effective ticket level {@code 33 - 1 = 32}
+ * ({@code FULL}/BORDER but below {@code ENTITY_TICKING}): the chunk stays
+ * pinned and block-readable for {@code RTPChunk#isSafe}, but its
+ * entity-ticking pipeline (mob spawning, AI, scheduled ticks) does not run,
+ * so a player-less kept-cache chunk costs effectively zero MSPT; a player's
+ * own arrival ticket promotes it to {@code ENTITY_TICKING} on teleport
+ * without a regen. This supersedes {@code rtp-fabric-ADR-006}'s
+ * {@code ENTITY_TICKING} end-state for the kept cache. See
+ * {@code rtp-fabric-ADR-016-kept-cache-non-entity-ticking.md} and
+ * {@code rtp-fabric-ADR-006-ticket-radius-and-non-expiring-type.md}.</p>
+ *
+ * <p><b>S-002 / non-persistent guarantee:</b> the {@code FLAG_PERSIST} bit
+ * is deliberately omitted from {@link #RTP_TICKET_FLAGS} so the ticket
+ * lives only for the JVM lifetime, never written into {@code level.dat}.</p>
+ */
+public final class V1_21_R11FabricVersionAdapter implements FabricVersionAdapter {
+
+    private static final int RTP_TICKET_RADIUS = 1;
+
+    // 1.21.11 Mojmap: TicketType(long timeout, int flags) where flags is a bitfield over
+    // FLAG_PERSIST | FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE | FLAG_CAN_EXPIRE_IF_UNLOADED.
+    // Omit FLAG_PERSIST for S-002 (non-persistent: never written to level.dat).
+    private static final int RTP_TICKET_FLAGS =
+            TicketType.FLAG_LOADING | TicketType.FLAG_SIMULATION;
+
+    private static final TicketType RTP_TICKET_TYPE =
+            new TicketType(TicketType.NO_TIMEOUT, RTP_TICKET_FLAGS);
+
+    // Temporary load ticket for requestFullChunkAsync. A separate instance because
+    // TicketStorage matches tickets by type identity and level: a second RTP_TICKET_TYPE
+    // ticket at the same level is a no-op, so releasing it would drop a kept-cache ticket.
+    private static final TicketType RTP_LOAD_TICKET_TYPE =
+            new TicketType(TicketType.NO_TIMEOUT, RTP_TICKET_FLAGS);
+
+    @Override
+    public String mcVersion() {
+        return "1.21.9+";
+    }
+
+
+    /**
+     * Typed block-tag snapshot for MC 1.21.11+ (rtp-fabric-ADR-010). Walks
+     * {@link BuiltInRegistries#BLOCK} via Loom-mapped types - no reflection -
+     * and inverts each block's {@code builtInRegistryHolder().tags()} stream.
+     *
+     * <p>1.21.11 renamed {@code ResourceLocation} → {@link Identifier}; this
+     * implementation uses the new name directly so Loom remaps the symbol
+     * against the running runtime's mapping (intermediary or mojmap) at
+     * compile time - there is no reflection on the hot path.
+     */
+    @Override
+    public @Nullable Map<String, Set<String>> snapshotBlockTags() {
+        try {
+            Map<String, Set<String>> out = new HashMap<>();
+            for (Block block : BuiltInRegistries.BLOCK) {
+                Identifier blockId = BuiltInRegistries.BLOCK.getKey(block);
+                if (blockId == null) continue;
+                String materialName = blockId.toString().toUpperCase();
+                Holder.Reference<Block> holder;
+                try { holder = block.builtInRegistryHolder(); } catch (Throwable t) { continue; }
+                if (holder == null) continue;
+                java.util.stream.Stream<TagKey<Block>> tagStream;
+                try { tagStream = holder.tags(); } catch (Throwable t) { continue; }
+                if (tagStream == null) continue;
+                java.util.Iterator<TagKey<Block>> it = tagStream.iterator();
+                while (it.hasNext()) {
+                    TagKey<Block> tagKey = it.next();
+                    if (tagKey == null) continue;
+                    Identifier tagId = tagKey.location();
+                    if (tagId == null) continue;
+                    String key = tagId.getNamespace() + ":" + tagId.getPath();
+                    out.computeIfAbsent(key, k -> new HashSet<>()).add(materialName);
+                }
+            }
+            Map<String, Set<String>> immutable = new HashMap<>(out.size());
+            for (Map.Entry<String, Set<String>> e : out.entrySet()) {
+                immutable.put(e.getKey(), Collections.unmodifiableSet(e.getValue()));
+            }
+            return Collections.unmodifiableMap(immutable);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+
+    @Override
+    public CompletableFuture<RTPChunkHandle> getChunkFull(RTPLevelHandle level, int cx, int cz) {
+        if (level == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("null ServerLevel"));
+        }
+        try {
+            ServerLevel sl = level.as(ServerLevel.class);
+            ChunkAccess chunk = sl.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, true);
+            return CompletableFuture.completedFuture(RTPChunkHandle.of(chunk));
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
+        }
+    }
+
+
+    // Non-blocking chunk-future dispatch - see rtp-fabric-ADR-008.
+    // Binds the private ServerChunkCache#getChunkFutureMainThread(int, int, ChunkStatus,
+    // boolean) under both Mojmap and intermediary names. Three declared methods share that
+    // signature: the public getChunkFuture, which managedBlocks the tick thread until
+    // generation finishes (S-005), and a synthetic supplyAsync lambda (method_14098), so the
+    // scan must not depend on declaration order.
+    private static volatile Method GET_CHUNK_FUTURE_METHOD;
+
+    private static Method resolveGetChunkFutureMethod(ServerChunkCache cache) throws ReflectiveOperationException {
+        Method cached = GET_CHUNK_FUTURE_METHOD;
+        if (cached != null) return cached;
+        synchronized (V1_21_R11FabricVersionAdapter.class) {
+            cached = GET_CHUNK_FUTURE_METHOD;
+            if (cached != null) return cached;
+            Method found = null;
+            for (Class<?> c = cache.getClass(); c != null && found == null; c = c.getSuperclass()) {
+                for (Method m : c.getDeclaredMethods()) {
+                    if (!isNonBlockingChunkFutureMethod(m)) continue;
+                    m.setAccessible(true);
+                    found = m;
+                    break;
+                }
+            }
+            if (found == null) {
+                // Fail closed: the public getChunkFuture would block the tick thread.
+                throw new NoSuchMethodException(
+                        "ServerChunkCache#getChunkFutureMainThread(int,int,ChunkStatus,boolean) not found on "
+                                + cache.getClass().getName());
+            }
+            RTP.log(Level.INFO, "[RTP][Fabric 1.21.11+] chunk-future method bound: "
+                    + found.getDeclaringClass().getName() + "#" + found.getName());
+            GET_CHUNK_FUTURE_METHOD = found;
+            return found;
+        }
+    }
+
+    /**
+     * {@code getChunkFutureMainThread} shape: private, non-static, non-synthetic, returns a
+     * {@link CompletableFuture}, takes {@code (int, int, ChunkStatus, boolean)}. Excludes the
+     * public, main-thread-blocking {@code getChunkFuture} and the synthetic lambda.
+     */
+    static boolean isNonBlockingChunkFutureMethod(Method m) {
+        int mod = m.getModifiers();
+        if (!java.lang.reflect.Modifier.isPrivate(mod) || java.lang.reflect.Modifier.isStatic(mod)) return false;
+        if (m.isSynthetic() || m.isBridge()) return false;
+        if (!CompletableFuture.class.isAssignableFrom(m.getReturnType())) return false;
+        Class<?>[] p = m.getParameterTypes();
+        return p.length == 4 && p[0] == int.class && p[1] == int.class
+                && p[2] == ChunkStatus.class && p[3] == boolean.class;
+    }
+
+    @Override
+    public CompletableFuture<RTPChunkHandle> requestFullChunkAsync(RTPLevelHandle level, int cx, int cz) {
+        if (level == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("null ServerLevel"));
+        }
+        try {
+            ServerLevel sl = level.as(ServerLevel.class);
+            ServerChunkCache cache = sl.getChunkSource();
+            Method getter = resolveGetChunkFutureMethod(cache);
+
+            // Temporary load-ticket - see V1_20_R1FabricVersionAdapter#requestFullChunkAsync
+            // for the rationale; RTP_LOAD_TICKET_TYPE keeps it apart from kept tickets.
+            ChunkPos cp = new ChunkPos(cx, cz);
+            boolean ticketAdded = false;
+            try {
+                cache.addTicketWithRadius(RTP_LOAD_TICKET_TYPE, cp, RTP_TICKET_RADIUS);
+                ticketAdded = true;
+            } catch (Throwable t) {
+                RTP.log(Level.WARNING,
+                        "[RTP][Fabric 1.21.11+] temp load-ticket apply failed for chunk=("
+                                + cx + "," + cz + "): " + t.getClass().getSimpleName() + ": " + t.getMessage());
+            }
+            final boolean addedTicket = ticketAdded;
+
+            Object raw = getter.invoke(cache, cx, cz, ChunkStatus.FULL, /*create=*/ true);
+            if (!(raw instanceof CompletableFuture<?> cf)) {
+                if (addedTicket) tryRemoveLoadTicket(cache, cp);
+                return CompletableFuture.failedFuture(new IllegalStateException(
+                        "getChunkFuture returned non-CompletableFuture: " + (raw == null ? "null" : raw.getClass())));
+            }
+            // cf is CompletableFuture<ChunkResult<ChunkAccess>>.
+            return cf.thenApply(result -> {
+                Object value = chunkResultValue(result);
+                return value instanceof ChunkAccess chunk ? RTPChunkHandle.of(chunk) : null;
+            }).whenComplete((handle, ex) -> {
+                if (addedTicket) tryRemoveLoadTicket(cache, cp);
+            });
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
+        }
+    }
+
+    private static void tryRemoveLoadTicket(ServerChunkCache cache, ChunkPos cp) {
+        try {
+            cache.removeTicketWithRadius(RTP_LOAD_TICKET_TYPE, cp, RTP_TICKET_RADIUS);
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING,
+                    "[RTP][Fabric 1.21.11+] temp load-ticket release failed for chunk=("
+                            + cp.x + "," + cp.z + "): " + t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
+    }
+
+    /**
+     * Success value of a {@link ChunkResult}, {@code null} for a failed result or a
+     * non-ChunkResult. The chunk future yields {@code ChunkResult}, not DataFixerUpper
+     * {@code Either}; the old reflective {@code left()} lookup threw
+     * {@link NoSuchMethodException} and read every loaded chunk as missing.
+     */
+    static Object chunkResultValue(Object result) {
+        return result instanceof ChunkResult<?> r && r.isSuccess() ? r.orElse(null) : null;
+    }
+
+
+    @Override
+    public CompletableFuture<Void> applyTicket(RTPLevelHandle level, int cx, int cz) {
+        if (level == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("null ServerLevel"));
+        }
+        try {
+            ServerLevel sl = level.as(ServerLevel.class);
+            ServerChunkCache cache = sl.getChunkSource();
+            cache.addTicketWithRadius(RTP_TICKET_TYPE, new ChunkPos(cx, cz), RTP_TICKET_RADIUS);
+            return CompletableFuture.completedFuture(null);
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING,
+                    "[RTP][Fabric 1.21.11+] applyTicket failed for chunk=(" + cx + "," + cz + "): "
+                            + t.getClass().getSimpleName() + ": " + t.getMessage());
+            return CompletableFuture.failedFuture(t);
+        }
+    }
+
+    @Override
+    public void installEffectsDispatchers() {
+        // Direct, mapped vanilla calls - see V1_21_R11FabricEffectDispatchers
+        // for rationale (Holder vs Holder.direct on 1.21.11; targeted
+        // sendParticles overload for chunk-tracker bypass post-teleport).
+        V1_21_R11FabricEffectDispatchers.install();
+    }
+
+    @Override
+    public CompletableFuture<Void> releaseTicket(RTPLevelHandle level, int cx, int cz) {
+        if (level == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        try {
+            ServerLevel sl = level.as(ServerLevel.class);
+            ServerChunkCache cache = sl.getChunkSource();
+            cache.removeTicketWithRadius(RTP_TICKET_TYPE, new ChunkPos(cx, cz), RTP_TICKET_RADIUS);
+            return CompletableFuture.completedFuture(null);
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING,
+                    "[RTP][Fabric 1.21.11+] releaseTicket failed for chunk=(" + cx + "," + cz + "): "
+                            + t.getClass().getSimpleName() + ": " + t.getMessage());
+            return CompletableFuture.failedFuture(t);
+        }
+    }
+
+    /**
+     * Typed intermediary implementation of
+     * {@link io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapter#extractPlayerFromConnection}.
+     * Pre-26 intermediary mappings expose the player as the public field
+     * {@code player} (mojmap field name preserved by Fabric intermediary even
+     * when the {@code getPlayer()} method name is obfuscated to {@code method_xxxxx}).
+     * No reflection.
+     */
+    @Override
+    public Object extractPlayerFromConnection(Object handler) {
+        if (!(handler instanceof ServerGamePacketListenerImpl impl)) return null;
+        return impl.player;
+    }
+
+    /**
+     * Implementation of {@link io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapter#getPlayerUUID}.
+     * Typed call to {@code ServerPlayer.getUUID()}; Loom remaps the descriptor
+     * to intermediary {@code method_5667} at compile time.
+     */
+    @Override
+    public java.util.UUID getPlayerUUID(Object player) {
+        if (!(player instanceof ServerPlayer sp)) return null;
+        return sp.getUUID();
+    }
+
+    /**
+     * Implementation of {@link io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapter#resolveSenderUuid}.
+     * Typed CommandSourceStack#getEntity() + Entity#getUUID() dispatch; Loom remaps
+     * the descriptors to intermediary class_2168/class_1297/method_5667 at compile time.
+     * Returns null for non-player sources (console / command block); the bridge
+     * interprets that as the RTPAPI.serverId sentinel.
+     */
+    @Override
+    public java.util.UUID resolveSenderUuid(Object src) {
+        if (!(src instanceof CommandSourceStack css)) return null;
+        Entity entity = css.getEntity();
+        if (!(entity instanceof ServerPlayer sp)) return null;
+        return sp.getUUID();
+    }
+
+    /**
+     * Typed override - direct {@code MinecraftServer.getCommands().performPrefixedCommand(
+     * server.createCommandSourceStack(), command)}. Loom remaps the descriptors
+     * to intermediary {@code class_3176#method_3734} / {@code method_3739} at
+     * compile time, eliminating the reflective {@code getMethod("getCommands")}
+     * lookup in {@code FabricServerAccessor.FabricConsoleSender#performCommand}
+     * which fails with {@code NoSuchMethodException} on intermediary 1.20.x /
+     * 1.21.x runtimes.
+     */
+    @Override
+    public boolean dispatchConsoleCommand(Object server, String command) {
+        if (!(server instanceof net.minecraft.server.MinecraftServer s) || command == null) return false;
+        s.getCommands().performPrefixedCommand(s.createCommandSourceStack(), command);
+        return true;
+    }
+
+    /**
+     * Per-version typed factory for the common {@code FabricRTPPlayer} wrapper.
+     * Compiled against intermediary mappings via Loom so the {@code ServerPlayer}
+     * cast and the {@code FabricRTPPlayer} constructor reference resolve to the
+     * correct runtime descriptors. Replaces the name+arity reflective
+     * {@code registerPlayer(...)} lookup that used to live in
+     * {@code FabricServerAccessor.registerPlayerObject}.
+     */
+    @Override
+    public io.github.dailystruggle.rtp.api.entity.RTPPlayer createPlayer(Object serverPlayer) {
+        if (!(serverPlayer instanceof ServerPlayer sp)) return null;
+        return new io.github.dailystruggle.rtp.fabric.player.FabricRTPPlayer(sp);
+    }
+
+    @Override
+    public void rebindPlayer(io.github.dailystruggle.rtp.api.entity.RTPPlayer existing, Object serverPlayer) {
+        if (existing instanceof io.github.dailystruggle.rtp.fabric.player.FabricRTPPlayer fp
+                && serverPlayer instanceof ServerPlayer sp) {
+            fp.rebind(sp);
+        }
+    }
+
+    /**
+     * Typed cross-dimension teleport for MC 1.21.11. Drives
+     * {@code ServerPlayer#teleportTo(TeleportTransition)} - Loom remaps the
+     * {@code TeleportTransition} constructor and {@code teleportTo} descriptors
+     * to the correct intermediary symbols at compile time. This single call
+     * handles both same-dimension and cross-dimension destinations and resets
+     * the server-side movement check, so it replaces the common module's
+     * reflective {@code teleportTo(6)} / packet-teleport fallback (which cannot
+     * change dimensions and trips the "moved too quickly" warning).
+     */
+    @Override
+    public boolean teleport(Object serverPlayer, Object serverLevel,
+                            double x, double y, double z, float yaw, float pitch) {
+        if (!(serverPlayer instanceof ServerPlayer sp)) return false;
+        if (!(serverLevel instanceof ServerLevel target)) return false;
+        try {
+            net.minecraft.world.level.portal.TeleportTransition transition =
+                    new net.minecraft.world.level.portal.TeleportTransition(
+                            target,
+                            new net.minecraft.world.phys.Vec3(x, y, z),
+                            net.minecraft.world.phys.Vec3.ZERO,
+                            yaw, pitch,
+                            net.minecraft.world.level.portal.TeleportTransition.DO_NOTHING);
+            sp.teleport(transition);
+            return true;
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING, "[RTP][Fabric 1.21.11+] teleport failed: "
+                    + t.getClass().getSimpleName() + ": " + t.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Typed written-book modal for MC 1.21.11+ (rtp-fabric-ADR-012 section 4
+     * un-defer). Mirrors the v1_21_R1 implementation; see that class for the
+     * transient-slot rationale.
+     */
+    @Override
+    public boolean openBookMenu(Object serverPlayer, FabricBookSpec spec) {
+        if (!(serverPlayer instanceof ServerPlayer sp) || spec == null) return false;
+        try {
+            java.util.List<net.minecraft.network.chat.Component> pageComponents =
+                    new java.util.ArrayList<>(spec.pages().size());
+            for (io.github.dailystruggle.rtp.api.menu.BookSpec.Page page : spec.pages()) {
+                net.minecraft.network.chat.MutableComponent pageComp =
+                        net.minecraft.network.chat.Component.empty();
+                boolean firstLine = true;
+                for (io.github.dailystruggle.rtp.api.menu.BookSpec.Line line : page.lines()) {
+                    if (!firstLine) pageComp.append("\n");
+                    firstLine = false;
+                    for (io.github.dailystruggle.rtp.api.menu.BookSpec.Fragment frag : line.fragments()) {
+                        pageComp.append(FabricLegacyText.parseInteractive(
+                                frag.text(), frag.hover(), frag.runCommand(),
+                                FabricLegacyText.ClickKind.RUN));
+                    }
+                }
+                pageComponents.add(pageComp);
+            }
+            if (pageComponents.isEmpty()) {
+                pageComponents.add(net.minecraft.network.chat.Component.empty());
+            }
+
+            java.util.List<net.minecraft.server.network.Filterable<net.minecraft.network.chat.Component>> filtered =
+                    new java.util.ArrayList<>(pageComponents.size());
+            for (net.minecraft.network.chat.Component c : pageComponents) {
+                filtered.add(net.minecraft.server.network.Filterable.passThrough(c));
+            }
+            net.minecraft.world.item.component.WrittenBookContent content =
+                    new net.minecraft.world.item.component.WrittenBookContent(
+                            net.minecraft.server.network.Filterable.passThrough(spec.title()),
+                            "RTP", 0, filtered, false);
+            net.minecraft.world.item.ItemStack book =
+                    new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.WRITTEN_BOOK);
+            book.set(net.minecraft.core.component.DataComponents.WRITTEN_BOOK_CONTENT, content);
+
+            int hotbar = sp.getInventory().getSelectedSlot();
+            int slotId = 36 + hotbar;
+            net.minecraft.world.item.ItemStack real = sp.getInventory().getItem(hotbar);
+            int containerId = sp.inventoryMenu.containerId;
+            sp.connection.send(new net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket(
+                    containerId, sp.inventoryMenu.incrementStateId(), slotId, book));
+            sp.connection.send(new net.minecraft.network.protocol.game.ClientboundOpenBookPacket(
+                    net.minecraft.world.InteractionHand.MAIN_HAND));
+            sp.connection.send(new net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket(
+                    containerId, sp.inventoryMenu.incrementStateId(), slotId, real));
+            return true;
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING, "[RTP][Fabric 1.21.11+] openBookMenu failed: "
+                    + t.getClass().getSimpleName() + ": " + t.getMessage());
+            return false;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Maps-api parity - rtp-fabric-ADR-015. Vanilla filled-map rendering for the
+    // MC 1.21.11+ runtime. Mirrors the v26_1_R1 carrier; the maps types (MapId,
+    // MapItemSavedData.MapPatch, ClientboundMapItemDataPacket, DataComponents
+    // .MAP_ID, MapColor) are stable across this line and Loom remaps the typed
+    // references to the correct intermediary descriptors at compile time.
+    // -------------------------------------------------------------------------
+
+    /** chartKey -> the vanilla MapId allocated for that chart (reused across live frames). */
+    private final java.util.Map<String, net.minecraft.world.level.saveddata.maps.MapId> mapIds =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    @Override
+    public boolean supportsMapCharts() {
+        return true;
+    }
+
+    @Override
+    public void releaseMapChart(String chartKey) {
+        if (chartKey != null) {
+            mapIds.remove(chartKey);
+        }
+    }
+
+    @Override
+    public boolean renderMapChart(Object serverPlayer,
+                                  String chartKey,
+                                  int[] argb,
+                                  boolean locked,
+                                  boolean deliverItem) {
+        // Maps flow player-first: the viewer arrives as the raw NM ServerPlayer
+        // that the common FabricRTPPlayer resolved and owns, so all server/level
+        // state is reached through the player handle (sp.level()) rather than a
+        // standalone MinecraftServer. The caller has already hopped to the server
+        // tick thread via RTPRuntime.scheduler(), so map allocation, colour writes, packet
+        // dispatch, and inventory mutation are all server-thread-safe here.
+        if (!(serverPlayer instanceof ServerPlayer sp)
+                || chartKey == null || argb == null) {
+            return false;
+        }
+        try {
+            ServerLevel level = (ServerLevel) sp.level();
+
+            // Client-only "fake map": we deliberately do NOT register any
+            // MapItemSavedData on the server (no level.setMapData). The server
+            // therefore has no saved data to tick, so vanilla's held-map terrain
+            // scan never runs and can never overwrite our custom chart pixels.
+            // The client maintains its own per-MapId colour cache populated purely
+            // from the ClientboundMapItemDataPacket we push below, so chart
+            // fidelity is unaffected by the absence of server-side saved data. We
+            // only need a stable MapId per chart so live frames target the same
+            // client-side map.
+            net.minecraft.world.level.saveddata.maps.MapId id = mapIds.get(chartKey);
+            if (id == null) {
+                id = level.getFreeMapId();
+                mapIds.put(chartKey, id);
+            }
+
+            // Translate the ARGB buffer to vanilla MapColor packed bytes and push
+            // them as a full-canvas patch. setColorsDirty / getUpdatePacket are
+            // private, so we build a 128x128 MapPatch and send it ourselves.
+            int side = 128;
+            int n = Math.min(argb.length, side * side);
+            byte[] patchColors = new byte[side * side];
+            for (int i = 0; i < n; i++) {
+                int pixel = argb[i];
+                int alpha = (pixel >>> 24) & 0xFF;
+                byte packed = (alpha == 0)
+                        ? 0 // MapColor.NONE -> transparent
+                        : matchColor((pixel >> 16) & 0xFF, (pixel >> 8) & 0xFF, pixel & 0xFF);
+                patchColors[i] = packed;
+            }
+            net.minecraft.world.level.saveddata.maps.MapItemSavedData.MapPatch patch =
+                    new net.minecraft.world.level.saveddata.maps.MapItemSavedData.MapPatch(
+                            0, 0, side, side, patchColors);
+            sp.connection.send(new net.minecraft.network.protocol.game.ClientboundMapItemDataPacket(
+                    id, (byte) 0, locked,
+                    (java.util.Collection<net.minecraft.world.level.saveddata.maps.MapDecoration>) null,
+                    patch));
+
+            if (deliverItem) {
+                net.minecraft.world.item.ItemStack map =
+                        new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.FILLED_MAP);
+                map.set(net.minecraft.core.component.DataComponents.MAP_ID, id);
+                if (!sp.getInventory().add(map)) {
+                    // Inventory full: drop at the player's feet (parity with
+                    // BukkitMapBinding.deliverTo's dropItem fallback).
+                    sp.drop(map, false);
+                }
+            }
+        } catch (Throwable t) {
+            // S-004: never silently swallow: log loud, but do not rethrow into
+            // the server tick (would disconnect the viewer).
+            RTP.log(Level.WARNING, "[RTP][Fabric 1.21.11+] renderMapChart failed for chartKey="
+                    + chartKey + ": " + t.getClass().getSimpleName() + ": " + t.getMessage());
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Match an RGB triple to the nearest vanilla map-colour packed byte by
+     * walking every {@code MapColor} x {@code Brightness} pair and minimising
+     * squared Euclidean distance in RGB space. Mirrors the role of Bukkit's
+     * {@code MapPalette.matchColor} but against the {@code MapColor} table.
+     */
+    private static byte matchColor(int r, int g, int b) {
+        int best = 0;
+        long bestDist = Long.MAX_VALUE;
+        for (int packed = 0; packed < 256; packed++) {
+            net.minecraft.world.level.material.MapColor color =
+                    net.minecraft.world.level.material.MapColor.byId(packed >> 2);
+            if (color.id == 0) continue; // skip NONE (transparent)
+            int rgb = net.minecraft.world.level.material.MapColor.getColorFromPackedId(packed);
+            int rr = (rgb >> 16) & 0xFF;
+            int gg = (rgb >> 8) & 0xFF;
+            int bb = rgb & 0xFF;
+            long dr = (long) r - rr, dg = (long) g - gg, db = (long) b - bb;
+            long dist = dr * dr + dg * dg + db * db;
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = packed;
+            }
+        }
+        return (byte) best;
+    }
+}

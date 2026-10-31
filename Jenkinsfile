@@ -1,0 +1,127 @@
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    timeout(time: 30, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+
+  environment {
+    // Addon-facing and standalone SDK API closure published for out-of-repo consumers.
+    // Keep in sync with `publishedModulePaths` in the root build.gradle and the
+    // `install:` block in jitpack.yml.
+    PUBLISH_TASKS = ':server-api:publishToMavenLocal :anvil-api:publishToMavenLocal ' +
+                    ':bit-api:publishToMavenLocal :bstats-api:publishToMavenLocal ' +
+                    ':commands-api:publishToMavenLocal :config-bit-api:publishToMavenLocal ' +
+                    ':effects-api:publishToMavenLocal :maps-api:publishToMavenLocal ' +
+                    ':menu-api:publishToMavenLocal :metrics-api:publishToMavenLocal ' +
+                    ':predict-api:publishToMavenLocal :tags-api:publishToMavenLocal ' +
+                    ':units-api:publishToMavenLocal :yaml-api:publishToMavenLocal ' +
+                    ':rtp-proxy:rtp-proxy-common:publishToMavenLocal ' +
+                    ':rtp-api:publishToMavenLocal :rtp-core:publishToMavenLocal'
+  }
+
+  stages {
+    stage('Traceability Check') {
+      steps {
+        sh 'chmod +x scripts/check_traceability.sh'
+        sh './scripts/check_traceability.sh'
+      }
+    }
+
+    stage('Code Style') {
+      steps {
+        sh 'chmod +x gradlew'
+        sh './gradlew spotlessCheck'
+      }
+    }
+
+    stage('Build') {
+      steps {
+        sh './gradlew assemble shadowJar'
+      }
+    }
+
+    stage('BIT (shipped config)') {
+      steps {
+        sh './gradlew :rtp-core:bit -Pconfig=addons/LeafRTPActionAddon/src/main/resources/definitions/actions -Pstrict'
+        sh './gradlew :rtp-core:bit -Pconfig=rtp-plugin/src/main/resources -Pstrict'
+      }
+    }
+
+    // PMD gate (config/pmd/ruleset.xml), same rules GitHub Actions enforces in
+    // gradle-set.yml. Fails on any violation; pmdRegexMain stays advisory.
+    stage('Static Analysis') {
+      steps {
+        sh './gradlew pmdMain pmdTest pmdRegexMain -PstaticAnalysis'
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: '**/build/reports/pmd/*',
+                           allowEmptyArchive: true
+        }
+      }
+    }
+
+    stage('Test') {
+      steps {
+        sh './gradlew test'
+      }
+      post {
+        always {
+          junit '**/build/test-results/test/TEST-*.xml'
+          jacoco(
+            execPattern: '**/build/jacoco/*.exec',
+            classPattern: '**/build/classes/java/main',
+            sourcePattern: '**/src/main/java'
+          )
+        }
+      }
+    }
+
+    // Publish the addon-facing API closure (rtp-api/rtp-core + their
+    // project-dependency closure) on every push or merge to the V3 line.
+    // JitPack serves these branch snapshots on demand as
+    // `com.github.DailyStruggle.RTP:<module>:V3-SNAPSHOT`; this stage both
+    // validates the publication graph and primes the local Maven repo. A
+    // remote-repo upload (Maven Central snapshots / GitHub Packages) can be
+    // swapped in by replacing the publish tasks with the credentialed target.
+    stage('Publish API Artifacts') {
+      when {
+        anyOf {
+          branch 'V3'
+          branch 'V3-beta'
+        }
+      }
+      steps {
+        sh "./gradlew --no-daemon ${PUBLISH_TASKS}"
+      }
+    }
+
+    stage('Archive Artifacts') {
+      when {
+        anyOf {
+          branch 'main'
+          branch 'V3'
+        }
+      }
+      steps {
+        archiveArtifacts artifacts: 'build/libs/*.jar, addons/*/build/libs/*.jar',
+                         fingerprint: true
+      }
+    }
+  }
+
+  post {
+    always {
+      cleanWs()
+    }
+    failure {
+      echo "Pipeline failed on branch ${env.BRANCH_NAME} — check stage logs above."
+    }
+    success {
+      echo "Pipeline passed. Artifacts archived for branch ${env.BRANCH_NAME}."
+    }
+  }
+}

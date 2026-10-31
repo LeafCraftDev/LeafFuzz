@@ -1,0 +1,65 @@
+package io.github.dailystruggle.rtp.fabric.effects;
+
+import io.github.dailystruggle.effectsapi.common.EffectFactory;
+import io.github.dailystruggle.effectsapi.common.effects.GlideKeepAlive;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.core.particles.ParticleTypes;
+
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * Fabric-side initializer for {@link EffectFactory}, per effects-api-ADR-003
+ * + ADR-004.
+ *
+ * <p>Two responsibilities:
+ * <ol>
+ *   <li>Bind the per-platform {@link io.github.dailystruggle.effectsapi.common.spi.ValueCoercer}
+ *       so {@link io.github.dailystruggle.effectsapi.common.Effect}'s adaptive
+ *       reading order resolves Mojmap registry tokens (sounds / particles /
+ *       potions) instead of failing with the unbound-coercer guard from
+ *       ADR-004.</li>
+ *   <li>Register the Phase-1 Fabric concrete effects (SOUND / PARTICLE /
+ *       TITLE / POTION). Glide and Firework are out of scope for Phase-1.</li>
+ * </ol>
+ *
+ * <p>Idempotent: a second call to {@link #registerAll()} is a no-op.
+ */
+public final class FabricEffectsInitializer {
+
+    private static final AtomicBoolean REGISTERED = new AtomicBoolean(false);
+
+    private FabricEffectsInitializer() {}
+
+    /**
+     * Bind the {@link FabricValueCoercer} and register the Phase-1 Fabric
+     * concrete effects with {@link EffectFactory}. Safe to call multiple
+     * times - second and subsequent invocations are no-ops.
+     *
+     * <p>Must be called <em>after</em> {@code MinecraftServer} is up
+     * (so {@code BuiltInRegistries} is fully populated for default-value
+     * resolution) - typically from a {@code ServerLifecycleEvents.SERVER_STARTED}
+     * listener in {@code RTPFabricMod}.
+     */
+    public static void registerAll() {
+        if (!REGISTERED.compareAndSet(false, true)) return;
+
+        FabricHandles.register();
+        ServerTickEvents.END_SERVER_TICK.register(server -> GlideKeepAlive.tick());
+        // ADR-004: per-platform leaf operations live in FabricValueCoercer.
+        EffectFactory.setCoercer(new FabricValueCoercer());
+
+        // Defaults resolve by id, not ResourceLocation#withDefaultNamespace (1.21+) or the
+        // MobEffects constants (MobEffect on 1.20.1, Holder<MobEffect> on 1.21+), so this
+        // common code links on the 1.20.1 carrier too (ADR-113).
+        // ADR-116: register the canonical built-in effect set once via EffectFactory.
+        EffectFactory.registerBuiltInEffects(
+                FabricRegistryCompat.resolve(BuiltInRegistries.SOUND_EVENT, ResourceLocation.tryParse("minecraft:entity.player.levelup")),
+                ParticleTypes.EXPLOSION,
+                FabricRegistryCompat.resolve(BuiltInRegistries.MOB_EFFECT, ResourceLocation.tryParse("minecraft:blindness")),
+                "BALL",
+                "WHITE",
+                "PIANO");
+    }
+}

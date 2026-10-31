@@ -1,0 +1,431 @@
+package io.github.dailystruggle.rtp.bukkitplatform.network;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import com.google.common.io.ByteStreams;
+import io.github.dailystruggle.rtp.common.network.pluginmessage.NetworkBridge;
+import io.github.dailystruggle.rtp.common.network.pluginmessage.PluginMessageEnvelope;
+import io.github.dailystruggle.rtp.common.network.pluginmessage.ThrottledWarning;
+import org.bukkit.Bukkit;
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.plugin.messaging.PluginMessageListener;
+
+import java.io.File;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
+
+/**
+ * Bukkit/Paper/Folia implementation of the tier-1 (DB-free) plugin-message
+ * {@link NetworkBridge}. It speaks the proxy's built-in plugin-messaging
+ * vocabulary on the {@code bungeecord:main} channel (BungeeCord and Velocity
+ * both honour it natively, so no proxy companion plugin is required):
+ *
+ * <ul>
+ *   <li>{@code Forward} (custom sub-channel {@value #FORWARD_SUBCHANNEL}) for
+ *       backend-to-backend region-availability heartbeat gossip;</li>
+ *   <li>{@code Connect} for moving a player to a target backend;</li>
+ *   <li>{@code GetServer}/{@code GetServers} for the active topology
+ *       handshake driven by the {@code auto} resolver.</li>
+ * </ul>
+ *
+ * <p>Every outbound message rides an online player's server&lt;-&gt;proxy
+ * connection (a proxy plugin-messaging constraint). When no player is online
+ * the send is dropped at FINE rather than throwing (S-004); the periodic
+ * heartbeat retries on the next tick. Reads of {@code spigot.yml} /
+ * {@code paper-global.yml} feed the cheap {@link #passiveProbe()} that arms the
+ * {@code auto} resolver before any traffic is exchanged.</p>
+ *
+ * <p>Inbound messages arrive on a player connection and are untrusted (a
+ * modded client can inject them). Frames above
+ * {@link PluginMessageEnvelope#MAX_FRAME_BYTES} or with an out-of-range inner
+ * length are dropped before parsing; authenticity is enforced downstream by
+ * the binding's HMAC check.</p>
+ */
+public final class BukkitNetworkBridge implements NetworkBridge {
+
+    private static final Logger LOG = Logger.getLogger(BukkitNetworkBridge.class.getName());
+
+    /** The reserved proxy plugin-messaging channel (modern namespaced form). */
+    public static final String CHANNEL = "bungeecord:main";
+    /** Legacy un-namespaced BungeeCord channel for Paper/Spigot legacy translation compatibility. */
+    public static final String LEGACY_CHANNEL = "BungeeCord";
+    /** Custom {@code Forward} sub-channel carrying RTP heartbeat payloads. */
+    public static final String FORWARD_SUBCHANNEL = "RTPNet";
+
+    /**
+     * Dedicated backend&lt;-&gt;proxy-companion channel for the proxy-cache
+     * tier. Distinct from
+     * {@link #CHANNEL}, whose built-in {@code Forward}/{@code Connect}/
+     * {@code GetServers} vocabulary the proxy itself consumes; messages on
+     * this channel are addressed to the RTP proxy companion plugin, which
+     * caches pushed heartbeats and answers snapshot requests.
+     */
+    public static final String PROXY_CHANNEL = "rtp:net";
+    /** Companion verb: backend pushes its heartbeat into the proxy cache. */
+    private static final byte PROXY_PUSH = 1;
+    /** Companion verb: backend requests the cached snapshot. */
+    private static final byte PROXY_SNAPSHOT_REQ = 2;
+    /** Companion verb: companion replies with one cached heartbeat row. */
+    private static final byte PROXY_SNAPSHOT_RSP = 3;
+    /** Separator of the proxy {@code GetServers} reply list. */
+    private static final Pattern PEER_LIST_SEPARATOR = Pattern.compile(", ");
+    /** Maximum validity window (ms) for an active topology request. */
+    public static final long TOPOLOGY_REQUEST_TTL_MS = 5000L;
+    /** Maximum number of peers parsed from a GetServers reply. */
+    public static final int MAX_TOPOLOGY_PEERS = 256;
+    /** Standard server name identifier validation. */
+    private static final Pattern SERVER_NAME_PATTERN = Pattern.compile("^[a-zA-Z0-9_-]{1,64}$");
+
+    private final Plugin plugin;
+    private final boolean registered;
+    private final LongSupplier clock;
+    private final Listener listener;
+    private final ThrottledWarning rejectWarning;
+
+    private final AtomicLong topologyRequestTimestamp = new AtomicLong(0L);
+    private final AtomicBoolean pendingGetServer = new AtomicBoolean(false);
+    private final AtomicBoolean pendingGetServers = new AtomicBoolean(false);
+
+    private volatile Consumer<byte[]> heartbeatSink;
+    private volatile Consumer<Topology> topologySink;
+    // Own proxy server name learned from the most recent GetServer reply; pairs
+    // with the GetServers peer set to assemble a Topology.
+    private volatile String ownServerId;
+
+    public BukkitNetworkBridge(Plugin plugin) {
+        this(plugin, System::currentTimeMillis);
+    }
+
+    public BukkitNetworkBridge(Plugin plugin, LongSupplier clock) {
+        this.plugin = plugin;
+        this.clock = clock == null ? System::currentTimeMillis : clock;
+        this.rejectWarning = new ThrottledWarning(
+                LOG::warning, ThrottledWarning.DEFAULT_INTERVAL_MS, this.clock);
+        this.listener = new Listener();
+        boolean ok = false;
+        try {
+            if (plugin != null) {
+                plugin.getServer().getMessenger().registerOutgoingPluginChannel(plugin, CHANNEL);
+                plugin.getServer().getMessenger()
+                        .registerIncomingPluginChannel(plugin, CHANNEL, listener);
+                plugin.getServer().getMessenger().registerOutgoingPluginChannel(plugin, LEGACY_CHANNEL);
+                plugin.getServer().getMessenger()
+                        .registerIncomingPluginChannel(plugin, LEGACY_CHANNEL, listener);
+                // Proxy-cache companion channel (best-effort; the bungeecord:main
+                // tier still works if this fails to register).
+                plugin.getServer().getMessenger().registerOutgoingPluginChannel(plugin, PROXY_CHANNEL);
+                plugin.getServer().getMessenger()
+                        .registerIncomingPluginChannel(plugin, PROXY_CHANNEL, listener);
+                ok = true;
+            }
+        } catch (Throwable t) {
+            LOG.log(Level.WARNING,
+                    "[RTP] failed to register the '" + CHANNEL + "' plugin-messaging channel; "
+                            + "plugin-message network tier unavailable: " + t.getMessage());
+        }
+        this.registered = ok;
+    }
+
+    @Override
+    public boolean isAvailable() {
+        return registered;
+    }
+
+    @Override
+    public Optional<UUID> anyOnlinePlayer() {
+        Collection<? extends Player> online = Bukkit.getOnlinePlayers();
+        for (Player p : online) {
+            if (p != null && p.isOnline()) return Optional.of(p.getUniqueId());
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public void broadcastHeartbeat(byte[] payload) {
+        if (payload == null || payload.length > PluginMessageEnvelope.MAX_PAYLOAD_BYTES) return;
+        Optional<UUID> carrier = anyOnlinePlayer();
+        if (carrier.isEmpty()) {
+            LOG.log(Level.FINE, "[RTP] no carrier player online; heartbeat gossip skipped this tick.");
+            return;
+        }
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeUTF("Forward");
+        // "ONLINE" forwards to every other backend that currently has players;
+        // the sender is excluded by the proxy.
+        out.writeUTF("ONLINE");
+        out.writeUTF(FORWARD_SUBCHANNEL);
+        out.writeShort(payload.length);
+        out.write(payload);
+        dispatch(carrier.get(), out.toByteArray(), "heartbeat broadcast");
+    }
+
+    @Override
+    public void connect(UUID player, String targetServerId) {
+        if (player == null || targetServerId == null || targetServerId.isEmpty()) return;
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeUTF("Connect");
+        out.writeUTF(targetServerId);
+        dispatch(player, out.toByteArray(), "connect -> " + targetServerId);
+    }
+
+    @Override
+    public void registerInbound(Consumer<byte[]> heartbeatSink) {
+        this.heartbeatSink = heartbeatSink;
+    }
+
+    @Override
+    public void pushHeartbeatToProxy(byte[] payload) {
+        if (payload == null || payload.length > PluginMessageEnvelope.MAX_PAYLOAD_BYTES) return;
+        Optional<UUID> carrier = anyOnlinePlayer();
+        if (carrier.isEmpty()) {
+            LOG.log(Level.FINE, "[RTP] no carrier player online; heartbeat push to proxy skipped.");
+            return;
+        }
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeByte(PROXY_PUSH);
+        out.writeShort(payload.length);
+        out.write(payload);
+        LOG.log(Level.FINE, "[RTP] pushing heartbeat (" + payload.length
+                + " bytes) to proxy via carrier " + carrier.get() + ".");
+        dispatch(carrier.get(), PROXY_CHANNEL, out.toByteArray(), "proxy-cache push");
+    }
+
+    @Override
+    public void requestSnapshot() {
+        Optional<UUID> carrier = anyOnlinePlayer();
+        if (carrier.isEmpty()) {
+            LOG.log(Level.FINE, "[RTP] no carrier player online; proxy-cache snapshot request skipped.");
+            return;
+        }
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeByte(PROXY_SNAPSHOT_REQ);
+        LOG.log(Level.FINE, "[RTP] requesting proxy-cache snapshot via carrier " + carrier.get() + ".");
+        dispatch(carrier.get(), PROXY_CHANNEL, out.toByteArray(), "proxy-cache snapshot request");
+    }
+
+    @Override
+    public void requestTopology() {
+        Optional<UUID> carrier = anyOnlinePlayer();
+        if (carrier.isEmpty()) {
+            LOG.log(Level.FINE, "[RTP] no carrier player online; topology handshake deferred.");
+            return;
+        }
+        topologyRequestTimestamp.set(clock.getAsLong());
+        pendingGetServer.set(true);
+        pendingGetServers.set(true);
+
+        ByteArrayDataOutput getServer = ByteStreams.newDataOutput();
+        getServer.writeUTF("GetServer");
+        dispatch(carrier.get(), getServer.toByteArray(), "GetServer");
+
+        ByteArrayDataOutput getServers = ByteStreams.newDataOutput();
+        getServers.writeUTF("GetServers");
+        dispatch(carrier.get(), getServers.toByteArray(), "GetServers");
+    }
+
+    /** Visible for tests: whether a topology request is currently pending and within TTL. */
+    boolean isTopologyRequestPending() {
+        long now = clock.getAsLong();
+        return (pendingGetServer.get() || pendingGetServers.get())
+                && (now - topologyRequestTimestamp.get() <= TOPOLOGY_REQUEST_TTL_MS);
+    }
+
+    /** Visible for tests: access listener directly without network netty binding. */
+    Listener getListener() {
+        return listener;
+    }
+
+    @Override
+    public void registerTopology(Consumer<Topology> topologySink) {
+        this.topologySink = topologySink;
+    }
+
+    @Override
+    public ProxyProbe passiveProbe() {
+        try {
+            File root = serverRoot();
+            if (root == null) return ProxyProbe.DISARMED;
+            // spigot.yml: settings.bungeecord: true
+            File spigot = new File(root, "spigot.yml");
+            if (spigot.isFile()) {
+                YamlConfiguration cfg = YamlConfiguration.loadConfiguration(spigot);
+                if (cfg.getBoolean("settings.bungeecord", false)) return ProxyProbe.ARMED;
+            }
+            // paper-global.yml: proxies.bungee-cord.enabled / proxies.velocity.enabled
+            File paper = new File(new File(root, "config"), "paper-global.yml");
+            if (paper.isFile()) {
+                YamlConfiguration cfg = YamlConfiguration.loadConfiguration(paper);
+                if (cfg.getBoolean("proxies.bungee-cord.enabled", false)
+                        || cfg.getBoolean("proxies.velocity.enabled", false)) {
+                    return ProxyProbe.ARMED;
+                }
+            }
+        } catch (Throwable t) {
+            LOG.log(Level.FINE, "[RTP] passive proxy probe failed: " + t.getMessage());
+        }
+        return ProxyProbe.DISARMED;
+    }
+
+    /**
+     * Server root directory (parent of {@code plugins/}), derived from the
+     * plugin data folder ({@code <root>/plugins/RTP}). Returns {@code null}
+     * when the layout cannot be resolved.
+     */
+    private File serverRoot() {
+        if (plugin == null) return null;
+        File dataFolder = plugin.getDataFolder();
+        File pluginsDir = dataFolder.getParentFile();
+        if (pluginsDir == null) return null;
+        return pluginsDir.getParentFile();
+    }
+
+    /**
+     * Send an already-framed payload on the carrier player's connection.
+     * sendPluginMessage queues a packet on the netty channel and is safe to
+     * call off the main thread; any failure is logged at FINE (S-004) and the
+     * next heartbeat tick retries.
+     */
+    private void dispatch(UUID carrier, byte[] frame, String what) {
+        dispatch(carrier, CHANNEL, frame, what);
+    }
+
+    private void dispatch(UUID carrier, String channel, byte[] frame, String what) {
+        try {
+            Player p = Bukkit.getPlayer(carrier);
+            if (p == null || !p.isOnline()) {
+                LOG.log(Level.FINE, "[RTP] carrier player gone; " + what + " dropped.");
+                return;
+            }
+            p.sendPluginMessage(plugin, channel, frame);
+            if (CHANNEL.equals(channel)) {
+                try {
+                    p.sendPluginMessage(plugin, LEGACY_CHANNEL, frame);
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            LOG.log(Level.FINE, "[RTP] " + what + " send failed: " + t.getMessage());
+        }
+    }
+
+    /** Incoming plugin-message handler for {@link #CHANNEL}. */
+    final class Listener implements PluginMessageListener {
+        @Override
+        public void onPluginMessageReceived(String channel, Player player, byte[] message) {
+            if (message == null || message.length == 0) return;
+            if (message.length > PluginMessageEnvelope.MAX_FRAME_BYTES) {
+                rejectWarning.report("[RTP] dropped oversized plugin message on '" + channel + "' ("
+                        + message.length + " bytes > " + PluginMessageEnvelope.MAX_FRAME_BYTES
+                        + ") via " + (player == null ? "<none>" : player.getName()) + " (REQ-RTP-S-004).");
+                return;
+            }
+            if (PROXY_CHANNEL.equals(channel)) {
+                onProxyChannel(message);
+                return;
+            }
+            if (!CHANNEL.equals(channel) && !LEGACY_CHANNEL.equals(channel)) return;
+            try {
+                ByteArrayDataInput in = ByteStreams.newDataInput(message);
+                String sub = in.readUTF();
+                switch (sub) {
+                    case FORWARD_SUBCHANNEL -> {
+                        byte[] payload = readLengthPrefixed(in, channel);
+                        Consumer<byte[]> sink = heartbeatSink;
+                        if (payload != null && sink != null) sink.accept(payload);
+                    }
+                    case "GetServer" -> {
+                        long now = clock.getAsLong();
+                        if (!pendingGetServer.compareAndSet(true, false)
+                                || (now - topologyRequestTimestamp.get() > TOPOLOGY_REQUEST_TTL_MS)) {
+                            LOG.log(Level.FINE, "[RTP] dropped unsolicited or expired topology message 'GetServer'.");
+                            return;
+                        }
+                        String s = in.readUTF();
+                        if (s != null) {
+                            String trimmed = s.trim();
+                            if (SERVER_NAME_PATTERN.matcher(trimmed).matches()) {
+                                ownServerId = trimmed;
+                            } else {
+                                LOG.log(Level.FINE, "[RTP] dropped invalid GetServer name '" + s + "'.");
+                            }
+                        }
+                    }
+                    case "GetServers" -> {
+                        long now = clock.getAsLong();
+                        if (!pendingGetServers.compareAndSet(true, false)
+                                || (now - topologyRequestTimestamp.get() > TOPOLOGY_REQUEST_TTL_MS)) {
+                            LOG.log(Level.FINE, "[RTP] dropped unsolicited or expired topology message 'GetServers'.");
+                            return;
+                        }
+                        String csv = in.readUTF();
+                        Set<String> peers = new LinkedHashSet<>();
+                        for (String name : PEER_LIST_SEPARATOR.split(csv)) {
+                            String trimmed = name.trim();
+                            if (!trimmed.isEmpty() && SERVER_NAME_PATTERN.matcher(trimmed).matches()) {
+                                peers.add(trimmed);
+                                if (peers.size() >= MAX_TOPOLOGY_PEERS) break;
+                            }
+                        }
+                        Consumer<Topology> sink = topologySink;
+                        if (sink != null) sink.accept(new Topology(ownServerId, peers));
+                    }
+                    default -> {
+                        // Other proxy sub-channels (PlayerCount, etc.) are not
+                        // ours; ignore quietly.
+                    }
+                }
+            } catch (Throwable t) {
+                LOG.log(Level.FINE, "[RTP] dropping malformed proxy plugin message: " + t.getMessage());
+            }
+        }
+
+        /**
+         * Handle a message on {@link #PROXY_CHANNEL} from the proxy companion.
+         * The only inbound verb a backend cares about is
+         * {@link #PROXY_SNAPSHOT_RSP}, which carries one cached heartbeat row
+         * that is fed to the same inbound sink the gossip tier uses.
+         */
+        private void onProxyChannel(byte[] message) {
+            try {
+                ByteArrayDataInput in = ByteStreams.newDataInput(message);
+                byte verb = in.readByte();
+                if (verb == PROXY_SNAPSHOT_RSP) {
+                    byte[] payload = readLengthPrefixed(in, PROXY_CHANNEL);
+                    if (payload == null) return;
+                    Consumer<byte[]> sink = heartbeatSink;
+                    LOG.log(Level.FINE, "[RTP] received proxy-cache snapshot row (" + payload.length
+                            + " bytes); sink " + (sink != null ? "present" : "absent") + ".");
+                    if (sink != null) sink.accept(payload);
+                }
+                // PROXY_PUSH / PROXY_SNAPSHOT_REQ are companion-bound; a backend
+                // never receives them and ignores them if echoed.
+            } catch (Throwable t) {
+                LOG.log(Level.FINE, "[RTP] dropping malformed proxy-cache message: " + t.getMessage());
+            }
+        }
+
+        /** Read a {@code short}-prefixed payload; {@code null} (logged) when the length is out of range. */
+        private byte[] readLengthPrefixed(ByteArrayDataInput in, String channel) {
+            int len = in.readShort();
+            if (len <= 0 || len > PluginMessageEnvelope.MAX_PAYLOAD_BYTES) {
+                rejectWarning.report("[RTP] dropped plugin message on '" + channel
+                        + "' with invalid payload length " + len + " (REQ-RTP-S-004).");
+                return null;
+            }
+            byte[] payload = new byte[len];
+            in.readFully(payload);
+            return payload;
+        }
+    }
+}

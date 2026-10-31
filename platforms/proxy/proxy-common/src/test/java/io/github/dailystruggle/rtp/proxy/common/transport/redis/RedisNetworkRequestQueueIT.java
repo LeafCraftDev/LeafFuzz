@@ -1,0 +1,213 @@
+package io.github.dailystruggle.rtp.proxy.common.transport.redis;
+
+import io.github.dailystruggle.rtp.proxy.common.spi.NetworkRequestQueue.CancelReason;
+import io.github.dailystruggle.rtp.proxy.common.spi.NetworkRequestQueue.EnrolOutcome;
+import io.github.dailystruggle.rtp.proxy.common.spi.NetworkRequestQueue.EnrolmentEnvelope;
+import io.github.dailystruggle.rtp.proxy.common.spi.NetworkRequestQueue.QueueEnvelope;
+import io.github.dailystruggle.rtp.proxy.common.spi.NetworkRequestQueue.QueueState;
+import io.github.dailystruggle.rtp.proxy.common.spi.NetworkRequestQueue.QueueStatus;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIf;
+import io.github.dailystruggle.rtp.proxy.common.transport.redis.resp.RespConnection;
+import io.github.dailystruggle.rtp.proxy.common.transport.redis.resp.RespPool;
+
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Opt-in live-Redis integration test for {@link RedisNetworkRequestQueue}
+ * Exercises end-to-end script atomicity, correlationId
+ * idempotency, LPOS-derived position, and terminal-state cleanup that the
+ * no-Redis {@code RedisNetworkRequestQueueTest} cannot reach.
+ *
+ * <p>Backed by a Testcontainers-managed {@code redis:7-alpine} (item 17 of
+ * ENTERPRISE_READINESS.md: use a real Redis, not mocks). Docker-gated via
+ * {@link RedisTestContainer#dockerAvailable()} so a Docker-less build skips the
+ * class cleanly. Cleanup scrubs only the namespaced {@code rtp:net:wq:*}
+ * keyspace.</p>
+ */
+@EnabledIf("io.github.dailystruggle.rtp.proxy.common.transport.redis.RedisTestContainer#dockerAvailable")
+class RedisNetworkRequestQueueIT {
+
+    private RespPool pool;
+    private RedisNetworkRequestQueue queue;
+
+    private static void scrubKeyspace(RespPool p) {
+        try (RespConnection j = p.getResource()) {
+            RespConnection.ScanResult res = j.scan("0", "rtp:net:wq:*", 100);
+            if (!res.getResult().isEmpty()) {
+                j.del(res.getResult().toArray(new String[0]));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @BeforeEach
+    void open() {
+        pool = RedisTestContainer.newPool();
+        scrubKeyspace(pool);
+        queue = new RedisNetworkRequestQueue(pool, 0);
+    }
+
+    @AfterEach
+    void close() {
+        try {
+            if (queue != null) queue.close();
+        } finally {
+            if (pool != null) {
+                try {
+                    scrubKeyspace(pool);
+                } finally {
+                    pool.close();
+                }
+            }
+        }
+    }
+
+    private static EnrolmentEnvelope env(UUID pid, UUID cid, String region, String hint) {
+        return new EnrolmentEnvelope(
+                pid,
+                cid,
+                region == null ? Optional.empty() : Optional.of(region),
+                hint == null ? Optional.empty() : Optional.of(hint),
+                System.currentTimeMillis());
+    }
+
+    @Test
+    void enrol_then_dequeue_roundTrip() throws Exception {
+        UUID pid = UUID.randomUUID();
+        UUID cid = UUID.randomUUID();
+        EnrolOutcome o = queue.flushPending(List.of(env(pid, cid, "default", "backend-a")))
+                .get(5, TimeUnit.SECONDS);
+        assertEquals(EnrolOutcome.ACCEPTED, o);
+
+        Optional<QueueEnvelope> popped =
+                queue.dequeueReady(Duration.ofSeconds(2)).get(5, TimeUnit.SECONDS);
+        assertTrue(popped.isPresent(), "expected dequeue to return the enrolled envelope");
+        assertEquals(pid, popped.get().playerId());
+        assertEquals(cid, popped.get().correlationId());
+        assertEquals(Optional.of("default"), popped.get().regionKey());
+        assertEquals(Optional.of("backend-a"), popped.get().serverHint());
+    }
+
+    @Test
+    void correlationId_idempotent_acrossTwoFlushes() throws Exception {
+        UUID pid = UUID.randomUUID();
+        UUID cid = UUID.randomUUID();
+        EnrolmentEnvelope e = env(pid, cid, "default", null);
+
+        assertEquals(EnrolOutcome.ACCEPTED, queue.flushPending(List.of(e)).get(5, TimeUnit.SECONDS));
+        // Second flush with the same correlationId must NOT double-enqueue.
+        assertEquals(EnrolOutcome.ACCEPTED, queue.flushPending(List.of(e)).get(5, TimeUnit.SECONDS));
+
+        Optional<QueueEnvelope> first =
+                queue.dequeueReady(Duration.ofSeconds(2)).get(5, TimeUnit.SECONDS);
+        assertTrue(first.isPresent(), "first dequeue should return the single enrolled envelope");
+        Optional<QueueEnvelope> second =
+                queue.dequeueReady(Duration.ofMillis(200)).get(5, TimeUnit.SECONDS);
+        assertTrue(second.isEmpty(), "second dequeue must be empty - correlationId guard prevented duplicate");
+    }
+
+    @Test
+    void pollStatus_reportsPositionInQueue() throws Exception {
+        UUID p1 = UUID.randomUUID();
+        UUID p2 = UUID.randomUUID();
+        UUID p3 = UUID.randomUUID();
+        queue.flushPending(Arrays.asList(
+                env(p1, UUID.randomUUID(), "default", null),
+                env(p2, UUID.randomUUID(), "default", null),
+                env(p3, UUID.randomUUID(), "default", null)))
+                .get(5, TimeUnit.SECONDS);
+
+        List<QueueStatus> rows =
+                queue.pollStatus(Arrays.asList(p1, p2, p3)).get(5, TimeUnit.SECONDS);
+        assertNotNull(rows);
+        assertEquals(3, rows.size(), "all three enrolled players should have status rows");
+        // FIFO order: p1 -> 1, p2 -> 2, p3 -> 3. pollStatus.lua reports a 1-based
+        // position (LPOS + 1), so the head of the queue is position 1, not 0.
+        for (QueueStatus s : rows) {
+            if (s.playerId().equals(p1)) assertEquals(1, s.positionInQueue());
+            else if (s.playerId().equals(p2)) assertEquals(2, s.positionInQueue());
+            else if (s.playerId().equals(p3)) assertEquals(3, s.positionInQueue());
+        }
+    }
+
+    @Test
+    void transition_terminalCompleted_evictsEnvAndStatus() throws Exception {
+        UUID pid = UUID.randomUUID();
+        UUID cid = UUID.randomUUID();
+        queue.flushPending(List.of(env(pid, cid, "default", null))).get(5, TimeUnit.SECONDS);
+
+        // Drain the FIFO so terminal cleanup is the only thing the next pollStatus could see.
+        Optional<QueueEnvelope> popped =
+                queue.dequeueReady(Duration.ofSeconds(2)).get(5, TimeUnit.SECONDS);
+        assertTrue(popped.isPresent());
+
+        Optional<QueueStatus> after = queue.transition(
+                pid, QueueState.COMPLETED, Optional.of("ok")).get(5, TimeUnit.SECONDS);
+        // Terminal transitions DEL env + status HASHes per D3 transition.lua.
+        // The returned status may be empty (already deleted) or carry the final state - both are valid.
+        if (after.isPresent()) {
+            assertEquals(QueueState.COMPLETED, after.get().state());
+        }
+
+        // Subsequent pollStatus must not surface the deleted row.
+        List<QueueStatus> rows =
+                queue.pollStatus(List.of(pid)).get(5, TimeUnit.SECONDS);
+        assertTrue(rows.isEmpty(), "terminal transition must evict status row from pollStatus");
+
+        // And the `seen` SET membership for the correlationId must be scrubbed:
+        // a fresh flush of the same correlationId should now re-enqueue cleanly.
+        EnrolOutcome o = queue.flushPending(List.of(env(pid, cid, "default", null)))
+                .get(5, TimeUnit.SECONDS);
+        assertEquals(EnrolOutcome.ACCEPTED, o);
+        assertTrue(queue.dequeueReady(Duration.ofSeconds(2)).get(5, TimeUnit.SECONDS).isPresent(),
+                "post-terminal re-enrolment of the same correlationId should be visible to dequeue");
+    }
+
+    @Test
+    void cancel_idempotent() throws Exception {
+        UUID pid = UUID.randomUUID();
+        UUID cid = UUID.randomUUID();
+        queue.flushPending(List.of(env(pid, cid, "default", null))).get(5, TimeUnit.SECONDS);
+
+        queue.cancel(pid, CancelReason.EXPLICIT_REQUEST).get(5, TimeUnit.SECONDS);
+        // Second cancel must complete normally (idempotent).
+        queue.cancel(pid, CancelReason.EXPLICIT_REQUEST).get(5, TimeUnit.SECONDS);
+
+        // Status should be gone (terminal CANCELLED scrubs env + status).
+        List<QueueStatus> rows =
+                queue.pollStatus(List.of(pid)).get(5, TimeUnit.SECONDS);
+        assertTrue(rows.isEmpty(), "cancel must evict status row");
+    }
+
+    @Test
+    void dequeueReady_emptyQueue_returnsEmptyAfterTimeout() throws Exception {
+        long t0 = System.nanoTime();
+        Optional<QueueEnvelope> r =
+                queue.dequeueReady(Duration.ofMillis(150)).get(5, TimeUnit.SECONDS);
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+        assertTrue(r.isEmpty(), "empty FIFO must yield empty Optional");
+        assertTrue(elapsedMs >= 100,
+                "dequeueReady should respect the deadline (>=~150ms); got " + elapsedMs + "ms");
+    }
+
+    @Test
+    void pollStatus_emptyList_emptyResult() throws Exception {
+        List<QueueStatus> rows =
+                queue.pollStatus(Collections.emptyList()).get(5, TimeUnit.SECONDS);
+        assertNotNull(rows);
+        assertTrue(rows.isEmpty());
+    }
+}

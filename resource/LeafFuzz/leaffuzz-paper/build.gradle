@@ -1,0 +1,27 @@
+plugins {
+    id 'java'
+}
+
+group = 'net.leaf'
+version = '0.1.0'
+
+dependencies {
+    api project(':resource:LeafFuzz:leaffuzz-common')
+    implementation(project(':bukkit:bukkit-common')) { transitive = false }
+    compileOnly 'io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT'
+    implementation "io.github.dailystruggle:commands-api:${rootProject.version}"
+
+    testImplementation 'io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT'
+    testImplementation rootProject.libs.jqwik
+    testImplementation rootProject.libs.jazzer.junit
+}
+
+jar {
+    archiveClassifier.set('dev')
+}
+
+test {
+    useJUnitPlatform {
+        includeEngines 'junit-jupiter', 'jqwik'
+    }
+}

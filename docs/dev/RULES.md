@@ -1,0 +1,134 @@
+# Project Rules
+
+This document outlines critical development rules that MUST be followed to ensure the stability, safety, and performance of the RTP plugin. The **S-series** rules are derived from the [Prohibition Requirements](REQUIREMENTS.md#3-prohibition-requirements); other rule families (F-, D-) have their own sources, cited per rule.
+
+For operational guidelines and AI-specific instructions, see [`AGENTS.md`](../../.junie/AGENTS.md). The catalog of document types is appended at the end of this file.
+
+## Quick Reference
+
+Scan this table first. Read the detailed rule below only if you are touching code in that area.
+
+| ID    | Family | One-line rule                                      | Source                                      |
+|-------|--------|----------------------------------------------------|---------------------------------------------|
+| S-001 | Safety | No unsafe teleport destinations                    | `REQ-RTP-S-001`                             |
+| S-002 | Safety | No leaked force-loaded chunks                      | `REQ-RTP-S-002`                             |
+| S-003 | Safety | Respect land protection                            | `REQ-RTP-S-003`                             |
+| S-004 | Safety | Report all failures; never discard silently        | `REQ-RTP-S-004`                             |
+| S-005 | Safety | No main-thread chunk I/O                           | `REQ-RTP-S-005`                             |
+| S-006 | Safety | Throw `IllegalStateException` on early API access  | `REQ-RTP-S-006`                             |
+| F-001 | Folia  | Verify region thread ownership before scheduling   | `REQ-FOLIA-ARCH-001`, `REQ-FOLIA-ARCH-002`  |
+| F-002 | Folia  | Use count-bound (not time-bound) execution         | `REQ-FOLIA-ARCH-005`, `REQ-FOLIA-ARCH-006`  |
+| F-003 | Folia  | Isolate economy interactions off region threads    | `REQ-FOLIA-ARCH-007`, `REQ-FOLIA-ARCH-008`  |
+| D-001 | Doc    | Maintain traceability (requirement ↔ code ↔ test)  | self-contained                              |
+| D-002 | Doc    | Be specific and unambiguous; define terms          | self-contained                              |
+| D-003 | Doc    | Single Source of Truth — reference, don't duplicate| self-contained                              |
+| D-004 | Doc    | Write for the audience                             | self-contained                              |
+| D-005 | Doc    | Propose architecture before implementation         | self-contained                              |
+| D-006 | Doc    | Mirror prose voice and shallow-AST salience for external user copy | `ADR-130`                   |
+| D-007 | Doc    | New subsystem updates scope (REQUIREMENTS section 0) in the same change | `REQUIREMENTS.md` section 0      |
+| D-008 | Code   | Large deduplicated classes delegate to package-private helpers | self-contained                     |
+| D-009 | Doc    | Operator docs and CHANGELOG travel with operator-visible changes | self-contained                   |
+| D-010 | Doc    | Maintain AST & corpus searchability (`@governedBy`, capability Javadoc, backticked symbols) | `ADR-115` |
+
+## Core Development Rules
+
+- **Rule S-001: No Unsafe Teleport Destinations**
+  - **Description**: Do not teleport players to locations that are inherently dangerous (e.g., lava, fire, void).
+  - **Requirement**: `REQ-RTP-S-001`
+
+- **Rule S-002: No Leaked Force-Loaded Chunks**
+  - **Description**: Ensure every acquired chunk ticket is released to prevent memory leaks and performance degradation.
+  - **Requirement**: `REQ-RTP-S-002`
+
+- **Rule S-003: Respect Land Protection**
+  - **Description**: Do not teleport players into areas protected by third-party claim plugins.
+  - **Requirement**: `REQ-RTP-S-003`
+
+- **Rule S-004: Report All Failures**
+  - **Description**: Never discard a teleport request silently. All failures must be reported to the user and logged.
+  - **Requirement**: `REQ-RTP-S-004`
+
+- **Rule S-005: No Main-Thread Chunk I/O**
+  - **Description**: Never perform chunk loading or validation on the main server thread. Use asynchronous schedulers.
+  - **Requirement**: `REQ-RTP-S-005`
+
+- **Rule S-006: Handle Early API Access**
+  - **Description**: Prevent `NullPointerException`s by throwing `IllegalStateException` when the API is called before the core plugin is loaded.
+  - **Requirement**: `REQ-RTP-S-006`
+
+## Folia-Specific Architectural Rules
+
+These rules are critical for ensuring thread safety and performance on the Folia platform.
+
+- **Rule F-001: Verify Thread Ownership**
+  - **Description**: Before dispatching a task to a regional scheduler, always verify if the current thread already owns the target region. Execute immediately if it does to avoid unnecessary 1-tick delays.
+  - **Requirement**: `REQ-FOLIA-ARCH-001`, `REQ-FOLIA-ARCH-002`
+
+- **Rule F-002: Use Count-Bound Execution**
+  - **Description**: In regional threads, all iterative background tasks must be bounded by a fixed instruction or item count, not wall-clock time. Time-based slicing is non-deterministic on Folia.
+  - **Requirement**: `REQ-FOLIA-ARCH-005`, `REQ-FOLIA-ARCH-006`
+
+- **Rule F-003: Isolate Economy Interactions**
+  - **Description**: Never perform economy transactions (e.g., Vault API calls) directly on a Folia region thread. Delegate all economy interactions to a global or async scheduler to prevent `ThreadAccessExceptions`.
+  - **Requirement**: `REQ-FOLIA-ARCH-007`, `REQ-FOLIA-ARCH-008`
+
+## Documentation and Specification Rules
+
+These rules govern how project documentation, requirements, and design specifications are written and maintained.
+
+- **Rule D-001: Maintain Traceability**
+  - **Description**: All requirements, design decisions, and rules must be linked to a source or justification. High-level concepts must trace down to specific implementations, and code changes must trace back to a requirement or decision.
+
+- **Rule D-002: Be Specific and Unambiguous**
+  - **Description**: Use clear, precise, and unambiguous language. Define new or specialized terms in `GLOSSARY.md`. For requirements, use "shall" for mandatory items and "should" for recommendations.
+
+- **Rule D-003: Single Source of Truth (SSoT)**
+  - **Description**: Every piece of project information (a requirement, a rule, a definition) must have exactly one authoritative location. Documents shall reference this single source rather than duplicating information.
+
+- **Rule D-004: Write for the Audience**
+  - **Description**: Tailor the language, detail, and format to the intended audience. `README.md` is for users (high-level), `docs/dev/` is for developers (technical), and `.junie/` is for AI agents (operational).
+
+- **Rule D-005: Propose Architecture Before Implementation**
+  - **Description**: For any refactor or new feature that touches more than one class, crosses a module boundary, or introduces a new command architecture, a written proposal must be presented and approved before any code is written.
+
+- **Rule D-006: Mirror Prose Voice for External User Copy**
+  - **Description**: When authoring external listings, README, marketing copy, or release notes, mirror the maintainer's established voice (`ADR-130`): first person, conversational, low ceremony, honest about limits and trade-offs. Prefer concrete evidence over adjectives (benchmark numbers, reproducibility notes; no AI hype buzzwords). State technical specifics plainly (spiral math, `.mca` pre-filter, async caching), but keep internal math out of Zone 1 (above the fold), marketplace taglines, and the Zone 2 operator on-ramp (`Common setups`, `Install`, `Features`), and structure storefront pages for shallow-AST heading-vector scoping (`## Testing and quality gates`, `## Commands, configuration, and FAQ`), contract-first lead sentences, and >=70% usability/safety/reference salience (`ADR-130`). Whenever a storefront or overview section mentions `space-filling` or `spiral` math, state in the same section that the math is internal and operators only configure standard shapes (`CIRCLE`, `SQUARE`) and a block radius. Keep reference tables in Section 6 concise (at most 10 data rows per table, linking to `docs/admin/` for the full catalog). Use ASCII punctuation only (hyphens/colons, no em/en dashes; see [`docs/publishing/FRONT_PAGE.md`](../../resource/LeafRTP/docs/publishing/FRONT_PAGE.md)). Storefront pages (BuiltByBit, Modrinth, Hangar) are generated from that one source by `scripts/release/build_front_pages.py`; paid-support copy goes in `kind: promo` blocks so it never reaches Hangar or Modrinth.
+
+- **Rule D-007: Scope Travels With the Subsystem**
+  - **Description**: A change that introduces a new subsystem (a new command family, module, bundled addon, network surface, or operator-facing engine) shall update the In Scope / Out of Scope lists in [`REQUIREMENTS.md` section 0](REQUIREMENTS.md) in the same change set, and the D-005 proposal shall state the scope impact. Features outside selection, the teleport pipeline, and the platform adapters should ship as addons against `rtp-api` (ADR-057) unless the proposal records why core is required.
+
+- **Rule D-008: Deduplicate Behind a Facade, Not Into One File**
+  - **Description**: When deduplication concentrates shared behaviour in one class (e.g. `MemoryShape`, `MenuRedeemSubcommand`, `ScanTask`, `ConfigParser`), keep that class as the single public entry point and move cohesive concerns (codec, table, persistence, rendering) into package-private helpers in the same package. Apply this opportunistically when a change already touches the concern; do not open refactor-only changes without a D-005 proposal. Public API and persisted formats shall not change as part of such a split.
+
+- **Rule D-009: Operator Docs Travel With the Change**
+  - **Description**: A change that adds, renames or removes an operator-visible config key, command, permission or message key, or changes its default, shall update the operator documentation (`docs/admin/`) and `CHANGELOG.md` in the same change set. Message keys also follow *Locale Parity Maintenance* in `AGENTS.md`. This is the contributor-side form of a release invariant (every shipped key is documented); that invariant becomes a requirement once a mechanical check compares the shipped `.yml` keys, commands and permissions with `docs/admin/`.
+
+- **Rule D-010: Maintain AST and Corpus Searchability**
+  - **Description**: Because the repository's SQLite FTS5 and AST knowledge graph (`corpus-atlas/`, `scripts/repo_ast.py`) is both the search engine and the corpus, every new or modified `TIER_1_SPI_PURE` (`api/*`, `rtp-api`) or `TIER_2_CORE_DOMAIN` (`rtp-core`) interface and class shall include a concise class-level Javadoc capability summary (stating its domain purpose in standard terminology) and `@governedBy` / `@trace` tags naming its active `ADR-*`, `REQ-*`, and `S-00x` invariants (`ADR-115`). ADRs (`docs/adr/`, `<subproject>/docs/adr/`) and `docs/dev/TRACEABILITY.md` rows shall wrap exact Java class and JUnit test identifiers in backticks (`` `ClassName` ``, `` `ClassNameTest` ``) so the AST baker links them deterministically. When introducing or refactoring a shared SPI or utility, run `python3 scripts/repo_ast.py search "<capability>"` and `python3 scripts/repo_ast.py audit` to verify the symbol ranks in the top 3 for its capability and carries non-empty `Gov(c)` links.
+
+## Maintenance Protocol
+
+- Any new ADR that introduces a prohibition or a new safety/architectural invariant MUST add a corresponding rule to this file (and its quick-reference row) in the same change set.
+- Any new ADR that introduces a subsystem MUST update `REQUIREMENTS.md` section 0 in the same change set (Rule D-007).
+- When a rule's underlying requirement is renamed or renumbered, update both the detailed bullet and the quick-reference table row; stale requirement IDs silently break `Rule D-001`.
+
+---
+
+## Appendix: Document Type Catalog
+
+Project documents follow one of two structures:
+
+- **Centralized ("Living")** — a single project-wide document in `docs/dev/` covering a concern that spans modules.
+- **Recurring** — a high-level summary in `docs/dev/` plus a module-specific copy in each submodule. Recurring docs MUST use the identical filename and top-level heading in every module so that a filename search yields the complete set.
+
+| # | Type | Structure | Location | Primary audience |
+|---|------|-----------|----------|------------------|
+| 1 | Requirements (`what`) | Recurring | `docs/dev/REQUIREMENTS.md`, module `REQUIREMENTS.md` | PMs, devs, QA |
+| 2 | Design (`how`) | Recurring | `docs/dev/DESIGN.md`, module `DESIGN.md` | Devs, architects |
+| 3 | ADRs (`why`, immutable) | Centralized | `docs/adr/ADR-NNN-*.md` | Devs, architects |
+| 4 | Plans | Centralized | `docs/dev/*_PLAN.md` | Devs, PMs |
+| 5 | Traceability / Coverage | Centralized | `docs/dev/TRACEABILITY.md`, `COVERAGE_PLAN.md` | Devs, PMs, QA |
+| 6 | Rules (this file) | Centralized | `docs/dev/RULES.md` | Devs, AI agents |
+| 7 | Glossary | Centralized | `docs/dev/GLOSSARY.md` | All contributors |
+
+IDs use `REQ-<module>-<family>-NNN` (requirements) and ADR-NNN (decisions). Requirements use `shall` / `shall not`; see Rule D-002.

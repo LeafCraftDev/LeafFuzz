@@ -1,0 +1,623 @@
+package io.github.dailystruggle.rtp.fabric.v26_1_R1;
+
+import io.github.dailystruggle.rtp.api.entity.RTPCommandSender;
+import io.github.dailystruggle.rtp.api.entity.RTPPlayer;
+import io.github.dailystruggle.rtp.api.world.RTPLocation;
+import io.github.dailystruggle.rtp.api.world.RTPWorld;
+import io.github.dailystruggle.rtp.common.RTP;
+import io.github.dailystruggle.rtp.common.commands.SenderTimings;
+import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.Collections;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.logging.Level;
+
+/**
+ * MC 26.1.2 RTPPlayer wrapper.
+ *
+ * <p>Lives in {@code rtp-fabric-v26_1_R1} (Loom unobfuscated plugin, no
+ * intermediary remapping) so its class file's NM references survive linkage
+ * on the deobfuscated 26.1.2 runtime - unlike {@code FabricRTPPlayer} in
+ * {@code rtp-fabric-common}, whose intermediary aliases ({@code class_3222},
+ * {@code class_2596}, ...) are absent at runtime and cause
+ * {@link NoClassDefFoundError} on any class-linkage operation.
+ *
+ * <p>Behaviorally a slimmed-down port of {@link io.github.dailystruggle.rtp.fabric.player.FabricRTPPlayer}:
+ * identity, op-level perm check, system-chat / actionbar / title sinks, and
+ * teleport via {@code MinecraftServer#submit}. Cooldown / delay are 0.
+ * Effects-api hover/click rich text is supported via
+ * {@link #sendComponent(Component)}.
+ */
+public final class V26_1_R1FabricRTPPlayer implements RTPPlayer,
+        io.github.dailystruggle.rtp.fabric.player.FabricInteractiveMessageSink,
+        io.github.dailystruggle.rtp.fabric.player.FabricBookOpener,
+        io.github.dailystruggle.rtp.fabric.player.FabricMapSink {
+
+    private final UUID uuid;
+    private final String name;
+    // Weak: a cached copy of this wrapper (teleport history, cooldown records) must never pin a
+    // quit player's ServerPlayer graph. The server's player list keeps it alive while online.
+    private volatile java.lang.ref.WeakReference<ServerPlayer> handleRef =
+            new java.lang.ref.WeakReference<>(null);
+
+    public V26_1_R1FabricRTPPlayer(ServerPlayer player) {
+        this.uuid = player.getUUID();
+        this.name = resolveName(player);
+        this.handleRef = new java.lang.ref.WeakReference<>(player);
+    }
+
+    private static String resolveName(ServerPlayer player) {
+        // authlib's GameProfile is a record on MC 26.1+ - use name() (record component).
+        try {
+            return player.getGameProfile().name();
+        } catch (NoSuchMethodError | NoSuchFieldError ignored) {
+            // fall through
+        } catch (Throwable ignored) {
+            // fall through
+        }
+        return player.getName().getString();
+    }
+
+    public void rebind(ServerPlayer player) {
+        this.handleRef = new java.lang.ref.WeakReference<>(player);
+    }
+
+    public void unbind() {
+        this.handleRef = new java.lang.ref.WeakReference<>(null);
+    }
+
+    public @Nullable ServerPlayer handle() {
+        return handleRef.get();
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Opens the written-book modal on 26.x by delegating to the active
+     * deobf carrier's {@code openBookMenu} with this player's deobf-linkable
+     * {@code ServerPlayer}, keeping the raw handle private (this player does
+     * not extend the common {@code FabricRTPPlayer}).
+     */
+    @Override
+    public boolean openBookMenu(io.github.dailystruggle.rtp.fabric.menu.FabricBookSpec spec) {
+        ServerPlayer p = handleRef.get();
+        if (p == null || !isOnline() || spec == null) return false;
+        io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapter adapter =
+                io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapterRegistry.peek();
+        if (adapter == null) return false;
+        return adapter.openBookMenu(p, spec);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Renders the chart on 26.x by hopping to the server tick thread and
+     * delegating to the active deobf carrier's {@code renderMapChart} with this
+     * player's deobf-linkable {@code ServerPlayer} (this player does not extend
+     * the common {@code FabricRTPPlayer}).
+     */
+    @Override
+    public boolean renderMapChart(String chartKey, int[] argb, boolean locked, boolean deliverItem) {
+        if (!isOnline() || chartKey == null || argb == null) return false;
+        io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapter adapter =
+                io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapterRegistry.peek();
+        if (adapter == null || !adapter.supportsMapCharts()) return false;
+        RTPRuntime.scheduler().runTask(() -> {
+            ServerPlayer p = handleRef.get();
+            if (p == null) return; // viewer went offline before the hop
+            adapter.renderMapChart(p, chartKey, argb, locked, deliverItem);
+        });
+        return true;
+    }
+
+    @Override
+    public void releaseMapChart(String chartKey) {
+        io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapter adapter =
+                io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapterRegistry.peek();
+        if (adapter != null) adapter.releaseMapChart(chartKey);
+    }
+
+    @Override public UUID uuid() { return uuid; }
+    @Override public String name() { return name; }
+
+    @Override
+    public boolean hasPermission(String permission) {
+        ServerPlayer p = handleRef.get();
+        if (p == null) return false;
+        if (permission == null || permission.isEmpty()) return true;
+
+        // PRIMARY: fabric-permissions-api via reflection. We avoid a direct call to
+        // Permissions.getPermissionValue(UUID, String) because javac's overload resolution
+        // would also load the sibling Entity (class_1297) overload, which is not on the
+        // v26_1_R1 compile classpath under deobf mappings. Reflection sidesteps that.
+        try {
+            Class<?> permsCls = Class.forName("me.lucko.fabric.api.permissions.v0.Permissions");
+            java.lang.reflect.Method m = permsCls.getMethod("getPermissionValue", UUID.class, String.class);
+            Object cf = m.invoke(null, uuid, permission);
+            if (cf instanceof java.util.concurrent.CompletableFuture) {
+                @SuppressWarnings("unchecked")
+                java.util.concurrent.CompletableFuture<Object> future =
+                        (java.util.concurrent.CompletableFuture<Object>) cf;
+                Class<?> tsCls = Class.forName("net.fabricmc.fabric.api.util.TriState");
+                Object def = tsCls.getField("DEFAULT").get(null);
+                Object state = future.getNow(def);
+                Object trueVal = tsCls.getField("TRUE").get(null);
+                Object falseVal = tsCls.getField("FALSE").get(null);
+                if (state == trueVal) return true;
+                if (state == falseVal) return false;
+            }
+        } catch (LinkageError | ClassNotFoundException | NoSuchMethodException | NoSuchFieldException ignored) {
+            // perms-api jar not on runtime classpath - fall through to ops.json.
+        } catch (Throwable ignored) {
+            // defensive
+        }
+
+        // SECONDARY: consult the plugin.yml default table when no perms-api
+        // implementer answered. Mirrors Bukkit descriptor-driven behaviour so
+        // baseline player nodes (rtp.see / rtp.use, default true) work for
+        // non-ops and rtp.onevent.* (default false) stay denied even for ops.
+        io.github.dailystruggle.rtp.fabric.player.FabricDefaultPermissions.Verdict verdict =
+                io.github.dailystruggle.rtp.fabric.player.FabricDefaultPermissions.resolve(permission);
+        if (verdict == io.github.dailystruggle.rtp.fabric.player.FabricDefaultPermissions.Verdict.TRUE) return true;
+        if (verdict == io.github.dailystruggle.rtp.fabric.player.FabricDefaultPermissions.Verdict.FALSE) return false;
+        // verdict == OP - fall through to the ops.json scan below.
+
+        // FALLBACK: scan ops.json for this UUID. Stable across MC versions.
+        try {
+            if (p.level() instanceof ServerLevel lvl) {
+                MinecraftServer srv = lvl.getServer();
+                java.io.File opsFile = srv.getPlayerList().getOps().getFile();
+                if (opsFile != null && opsFile.isFile()) {
+                    String body = new String(java.nio.file.Files.readAllBytes(opsFile.toPath()),
+                            java.nio.charset.StandardCharsets.UTF_8);
+                    if (body.contains("\"" + uuid.toString() + "\"")) return true;
+                }
+            }
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING,
+                    "[RTP][v26_1_R1] hasPermission ops.json scan failed for " + name
+                            + " (" + t.getClass().getSimpleName() + "): " + t.getMessage());
+        }
+        return false;
+    }
+
+    @Override
+    public Set<String> getEffectivePermissions() {
+        // rtp-fabric-ADR-011: LuckPerms-Fabric primary + closed-namespace registry probe.
+        if (handleRef.get() == null) return Collections.emptySet();
+        boolean isOp = hasPermission("rtp.reload");
+        return io.github.dailystruggle.rtp.fabric.player.FabricEffectivePermissionsResolver
+                .resolve(uuid, isOp, this::hasPermission);
+    }
+
+    @Override
+    public void sendMessage(String message) {
+        if (message == null) return;
+        sendComponent(V26_1_R1FabricLegacyText.parse(message));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Builds the hover/click {@link Component} via the v26-local
+     * {@link V26_1_R1FabricLegacyText#parseInteractive} (whose NM references
+     * link on the deobf 26.x runtime, unlike the common-module parser) and
+     * delivers it. This is what keeps the chat menu renderer's clicks and
+     * {@code /rtp info} hovers alive on 26.x.
+     */
+    @Override
+    public void sendInteractive(String message, String hover, String click, boolean run) {
+        if (message == null) return;
+        sendComponent(V26_1_R1FabricLegacyText.parseInteractive(message, hover, click, run));
+    }
+
+    public void sendComponent(Component component) {
+        ServerPlayer p = handleRef.get();
+        if (p == null || component == null) return;
+        try {
+            if (p.connection != null) {
+                p.connection.send(new ClientboundSystemChatPacket(component, false));
+            }
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING,
+                    "[RTP][v26_1_R1] Failed to deliver system message to " + name
+                            + ": " + t.getMessage());
+        }
+    }
+
+    /**
+     * Send a title / subtitle pair with explicit fade/stay timings (ticks).
+     *
+     * <p>Mojmap-typed mirror of {@code FabricRTPPlayerUnobf#sendTitle} -
+     * required for {@code RTPFabricMod}'s messages.yml title/subtitle/actionbar
+     * hook to render on the deobf MC 26.1.x runtime (the common
+     * {@code FabricRTPPlayer} class doesn't link there, so its sibling
+     * implementation is unreachable). Empty / null strings are silently
+     * dropped, mirroring Bukkit's {@code Player.sendTitle} semantics.
+     */
+    public void sendTitle(String title, String subtitle, int fadeIn, int stay, int fadeOut) {
+        ServerPlayer p = handleRef.get();
+        if (p == null) return;
+        if ((title == null || title.isEmpty()) && (subtitle == null || subtitle.isEmpty())) return;
+        try {
+            if (p.connection == null) return;
+            p.connection.send(new net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket(
+                    fadeIn, stay, fadeOut));
+            if (subtitle != null && !subtitle.isEmpty()) {
+                p.connection.send(new net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket(
+                        V26_1_R1FabricLegacyText.parse(subtitle)));
+            }
+            if (title != null && !title.isEmpty()) {
+                p.connection.send(new net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket(
+                        V26_1_R1FabricLegacyText.parse(title)));
+            }
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING,
+                    "[RTP][v26_1_R1] Failed to deliver title to " + name + ": " + t.getMessage());
+        }
+    }
+
+    /**
+     * Send an actionbar message. Mojmap-typed mirror of
+     * {@code FabricRTPPlayerUnobf#sendActionbar}. Empty / null is silently dropped.
+     */
+    public void sendActionbar(String message) {
+        ServerPlayer p = handleRef.get();
+        if (p == null) return;
+        if (message == null || message.isEmpty()) return;
+        try {
+            if (p.connection == null) return;
+            p.connection.send(new net.minecraft.network.protocol.game.ClientboundSetActionBarTextPacket(
+                    V26_1_R1FabricLegacyText.parse(message)));
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING,
+                    "[RTP][v26_1_R1] Failed to deliver actionbar to " + name + ": " + t.getMessage());
+        }
+    }
+
+    @Override public long cooldown() { return SenderTimings.cooldownMillis(this); }
+    @Override public long delay() { return SenderTimings.delayMillis(this); }
+
+    @Override
+    public void performCommand(@Nullable RTPPlayer player, String command) {
+        ServerPlayer p = handleRef.get();
+        if (p == null || command == null) return;
+        if (p.level() instanceof ServerLevel lvl) {
+            MinecraftServer srv = lvl.getServer();
+            if (srv == null) return;
+            // Command dispatch touches single-threaded server state; hop when called off-thread.
+            if (!srv.isSameThread()) {
+                srv.execute(() -> performCommand(player, command));
+                return;
+            }
+            try {
+                srv.getCommands().performPrefixedCommand(p.createCommandSourceStack(), command);
+            } catch (Throwable t) {
+                RTP.log(Level.WARNING,
+                        "[RTP][v26_1_R1] performCommand failed for " + name + ": " + t.getMessage());
+            }
+        }
+    }
+
+    @Override
+    public RTPCommandSender clone() {
+        ServerPlayer p = handleRef.get();
+        if (p == null) return new DetachedClone(uuid, name);
+        return new V26_1_R1FabricRTPPlayer(p);
+    }
+
+    @Override
+    public CompletableFuture<Boolean> setLocation(RTPLocation to) {
+        ServerPlayer p = handleRef.get();
+        if (p == null || to == null) return CompletableFuture.completedFuture(false);
+        RTPWorld<?> rtpWorld = to.world();
+        // V26 worlds extend RTPWorld<ServerLevel> directly (NOT common's
+        // FabricRTPWorld, whose intermediary aliases don't link on the deobf
+        // 26.1.2 runtime). Accept either: V26_1_R1FabricRTPWorld via direct
+        // instanceof, or any other RTPWorld whose world() handle is a
+        // ServerLevel (defensive - keeps the path working if a different
+        // RTPWorld subtype is registered for the dimension).
+        ServerLevel target;
+        if (rtpWorld instanceof V26_1_R1FabricRTPWorld v26w) {
+            target = v26w.world();
+        } else if (rtpWorld != null && rtpWorld.world() instanceof ServerLevel sl) {
+            target = sl;
+        } else {
+            return CompletableFuture.completedFuture(false);
+        }
+        MinecraftServer srv = target.getServer();
+        if (srv == null && p.level() instanceof ServerLevel here) {
+            srv = here.getServer();
+        }
+        if (srv == null) return CompletableFuture.completedFuture(false);
+        final double tx = to.getBlockX() + 0.5;
+        final double ty = to.getBlockY();
+        final double tz = to.getBlockZ() + 0.5;
+        return srv.submit(() -> {
+            ServerPlayer cur = handleRef.get();
+            if (cur == null || cur.isRemoved()) return false;
+            return performTeleport(cur, target, tx, ty, tz, cur.getYRot(), cur.getXRot());
+        });
+    }
+
+    @Override
+    public void setRespawnLocation(RTPLocation to) {
+        // BetterRTP SetAsRespawn parity (26.x). Anchors the respawn point on the
+        // server thread via reflective setRespawnPosition (the MC 26.x RespawnConfig
+        // form is resolved at runtime). S-004: failures are logged, never swallowed.
+        ServerPlayer p = handleRef.get();
+        if (p == null || to == null) return;
+        RTPWorld<?> rtpWorld = to.world();
+        ServerLevel target;
+        if (rtpWorld instanceof V26_1_R1FabricRTPWorld v26w) {
+            target = v26w.world();
+        } else if (rtpWorld != null && rtpWorld.world() instanceof ServerLevel sl) {
+            target = sl;
+        } else {
+            return;
+        }
+        MinecraftServer srv = target.getServer();
+        if (srv == null && p.level() instanceof ServerLevel here) {
+            srv = here.getServer();
+        }
+        if (srv == null) return;
+        final int bx = to.getBlockX();
+        final int by = to.getBlockY();
+        final int bz = to.getBlockZ();
+        final ServerLevel targetFinal = target;
+        srv.submit(() -> {
+            ServerPlayer cur = handleRef.get();
+            if (cur == null || cur.isRemoved()) return Boolean.FALSE;
+            anchorRespawn(cur, targetFinal, bx, by, bz);
+            return Boolean.TRUE;
+        });
+    }
+
+    private static void anchorRespawn(ServerPlayer cur, ServerLevel target, int x, int y, int z) {
+        try {
+            Object dim = target.dimension();
+            Object pos = new net.minecraft.core.BlockPos(x, y, z);
+            for (java.lang.reflect.Method m : ServerPlayer.class.getMethods()) {
+                if (!m.getName().equals("setRespawnPosition")) continue;
+                Class<?>[] pt = m.getParameterTypes();
+                if (pt.length == 5) {
+                    m.invoke(cur, dim, pos, 0.0f, true, false);
+                    return;
+                }
+                if (pt.length == 2) {
+                    Object cfg = buildRespawnConfig(pt[0], dim, pos);
+                    if (cfg != null) {
+                        m.invoke(cur, cfg, false);
+                        return;
+                    }
+                }
+            }
+            RTP.log(Level.WARNING,
+                "[RTP][v26_1_R1] no setRespawnPosition method on this MC version");
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING, "[RTP][v26_1_R1] setRespawnPosition failed", t);
+        }
+    }
+
+    private static Object buildRespawnConfig(Class<?> cfgClass, Object dim, Object pos) {
+        try {
+            for (java.lang.reflect.Constructor<?> c : cfgClass.getConstructors()) {
+                Class<?>[] pt = c.getParameterTypes();
+                Object[] args = new Object[pt.length];
+                boolean ok = true;
+                for (int i = 0; i < pt.length; i++) {
+                    Class<?> pc = pt[i];
+                    if (pc.isInstance(dim)) args[i] = dim;
+                    else if (pc.isInstance(pos)) args[i] = pos;
+                    else if (pc == float.class || pc == Float.class) args[i] = 0.0f;
+                    else if (pc == boolean.class || pc == Boolean.class) args[i] = Boolean.TRUE;
+                    else { ok = false; break; }
+                }
+                if (ok) return c.newInstance(args);
+            }
+        } catch (Throwable ignored) {
+            // fall through; caller logs the overall failure
+        }
+        return null;
+    }
+
+    private static boolean performTeleport(ServerPlayer cur, ServerLevel target,
+                                           double x, double y, double z,
+                                           float yaw, float pitch) {
+        // Typed TeleportTransition path first: the only reliable cross-dimension move on 26.x.
+        io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapter adapter =
+                io.github.dailystruggle.rtp.fabric.version.FabricVersionAdapterRegistry.peek();
+        if (adapter != null) {
+            try {
+                if (adapter.teleport(cur, target, x, y, z, yaw, pitch)) return true;
+            } catch (Throwable t) {
+                RTP.log(Level.FINE, "[RTP][v26_1_R1] adapter teleport failed: " + t);
+            }
+        }
+        // Reflective teleportTo(ServerLevel,double*4,float*2) - present on most MC
+        // releases including 26.1.2.
+        try {
+            java.lang.reflect.Method m = ServerPlayer.class.getMethod(
+                    "teleportTo", ServerLevel.class,
+                    double.class, double.class, double.class, float.class, float.class);
+            m.invoke(cur, target, x, y, z, yaw, pitch);
+            return true;
+        } catch (NoSuchMethodException ignored) {
+            // fall through
+        } catch (Throwable t) {
+            RTP.log(Level.FINE,
+                    "[RTP][v26_1_R1] reflective teleportTo(6) failed: " + t);
+        }
+        // Fallback: same-dim packet teleport.
+        try {
+            if (cur.level() == target) {
+                cur.connection.teleport(x, y, z, yaw, pitch);
+                cur.setYRot(yaw);
+                cur.setXRot(pitch);
+                return true;
+            }
+        } catch (Throwable t) {
+            RTP.log(Level.FINE,
+                    "[RTP][v26_1_R1] same-dim connection.teleport failed: " + t);
+        }
+        if (cur.level() != target) {
+            // Never setPos here: it would move the player to the target XZ inside the origin
+            // dimension (possibly underground) while the pipeline reports failure (S-001/S-004).
+            RTP.log(Level.WARNING,
+                    "[RTP][v26_1_R1] cross-dim teleport requested but no stable cross-dim "
+                            + "path on this MC version; player left in place.");
+            return false;
+        }
+        // Last resort (same dimension only): setPos.
+        try {
+            cur.setPos(x, y, z);
+            cur.setYRot(yaw);
+            cur.setXRot(pitch);
+            cur.connection.teleport(x, y, z, yaw, pitch);
+            return true;
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING, "[RTP][v26_1_R1] fallback teleport failed", t);
+            return false;
+        }
+    }
+
+    @Override
+    public RTPLocation getLocation() {
+        ServerPlayer p = handleRef.get();
+        if (p == null) return null;
+        if (!(p.level() instanceof ServerLevel level)) return null;
+        // On MC 26.1.2 (verified via javap on the deobf jar) the accessor is
+        // dimension() - no `get` prefix - and on this MC release ResourceKey was
+        // renamed location() -> identifier(). Direct typed calls because this v26
+        // module compiles against Mojang names.
+        String worldName;
+        try {
+            worldName = level.dimension().identifier().toString();
+        } catch (Throwable t) {
+            return null;
+        }
+        RTPWorld<?> rtpWorld = RTPRuntime.serverAccessor() == null
+                ? null
+                : RTPRuntime.serverAccessor().getRTPWorld(worldName);
+        if (rtpWorld == null) return null;
+        return new RTPLocation(rtpWorld, p.getBlockX(), p.getBlockY(), p.getBlockZ());
+    }
+
+    @Override
+    public boolean isOnline() {
+        ServerPlayer p = handleRef.get();
+        return p != null && !p.isRemoved();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Client-side ("fake") block changes (RTPPlayer SPI). Purely visual: the real
+    // world is never mutated (S-001..S-007), only already-loaded blocks are touched
+    // (S-005, chunk-loaded guard), and a malformed token is logged not swallowed
+    // (S-004). The block id round-trips through the block registry, so it stays
+    // platform-internally compatible with whatever getClientBlock produced.
+    // ---------------------------------------------------------------------------
+
+    @Override
+    public String getClientBlock(RTPLocation location) {
+        if (location == null || handleRef.get() == null) return null;
+        ServerLevel level = resolveLevel(location);
+        if (level == null) return null;
+        int x = location.x(), y = location.y(), z = location.z();
+        if (!isLoaded(level, x >> 4, z >> 4)) return null; // S-005
+        try {
+            net.minecraft.world.level.block.state.BlockState state =
+                    level.getBlockState(new net.minecraft.core.BlockPos(x, y, z));
+            net.minecraft.resources.Identifier id = level.registryAccess()
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.BLOCK)
+                    .getKey(state.getBlock());
+            return id == null ? null : id.toString();
+        } catch (Throwable t) {
+            RTP.log(Level.FINE,
+                    "[RTP][v26_1_R1] getClientBlock failed at (" + x + "," + y + "," + z + "): " + t);
+            return null;
+        }
+    }
+
+    @Override
+    public void sendClientBlockChange(RTPLocation location, String blockData) {
+        if (location == null || blockData == null) return;
+        ServerPlayer p = handleRef.get();
+        if (p == null || p.connection == null) return;
+        ServerLevel level = resolveLevel(location);
+        if (level == null) return;
+        int x = location.x(), y = location.y(), z = location.z();
+        if (!isLoaded(level, x >> 4, z >> 4)) return;
+        net.minecraft.world.level.block.state.BlockState state = parseBlockData(level, blockData);
+        if (state == null) return;
+        try {
+            p.connection.send(new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(
+                    new net.minecraft.core.BlockPos(x, y, z), state));
+        } catch (Throwable t) {
+            RTP.log(Level.WARNING,
+                    "[RTP][v26_1_R1] sendClientBlockChange failed for " + name + ": " + t.getMessage());
+        }
+    }
+
+    @Nullable
+    private static ServerLevel resolveLevel(RTPLocation location) {
+        RTPWorld<?> rtpWorld = location.world();
+        if (rtpWorld instanceof V26_1_R1FabricRTPWorld v26w) return v26w.level();
+        if (rtpWorld != null && rtpWorld.world() instanceof ServerLevel sl) return sl;
+        return null;
+    }
+
+    private static boolean isLoaded(ServerLevel level, int cx, int cz) {
+        try {
+            return level.getChunkSource().hasChunk(cx, cz);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Resolve a block id to its default {@code BlockState} via the block registry (S-004 on failure). */
+    private net.minecraft.world.level.block.state.@Nullable BlockState parseBlockData(
+            ServerLevel level, String blockData) {
+        try {
+            net.minecraft.resources.Identifier id =
+                    net.minecraft.resources.Identifier.parse(blockData);
+            net.minecraft.world.level.block.Block block = level.registryAccess()
+                    .lookupOrThrow(net.minecraft.core.registries.Registries.BLOCK)
+                    .getValue(id);
+            return block == null ? null : block.defaultBlockState();
+        } catch (Throwable e) {
+            RTP.log(Level.WARNING,
+                    "[RTP][v26_1_R1] ignoring malformed client block id: " + blockData
+                            + " (" + e.getClass().getSimpleName() + ")");
+            return null;
+        }
+    }
+
+    /** Detached fallback used by {@link #clone()} when the handle has been released. */
+    private static final class DetachedClone implements RTPPlayer {
+        private final UUID uuid;
+        private final String name;
+        DetachedClone(UUID uuid, String name) { this.uuid = uuid; this.name = name; }
+        @Override public UUID uuid() { return uuid; }
+        @Override public String name() { return name; }
+        @Override public boolean hasPermission(String permission) { return false; }
+        @Override public Set<String> getEffectivePermissions() { return Collections.emptySet(); }
+        @Override public void sendMessage(String message) { /* offline */ }
+        @Override public long cooldown() { return 0L; }
+        @Override public long delay() { return 0L; }
+        @Override public void performCommand(@Nullable RTPPlayer p, String c) { /* offline */ }
+        @Override public RTPCommandSender clone() { return this; }
+        @Override public CompletableFuture<Boolean> setLocation(RTPLocation to) {
+            return CompletableFuture.completedFuture(false);
+        }
+        @Override public RTPLocation getLocation() { return null; }
+        @Override public boolean isOnline() { return false; }
+    }
+}

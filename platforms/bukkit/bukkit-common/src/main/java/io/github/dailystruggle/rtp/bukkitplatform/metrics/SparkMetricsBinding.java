@@ -1,0 +1,191 @@
+package io.github.dailystruggle.rtp.bukkitplatform.metrics;
+
+import io.github.dailystruggle.metrics.api.FoliaRegionSample;
+import io.github.dailystruggle.metrics.api.MetricsBinding;
+import io.github.dailystruggle.metrics.api.MetricsSnapshot;
+
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * {@link MetricsBinding} that sources TPS / MSPT from the
+ * <a href="https://spark.lucko.me/">spark</a> profiler when it is installed,
+ * merging those richer values over a native {@code delegate} binding for every
+ * other field. spark exposes per-window TPS and a mean-MSPT statistic that are
+ * consistent across Paper / Spigot / Folia and more accurate than the coarse
+ * {@code Server#getTPS()} / {@code Server#getAverageTickTime()} the native
+ * bindings read.
+ *
+ * <p><b>Soft-dependency.</b> spark is never required. The binding probes the
+ * spark API once at construction; if the API classes are absent
+ * ({@link ClassNotFoundException} / {@link NoClassDefFoundError} - including
+ * trimmed assemblies such as the rtp-lite jar) it enters a permanent
+ * <em>disabled</em> state and every field simply delegates. The
+ * {@code softdepend: [spark]} entry in {@code plugin.yml} only constrains load
+ * order so spark is enabled before RTP; it does not make spark mandatory.
+ *
+ * <p><b>Per-field merge (approved design).</b> Only {@link #tps1m()} /
+ * {@link #tps5m()} / {@link #tps15m()} / {@link #mspt()} are taken from spark.
+ * {@link #playerCount()}, {@link #softCap()}, {@link #chunkLoadBacklog()},
+ * {@link #databaseLatencyMs()}, and {@link #foliaRegions()} always delegate -
+ * spark does not own those. When spark is present but a statistic is not yet
+ * sampled (or {@code SparkProvider.get()} transiently throws before spark
+ * finishes init), the affected getter returns the delegate's value instead, so
+ * the merge self-heals once spark warms up.
+ *
+ * <p><b>Threading.</b> Every getter is non-blocking and never throws on the
+ * calling thread (binding contract). All reflective access is wrapped so a
+ * spark-side failure degrades to the delegate / sentinel rather than
+ * propagating.
+ *
+ * <p><b>Folia.</b> This binding <em>is</em> applied on Folia, wrapping the
+ * native {@code FoliaMetricsBinding} delegate. spark supplies the scalar
+ * TPS/MSPT (Folia's native per-region sampler can only derive MSPT from the
+ * inter-tick interval, not real per-tick processing time), while
+ * {@link #foliaRegions()} delegates to the Folia binding so per-region
+ * samples are preserved.
+ *
+ * <p>Testable without spark on the classpath via the package-private
+ * {@link #SparkMetricsBinding(MetricsBinding, SparkStatSource)} constructor.
+ */
+public final class SparkMetricsBinding implements MetricsBinding {
+
+    /** Source of spark-derived statistic values; nested alias of {@link SparkStatSource}. */
+    interface SparkStats extends SparkStatSource {
+    }
+
+    /**
+     * Collects engine telemetry dataset for spark metadata serialization.
+     * Guaranteed never to throw and safely degrades if core or subcomponents
+     * are uninitialized.
+     *
+     * @return structured map of telemetry key-value pairs
+     */
+    public static java.util.Map<String, Object> collectTelemetry() {
+        return SparkTelemetry.collect();
+    }
+
+    private final MetricsBinding delegate;
+    private final SparkStatSource spark;
+
+    /** Production constructor: builds a reflective spark accessor. */
+    public SparkMetricsBinding(MetricsBinding delegate) {
+        this(delegate, new ReflectiveSparkStats());
+    }
+
+    /** Test seam. */
+    SparkMetricsBinding(MetricsBinding delegate, SparkStatSource spark) {
+        this.delegate = (delegate == null) ? MetricsBinding.NOOP : delegate;
+        this.spark = spark;
+    }
+
+    /** Visible for diagnostics / tests. */
+    boolean sparkEnabled() {
+        return spark.available();
+    }
+
+    private double sparkTpsOr(int windowIdx, double fallback) {
+        if (!spark.available()) return fallback;
+        double v = spark.tps(windowIdx);
+        return Double.isNaN(v) ? fallback : v;
+    }
+
+    @Override
+    public double tps1m() {
+        return sparkTpsOr(0, delegate.tps1m());
+    }
+
+    @Override
+    public double tps5m() {
+        return sparkTpsOr(1, delegate.tps5m());
+    }
+
+    @Override
+    public double tps15m() {
+        return sparkTpsOr(2, delegate.tps15m());
+    }
+
+    @Override
+    public double mspt() {
+        double fallback = delegate.mspt();
+        if (!spark.available()) return fallback;
+        double v = spark.mspt();
+        return Double.isNaN(v) ? fallback : v;
+    }
+
+    @Override
+    public int playerCount() {
+        return delegate.playerCount();
+    }
+
+    @Override
+    public int softCap() {
+        return delegate.softCap();
+    }
+
+    @Override
+    public int chunkLoadBacklog() {
+        return delegate.chunkLoadBacklog();
+    }
+
+    @Override
+    public int databaseLatencyMs() {
+        return delegate.databaseLatencyMs();
+    }
+
+    @Override
+    public List<FoliaRegionSample> foliaRegions() {
+        return delegate.foliaRegions();
+    }
+
+    /** Worse of spark's server-wide TPS and the delegate's worst loop (a Folia region). */
+    @Override
+    public double worstTps1m() {
+        return worse(tps1m(), delegate.worstTps1m(), false);
+    }
+
+    /** Worse of spark's MSPT and the delegate's worst loop (a Folia region). */
+    @Override
+    public double worstMspt() {
+        return worse(mspt(), delegate.worstMspt(), true);
+    }
+
+    @Override
+    public boolean regionalTicking() {
+        return delegate.regionalTicking();
+    }
+
+    /**
+     * Regional delegate: its own region reading, as-is (spark's server-wide TPS would mark every
+     * region unhealthy). Single loop: worse of spark and the delegate.
+     */
+    @Override
+    public double regionTps1m(UUID worldId, int chunkX, int chunkZ) {
+        double region = delegate.regionTps1m(worldId, chunkX, chunkZ);
+        return delegate.regionalTicking() ? region : worse(tps1m(), region, false);
+    }
+
+    /** See {@link #regionTps1m(UUID, int, int)}. */
+    @Override
+    public double regionMspt(UUID worldId, int chunkX, int chunkZ) {
+        double region = delegate.regionMspt(worldId, chunkX, chunkZ);
+        return delegate.regionalTicking() ? region : worse(mspt(), region, true);
+    }
+
+    @Override
+    public boolean wraps(MetricsBinding other) {
+        return this == other || delegate.wraps(other);
+    }
+
+    @Override
+    public void observeRegion(Object world, int cx, int cz) {
+        delegate.observeRegion(world, cx, cz);
+    }
+
+    /** NaN-aware min (TPS) or max (MSPT); NaN only when both sides are unsampled. */
+    static double worse(double a, double b, boolean higherIsWorse) {
+        if (Double.isNaN(a)) return b;
+        if (Double.isNaN(b)) return a;
+        return higherIsWorse ? Math.max(a, b) : Math.min(a, b);
+    }
+}
