@@ -46,9 +46,9 @@ dependencies {
     // Gson chat-component serializer. These are provided at runtime by Paper/
     // Folia (compileOnly here); on a pure Spigot server they are absent and the
     // SendMessage MiniMessage path transparently falls back to legacy color codes.
-    compileOnly 'net.kyori:adventure-api:4.17.0'
-    compileOnly 'net.kyori:adventure-text-minimessage:4.17.0'
-    compileOnly 'net.kyori:adventure-text-serializer-gson:4.17.0'
+    compileOnly 'net.kyori:adventure-api:5.2.0'
+    compileOnly 'net.kyori:adventure-text-minimessage:5.2.0'
+    compileOnly 'net.kyori:adventure-text-serializer-gson:5.2.0'
     api project(':commands-api')
     api project(':effects-api')
     if (hasRtpCore) {
@@ -58,9 +58,9 @@ dependencies {
     // Adventure is compileOnly above (provided by Paper/Folia at runtime); the
     // MiniMessageRenderer tests need it on the test classpath to exercise the
     // legacy->MiniMessage segmentation and a real deserialize round-trip.
-    testImplementation 'net.kyori:adventure-api:4.17.0'
-    testImplementation 'net.kyori:adventure-text-minimessage:4.17.0'
-    testImplementation 'net.kyori:adventure-text-serializer-gson:4.17.0'
+    testImplementation 'net.kyori:adventure-api:5.2.0'
+    testImplementation 'net.kyori:adventure-text-minimessage:5.2.0'
+    testImplementation 'net.kyori:adventure-text-serializer-gson:5.2.0'
     // ArchUnit - bytecode-level architecture rule enforcement. Hosts the three
     // boundary rules that lock the Spigot-exclusive Anvil read-only pre-filter
     // package in place (see ADR-016 / ADR-016 section 6).
