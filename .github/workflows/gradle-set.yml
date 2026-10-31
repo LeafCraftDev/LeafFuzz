@@ -37,7 +37,7 @@ jobs:
       # Both toolchains: the 26.x Fabric/NeoForge carriers (and the GUI renderers
       # and effects-api unobf module built against them) pin Java 25.
       - name: Set up JDK 21 and 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           java-version: |
             21
