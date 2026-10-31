@@ -20,6 +20,6 @@ tasks.withType(JavaCompile).configureEach {
 dependencies {
     api project(':tags-api')
     api project(':server-api')
-    compileOnly 'org.jetbrains:annotations:24.1.0'
-    testCompileOnly 'org.jetbrains:annotations:24.1.0'
+    compileOnly 'org.jetbrains:annotations:26.1.0'
+    testCompileOnly 'org.jetbrains:annotations:26.1.0'
 }

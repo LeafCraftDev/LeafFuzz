@@ -18,7 +18,7 @@ plugins {
 }
 
 dependencies {
-    compileOnly 'org.jetbrains:annotations:24.1.0'
+    compileOnly 'org.jetbrains:annotations:26.1.0'
 
     // ArchUnit — bytecode-level enforcement that no metrics-api type
     // imports org.bukkit.* / net.minecraft.* / Folia internals. Same

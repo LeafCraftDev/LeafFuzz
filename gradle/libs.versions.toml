@@ -26,7 +26,7 @@ mockito = "5.5.0"
 # 1.21.x runs on the Java 21 toolchain, supports current Docker Engine API
 # versions, and skips gracefully without Docker.
 testcontainers = "1.21.3"
-jetbrainsAnnotations = "24.1.0"
+jetbrainsAnnotations = "26.1.0"
 checkerQual = "3.42.0"
 jacoco = "0.8.11"
 # PMD is the local, programmable static-analysis tool (clang-tidy analogue):
