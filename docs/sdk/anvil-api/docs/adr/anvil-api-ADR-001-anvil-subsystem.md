@@ -83,7 +83,7 @@ Reconciliation is symmetric:
 
 ### 8. Shared module layout
 
-The decode stack lives in `rtp-anvil` (peer of `commands-api` and `effects-api`), package `io.github.dailystruggle.rtp.anvil`.
+The decode stack lives in `rtp-anvil` (peer of `commands-api` and `effects-api`), package `io.github.dailystruggle.anvil`.
 
 **Module invariants** — `rtp-anvil` shall not import:
 

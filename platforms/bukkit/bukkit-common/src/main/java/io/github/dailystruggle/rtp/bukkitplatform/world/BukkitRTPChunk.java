@@ -1,6 +1,6 @@
 package io.github.dailystruggle.rtp.bukkitplatform.world;
 
-import io.github.dailystruggle.rtp.anvil.AnvilChunkView;
+import io.github.dailystruggle.anvil.AnvilChunkView;
 import io.github.dailystruggle.rtp.api.safety.CompiledUnsafeSet;
 import io.github.dailystruggle.rtp.api.world.RTPChunk;
 import io.github.dailystruggle.rtp.api.world.RTPWorld;
@@ -217,7 +217,7 @@ public final class BukkitRTPChunk extends RTPChunk<Chunk> {
     }
     Set<String> reconciledUnsafeSet = (RTPRuntime.serverAccessor() != null)
         ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(unsafeBlocks)
-        : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(unsafeBlocks);
+        : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(unsafeBlocks);
     if (anvilView != null) {
       // Prefer the pre-reconciled set we were constructed with; if absent, reconcile
       // per-call to stay in sync with the raw config form (back-compat for ad-hoc
@@ -232,7 +232,7 @@ public final class BukkitRTPChunk extends RTPChunk<Chunk> {
     String materialName = chunk.getBlock(x & 0xF, y, z & 0xF).getType().name();
     return (RTPRuntime.serverAccessor() != null)
         ? !RTPRuntime.serverAccessor().matchesPaletteIdentifier(materialName, reconciledUnsafeSet)
-        : !reconciledUnsafeSet.contains(io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(materialName));
+        : !reconciledUnsafeSet.contains(io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(materialName));
   }
 
   /**

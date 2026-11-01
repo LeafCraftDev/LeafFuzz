@@ -12,8 +12,8 @@ import io.github.dailystruggle.rtp.common.configuration.enums.BlocksKeys;
 import io.github.dailystruggle.rtp.common.configuration.enums.SafetyKeys;
 import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
 import io.github.dailystruggle.rtp.common.world.BiomeOverride;
-import io.github.dailystruggle.rtp.anvil.AnvilColumnProbeAdapter;
-import io.github.dailystruggle.rtp.anvil.AnvilProbeSupport;
+import io.github.dailystruggle.anvil.AnvilColumnProbeAdapter;
+import io.github.dailystruggle.anvil.AnvilProbeSupport;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.resources.Identifier;
@@ -137,14 +137,19 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
     private static final TicketType RTP_TEMP_LOAD_TICKET_TYPE =
             new TicketType(600L, RTP_TEMP_LOAD_TICKET_FLAGS);
 
+    private final java.util.Set<ChunkPos> activeTempLoadTickets = ConcurrentHashMap.newKeySet();
+    private volatile boolean inactive = false;
+
     /**
      * Apply the transient generation load-ticket for {@code cp}. Best-effort:
      * a failure is logged at FINE and reported via the return value so the
      * caller skips the matching removal. Must be invoked on the server tick thread.
      */
     private boolean tryAddTempLoadTicket(ServerLevel level, ChunkPos cp) {
+        if (inactive) return false;
         try {
             level.getChunkSource().addTicketWithRadius(RTP_TEMP_LOAD_TICKET_TYPE, cp, RTP_TICKET_RADIUS);
+            activeTempLoadTickets.add(cp);
             return true;
         } catch (Throwable t) {
             RTP.log(Level.FINE,
@@ -163,6 +168,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
     private void scheduleTempLoadTicketRemoval(ServerLevel level, ChunkPos cp) {
         MinecraftServer server = level.getServer();
         Runnable remove = () -> {
+            activeTempLoadTickets.remove(cp);
             try {
                 level.getChunkSource().removeTicketWithRadius(RTP_TEMP_LOAD_TICKET_TYPE, cp, RTP_TICKET_RADIUS);
             } catch (Throwable t) {
@@ -207,6 +213,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
     }
 
     private CompletableFuture<Long> resolveChunkKey(int cx, int cz, boolean allowLive) {
+        if (inactive) return CompletableFuture.completedFuture(null);
         ServerLevel level = world;
         if (level == null) return CompletableFuture.completedFuture(null);
         MinecraftServer server = level.getServer();
@@ -230,9 +237,10 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                         .probeAndPublish(worldFolder, dim, cx, cz, k, rawUnsafe,
                                 s -> (RTPRuntime.serverAccessor() != null)
                                         ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                                        : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s))
+                                        : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s))
                         .thenCompose(result -> {
-                            io.github.dailystruggle.rtp.anvil.AnvilChunkView view = result.view();
+                            if (inactive) return CompletableFuture.completedFuture(null);
+                            io.github.dailystruggle.anvil.AnvilChunkView view = result.view();
                             if (view != null) {
                                 return CompletableFuture.completedFuture(k);
                             }
@@ -263,6 +271,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
 
     private CompletableFuture<Long> loadLiveChunk(
             ServerLevel level, MinecraftServer server, int cx, int cz, long k) {
+        if (inactive) return CompletableFuture.completedFuture(null);
         // Live-load entry: counted once here (getChunkAtAsync and getOrLoadChunk route through it).
         totalChunkLoads.incrementAndGet();
         final ChunkPos ticketPos = new ChunkPos(cx, cz);
@@ -272,6 +281,12 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         //     generation. Release the ticket once the generation future settles.
         return server.submit(() -> tryAddTempLoadTicket(level, ticketPos))
                 .thenComposeAsync(ticketAdded -> {
+                    if (inactive) {
+                        if (Boolean.TRUE.equals(ticketAdded)) {
+                            scheduleTempLoadTicketRemoval(level, ticketPos);
+                        }
+                        return CompletableFuture.completedFuture((ChunkAccess) null);
+                    }
                     CompletableFuture<ChunkAccess> inner = requestChunkFuture(level, cx, cz);
                     if (inner == null) inner = CompletableFuture.completedFuture((ChunkAccess) null);
                     return inner.whenComplete((ca, ex) -> {
@@ -281,7 +296,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                     });
                 }, RTP_CONTINUATION_EXECUTOR)
                 .thenApply(ca -> {
-                    if (ca == null) return null;
+                    if (ca == null || inactive) return null;
                     expungeClearedChunks();
                     chunkCache.put(k, new KeyedChunkRef(k, ca, clearedChunks));
                     recentlyLoadedChunks.put(k, new V26_1_R1FabricRTPChunk(ca, level, id));
@@ -489,6 +504,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
      */
     @Override
     protected CompletableFuture<Void> setForceLoadedImpl(int cx, int cz, boolean forceLoad) {
+        if (forceLoad && inactive) return CompletableFuture.completedFuture(null);
         ServerLevel level = world;
         if (level == null) return CompletableFuture.completedFuture(null);
         MinecraftServer server = level.getServer();
@@ -502,7 +518,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                             + " (world=" + name + " chunk=(" + cx + "," + cz + "))"));
             return failed;
         }
-        return server.submit(() -> {
+        Runnable action = () -> {
             try {
                 io.github.dailystruggle.rtp.fabric.version.RTPLevelHandle levelHandle =
                         io.github.dailystruggle.rtp.fabric.version.RTPLevelHandle.of(level);
@@ -516,6 +532,13 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                                 + ") failed for " + name + ": "
                                 + t.getClass().getSimpleName() + ": " + t.getMessage());
             }
+        };
+        if (server.isSameThread()) {
+            action.run();
+            return CompletableFuture.completedFuture(null);
+        }
+        return server.submit(() -> {
+            action.run();
             return null;
         });
     }
@@ -550,13 +573,13 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
     public RTPChunk<?> getCachedChunk(long key) {
         RTPChunk<?> live = getLiveCachedChunk(key);
         if (live != null) return live;
-        io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+        io.github.dailystruggle.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
         if (view != null) {
             int cx = (int) (key & 0xffffffffL);
             int cz = (int) (key >> 32);
             java.util.Set<String> reconciled = (RTPRuntime.serverAccessor() != null)
                     ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
-                    : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+                    : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
             return new V26_1_R1FabricRTPChunk(view, cx, cz, id, reconciled);
         }
         return null;
@@ -580,8 +603,9 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
 
     @Override
     public void forgetChunks() {
+        inactive = true;
         // S-002: drain every held keep-ticket before dropping the cache. setForceLoaded(false)
-        // decrements synchronously and hops the native release to the server thread.
+        // decrements synchronously and releases inline when called on the server thread.
         chunkTickets.forEach((k, count) -> {
             int cx = (int) (k & 0xffffffffL);
             int cz = (int) (k >> 32);
@@ -589,6 +613,13 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                 setForceLoaded(cx, cz, false);
             }
         });
+        ServerLevel level = world;
+        if (level != null) {
+            for (ChunkPos cp : activeTempLoadTickets) {
+                scheduleTempLoadTicketRemoval(level, cp);
+            }
+        }
+        activeTempLoadTickets.clear();
         chunkCache.clear();
         recentlyLoadedChunks.clear();
         anvilProbeSupport.clear();
@@ -631,7 +662,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         final int finalMaxY = maxY;
 
         // Coalesced on AnvilIoPool: pending probes for one r.X.Z.mca share one open (S-005).
-        return io.github.dailystruggle.rtp.anvil.AnvilPrefilter.probeColumnAsync(
+        return io.github.dailystruggle.anvil.AnvilPrefilter.probeColumnAsync(
                 worldFolder, dim, cx, cz, finalMinY, finalMaxY).handle((probe, err) -> {
             try {
                 if (err != null) throw err;
@@ -639,7 +670,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                 return ChunkColumnProbe.of(new AnvilColumnProbeAdapter(probe, cx, cz,
                         s -> (RTPRuntime.serverAccessor() != null)
                                 ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                                : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s)));
+                                : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s)));
             } catch (Throwable t) {
                 RTP.log(Level.FINE,
                         "[RTP][v26_1_R1] probeChunkColumn failed for world=" + name
@@ -674,11 +705,11 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         final String dim = dimensionRegionSubpath(worldFolder, level);
         try {
             java.nio.file.Path regionFile =
-                    io.github.dailystruggle.rtp.anvil.AnvilPrefilter
+                    io.github.dailystruggle.anvil.AnvilPrefilter
                             .regionFileFor(worldFolder, dim, rcx << 5, rcz << 5);
             if (regionFile == null) return java.util.Collections.emptyMap();
             // One whole-file read under a pooled-buffer lease.
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.readAllBiomes(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.readAllBiomes(
                     regionFile, rcx, rcz, y, V26_1_R1FabricRTPWorld::canonicaliseBiome);
         } catch (Throwable t) {
             RTP.log(Level.FINE,
@@ -693,7 +724,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
      * {@inheritDoc}
      *
      * <p>Reads only the region header plus each requested chunk's sectors via {@link
-     * io.github.dailystruggle.rtp.anvil.AnvilRegionSampler} (ADR-104 section 4.6). S-005:
+     * io.github.dailystruggle.anvil.AnvilRegionSampler} (ADR-104 section 4.6). S-005:
      * blocking, off-tick only.
      */
     @Override
@@ -704,10 +735,10 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
             java.nio.file.Path regionFile =
-                    io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+                    io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
                             worldFolder, dimensionRegionSubpath(worldFolder, level), rcx << 5, rcz << 5);
             if (regionFile == null) return java.util.Collections.emptyMap();
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
                     regionFile, rcx, rcz, y, localIndices, V26_1_R1FabricRTPWorld::canonicaliseBiome);
         } catch (Throwable t) {
             RTP.log(Level.FINE,
@@ -748,8 +779,8 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         if (level == null || level.getServer() == null) return -1L;
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.lastModifiedMillis(
-                    io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.lastModifiedMillis(
+                    io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
                             worldFolder, dimensionRegionSubpath(worldFolder, level), rcx << 5, rcz << 5));
         } catch (Throwable t) {
             RTP.log(Level.FINE,
@@ -766,8 +797,8 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         if (level == null || level.getServer() == null) return null;
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
-            return io.github.dailystruggle.rtp.anvil.RegionFileResolver.listAnvilRegionCoords(
-                    io.github.dailystruggle.rtp.anvil.RegionFileResolver.regionDirectoryFor(
+            return io.github.dailystruggle.anvil.RegionFileResolver.listAnvilRegionCoords(
+                    io.github.dailystruggle.anvil.RegionFileResolver.regionDirectoryFor(
                             worldFolder, dimensionRegionSubpath(worldFolder, level)));
         } catch (Throwable t) {
             RTP.log(Level.WARNING,
@@ -817,7 +848,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         try {
             String dim = dimensionRegionSubpath(worldFolder, level);
             java.nio.file.Path regionFile =
-                    io.github.dailystruggle.rtp.anvil.AnvilPrefilter
+                    io.github.dailystruggle.anvil.AnvilPrefilter
                             .regionFileFor(worldFolder, dim, cx, cz);
             // Missing region file = no chunk on disk for this 32x32 tile.
             if (regionFile == null || !java.nio.file.Files.exists(regionFile)) {
@@ -828,7 +859,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
             // tile. Built once per region file at first touch, reused until the
             // .mca mtime advances. Avoids reparsing the location table on every
             // sibling-chunk call.
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionOccupancyCache
+            return io.github.dailystruggle.anvil.AnvilRegionOccupancyCache
                     .isOccupied(regionFile, cx, cz);
         } catch (Throwable t) {
             RTP.log(Level.FINE,
@@ -1030,7 +1061,7 @@ public final class V26_1_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
 
     @Override
     public boolean isInactive() {
-        return false;
+        return inactive || world == null || world.getServer() == null;
     }
 
     @Override

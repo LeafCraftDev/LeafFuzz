@@ -1,7 +1,7 @@
 package io.github.dailystruggle.rtp.paper.storage;
 
-import io.github.dailystruggle.rtp.anvil.LcaRegionFileStorage;
-import io.github.dailystruggle.rtp.anvil.Nbt;
+import io.github.dailystruggle.anvil.LcaRegionFileStorage;
+import io.github.dailystruggle.anvil.Nbt;
 import org.bukkit.World;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

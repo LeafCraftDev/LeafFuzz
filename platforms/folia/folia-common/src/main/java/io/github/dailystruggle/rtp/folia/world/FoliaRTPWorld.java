@@ -69,7 +69,7 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
   /**
    * ADR-016 section 11 - per-world cache of Anvil-backed chunk views. Populated by
    * {@link #getChunkAt(int, int)} whenever the shared
-   * {@link io.github.dailystruggle.rtp.anvil.AnvilProbeSupport#probeAndPublish} yields a
+   * {@link io.github.dailystruggle.anvil.AnvilProbeSupport#probeAndPublish} yields a
    * decoded view, and consumed by {@link #getCachedChunk(long)} when no live
    * chunk is cached. The live {@link #chunkCache} takes precedence: once a
    * candidate is promoted to a real load at teleport-commit time, the live
@@ -80,8 +80,8 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
    * persisted region file on {@code ForkJoinPool.commonPool()} without hopping
    * to the Region Thread for every unloaded chunk.</p>
    */
-  private final io.github.dailystruggle.rtp.anvil.AnvilProbeSupport anvilProbeSupport =
-      new io.github.dailystruggle.rtp.anvil.AnvilProbeSupport();
+  private final io.github.dailystruggle.anvil.AnvilProbeSupport anvilProbeSupport =
+      new io.github.dailystruggle.anvil.AnvilProbeSupport();
 
   @RegionThread
   public FoliaRTPWorld(World world) {
@@ -219,11 +219,11 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
           .probeAndPublish(worldFolder, dim, cx, cz, key, rawUnsafe,
               s -> (RTPRuntime.serverAccessor() != null)
                   ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                  : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s))
+                  : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s))
           .thenCompose(result -> {
-            io.github.dailystruggle.rtp.anvil.AnvilChunkView view = result.view();
+            io.github.dailystruggle.anvil.AnvilChunkView view = result.view();
             if (view != null) {
-              if (result.verdict() == io.github.dailystruggle.rtp.anvil.Verdict.REJECT) {
+              if (result.verdict() == io.github.dailystruggle.anvil.Verdict.REJECT) {
                 RTP.log(java.util.logging.Level.FINE,
                     "[RTP] Anvil surface-unsafe (advisory) world=" + name
                         + " chunk=(" + cx + "," + cz + ") — handing view to vert adjustor");
@@ -260,7 +260,7 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
    * {@code BukkitRTPWorld#probeChunkColumn} for the shared contract.
    *
    * <p>S-005 / Folia threading: all file I/O is coalesced per region file onto
-   * {@link io.github.dailystruggle.rtp.anvil.AnvilIoPool}, never a region
+   * {@link io.github.dailystruggle.anvil.AnvilIoPool}, never a region
    * thread. The applicability gate ({@link #shouldPrefilter}) already tolerates
    * the region-thread-restricted {@code world.isChunkLoaded} call by treating
    * a thrown {@code ThreadAccessException} as "continue into the probe", so
@@ -279,16 +279,16 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
     final int finalMaxY = maxY;
     // Coalesced on AnvilIoPool: pending probes for one r.X.Z.mca share one open (S-005: no
     // I/O on the caller; pool threads are daemons with no region-thread affinity).
-    return io.github.dailystruggle.rtp.anvil.AnvilPrefilter.probeColumnAsync(
+    return io.github.dailystruggle.anvil.AnvilPrefilter.probeColumnAsync(
         worldFolder, dim, cx, cz, finalMinY, finalMaxY).handle((probe, err) -> {
       try {
         if (err != null) throw err;
         if (probe == null) return null;
         return io.github.dailystruggle.rtp.api.world.ChunkColumnProbe.of(
-            new io.github.dailystruggle.rtp.anvil.AnvilColumnProbeAdapter(probe, cx, cz,
+            new io.github.dailystruggle.anvil.AnvilColumnProbeAdapter(probe, cx, cz,
                 s -> (RTPRuntime.serverAccessor() != null)
                     ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                    : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s)));
+                    : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s)));
       } catch (Throwable t) {
         PlatformHookBitComponent.recordWorldHookDegraded(
             "FoliaRTPWorld#probeChunkColumn:" + name,
@@ -307,8 +307,8 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
    *
    * <p>Folia mirror of {@code BukkitRTPWorld#readBiomesInRegionFile}: reads
    * {@code r.<rcx>.<rcz>.mca} once under a pooled-buffer lease via {@link
-   * io.github.dailystruggle.rtp.anvil.AnvilRegionSampler#readAllBiomes} on the
-   * {@link io.github.dailystruggle.rtp.anvil.AnvilIoPool} and samples each chunk's
+   * io.github.dailystruggle.anvil.AnvilRegionSampler#readAllBiomes} on the
+   * {@link io.github.dailystruggle.anvil.AnvilIoPool} and samples each chunk's
    * biome at chunk-local {@code (8, y, 8)}.
    * Canonicalises to the same uppercase, {@code minecraft:}-stripped form
    * {@code MemoryShape.addBiomeLocation} stores under, so
@@ -323,10 +323,10 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
     final String dim = dimensionRegionSubpath(world);
     try {
       java.nio.file.Path regionFile =
-          io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+          io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
               worldFolder, dim, rcx << 5, rcz << 5);
       if (regionFile == null) return java.util.Collections.emptyMap();
-      return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.readAllBiomes(
+      return io.github.dailystruggle.anvil.AnvilRegionSampler.readAllBiomes(
           regionFile, rcx, rcz, y, FoliaRTPWorld::canonicaliseBiome);
     } catch (RuntimeException | LinkageError t) {
       PlatformHookBitComponent.recordBiomeColorDegraded(
@@ -344,7 +344,7 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
    * {@inheritDoc}
    *
    * <p>Reads only the region header plus each requested chunk's sectors via {@link
-   * io.github.dailystruggle.rtp.anvil.AnvilRegionSampler} (ADR-104 section 4.6). S-005: blocking,
+   * io.github.dailystruggle.anvil.AnvilRegionSampler} (ADR-104 section 4.6). S-005: blocking,
    * off any region thread.
    */
   @Override
@@ -353,10 +353,10 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
     if (world == null) return java.util.Collections.emptyMap();
     try {
       java.nio.file.Path regionFile =
-          io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+          io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
               world.getWorldFolder().toPath(), dimensionRegionSubpath(world), rcx << 5, rcz << 5);
       if (regionFile == null) return java.util.Collections.emptyMap();
-      return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
+      return io.github.dailystruggle.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
           regionFile, rcx, rcz, y, localIndices, FoliaRTPWorld::canonicaliseBiome);
     } catch (java.io.IOException | RuntimeException | LinkageError t) {
       PlatformHookBitComponent.recordBiomeColorDegraded(
@@ -392,8 +392,8 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
   public long regionFileModifiedMillis(int rcx, int rcz) {
     if (world == null) return -1L;
     try {
-      return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.lastModifiedMillis(
-          io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+      return io.github.dailystruggle.anvil.AnvilRegionSampler.lastModifiedMillis(
+          io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
               world.getWorldFolder().toPath(), dimensionRegionSubpath(world), rcx << 5, rcz << 5));
     } catch (Throwable t) {
       RTP.log(java.util.logging.Level.FINE,
@@ -408,8 +408,8 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
   public java.util.List<int[]> listRegionFiles() {
     if (world == null) return null;
     try {
-      return io.github.dailystruggle.rtp.anvil.RegionFileResolver.listAnvilRegionCoords(
-          io.github.dailystruggle.rtp.anvil.RegionFileResolver.regionDirectoryFor(
+      return io.github.dailystruggle.anvil.RegionFileResolver.listAnvilRegionCoords(
+          io.github.dailystruggle.anvil.RegionFileResolver.regionDirectoryFor(
               world.getWorldFolder().toPath(), dimensionRegionSubpath(world)));
     } catch (Throwable t) {
       RTP.log(java.util.logging.Level.WARNING,
@@ -828,13 +828,13 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
 
     // ADR-016 section 11 fallback: no live chunk cached, but the pre-filter may have
     // produced an Anvil-backed view earlier in this candidate's evaluation.
-    io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+    io.github.dailystruggle.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
     if (view != null) {
       int cx = (int) (key & 0xffffffffL);
       int cz = (int) (key >> 32);
       java.util.Set<String> reconciled = (RTPRuntime.serverAccessor() != null)
           ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
-          : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+          : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
       return new FoliaRTPChunk(view, cx, cz, id, reconciled);
     }
     return null;
@@ -842,12 +842,12 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
 
   @Override
   public RTPChunk<?> createChunk(Object preformedData, int cx, int cz, Set<String> reconciledUnsafe) {
-    if (preformedData instanceof io.github.dailystruggle.rtp.anvil.AnvilChunkView view) {
+    if (preformedData instanceof io.github.dailystruggle.anvil.AnvilChunkView view) {
       java.util.Set<String> reconciled = reconciledUnsafe;
       if (reconciled == null) {
         reconciled = RTPRuntime.serverAccessor() != null
             ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
-            : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+            : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
       }
       return new FoliaRTPChunk(view, cx, cz, id, reconciled);
     }
@@ -931,23 +931,23 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
     int cz = z >> 4;
     try {
       long key = ((long) cx & 0xffffffffL) | ((long) cz << 32);
-      io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+      io.github.dailystruggle.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
       if (view != null) {
         String fromAnvil = view.getBiomeAt(x & 0xF, y, z & 0xF);
         if (fromAnvil != null) {
-          io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.record(
-              io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.ANVIL_HIT);
+          io.github.dailystruggle.anvil.BiomeSourceMetrics.record(
+              io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.ANVIL_HIT);
           return fromAnvil;
         }
-        reason = io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.VIEW_MISSING_BIOME;
+        reason = io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.VIEW_MISSING_BIOME;
       } else {
-        reason = io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.NO_VIEW_CACHED;
+        reason = io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.NO_VIEW_CACHED;
       }
     } catch (Throwable t) {
-      reason = io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.ANVIL_THROW;
+      reason = io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.ANVIL_THROW;
       thrown = t;
     }
-    io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.record(reason);
+    io.github.dailystruggle.anvil.BiomeSourceMetrics.record(reason);
     logBiomeFallthrough(reason, cx, cz, thrown);
     return getBiome.apply(new Location(world, x, y, z));
   }
@@ -973,7 +973,7 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
     // safety. Keep it at FINE so it cannot be mistaken for an error; other
     // reasons stay at INFO until the per-reason budget is exhausted.
     boolean benign =
-        io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.NO_VIEW_CACHED.equals(reason);
+        io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.NO_VIEW_CACHED.equals(reason);
     java.util.logging.Level level = (!benign && n <= BIOME_LOG_BUDGET_PER_REASON)
         ? java.util.logging.Level.INFO
         : java.util.logging.Level.FINE;
@@ -1020,9 +1020,9 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
    *   <li>{@link World#isChunkLoaded(int, int)} - a loaded chunk is by
    *       definition generated; cheapest answer, safe to call off-region on
    *       Folia (concurrent map lookup, no region affinity required).</li>
-   *   <li>{@link io.github.dailystruggle.rtp.anvil.AnvilRegionOccupancyCache#isOccupied}
+   *   <li>{@link io.github.dailystruggle.anvil.AnvilRegionOccupancyCache#isOccupied}
    *       against the {@code r.X.Z.mca} file resolved via
-   *       {@link io.github.dailystruggle.rtp.anvil.AnvilPrefilter#regionFileFor}.
+   *       {@link io.github.dailystruggle.anvil.AnvilPrefilter#regionFileFor}.
    *       The cache amortises the 32x32 region-tile occupancy bitmap across
    *       all ~1024 sibling-chunk queries - crucial for {@code ScanTask}
    *       PRESCAN which sweeps adjacent chunks in spiral order.</li>
@@ -1049,11 +1049,11 @@ public final class FoliaRTPWorld extends RTPWorld<World> {
       java.nio.file.Path worldFolder = world.getWorldFolder().toPath();
       String dim = dimensionRegionSubpath(world);
       java.nio.file.Path regionFile =
-          io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(worldFolder, dim, cx, cz);
+          io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(worldFolder, dim, cx, cz);
       if (regionFile == null || !java.nio.file.Files.exists(regionFile)) {
         return false;
       }
-      return io.github.dailystruggle.rtp.anvil.AnvilRegionOccupancyCache
+      return io.github.dailystruggle.anvil.AnvilRegionOccupancyCache
           .isOccupied(regionFile, cx, cz);
     } catch (Throwable ignored) {
       return true;

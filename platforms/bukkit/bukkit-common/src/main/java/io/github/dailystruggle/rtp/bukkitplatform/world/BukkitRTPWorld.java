@@ -92,14 +92,14 @@ public class BukkitRTPWorld extends RTPWorld<World> {
   /**
    * ADR-016 - per-world cache of Anvil-backed chunk views keyed by the same
    * {@code (cx, cz) -> long} packing used by {@link #chunkCache}. The cache +
-   * FIFO-eviction lifecycle is owned by {@link io.github.dailystruggle.rtp.anvil.AnvilProbeSupport},
+   * FIFO-eviction lifecycle is owned by {@link io.github.dailystruggle.anvil.AnvilProbeSupport},
    * which is shared by every adapter that wires the ADR-016 pipeline (currently
    * Bukkit/Spigot and Folia). The live {@link #chunkCache} takes precedence:
    * once a candidate is promoted to a real load (e.g. at teleport-commit time),
    * the live entry is the source of truth and the Anvil entry is evicted.
    */
-  private final io.github.dailystruggle.rtp.anvil.AnvilProbeSupport anvilProbeSupport =
-      new io.github.dailystruggle.rtp.anvil.AnvilProbeSupport();
+  private final io.github.dailystruggle.anvil.AnvilProbeSupport anvilProbeSupport =
+      new io.github.dailystruggle.anvil.AnvilProbeSupport();
 
   /**
    * Reflective handle to {@code World#getChunkAtAsync(int, int)} - an overload that returns
@@ -276,14 +276,14 @@ public class BukkitRTPWorld extends RTPWorld<World> {
           .probeAndPublish(worldFolder, dim, cx, cz, key, rawUnsafe,
               s -> (RTPRuntime.serverAccessor() != null)
                   ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                  : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s))
+                  : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s))
           .thenCompose(result -> {
-            io.github.dailystruggle.rtp.anvil.AnvilChunkView view = result.view();
+            io.github.dailystruggle.anvil.AnvilChunkView view = result.view();
             if (view != null) {
               // FINE breadcrumb so operators can still see how often the surface
               // heightmap would have been rejected under the old gate semantics;
               // the verdict remains meaningful as telemetry.
-              if (result.verdict() == io.github.dailystruggle.rtp.anvil.Verdict.REJECT) {
+              if (result.verdict() == io.github.dailystruggle.anvil.Verdict.REJECT) {
                 RTP.log(java.util.logging.Level.FINE,
                     "[RTP] Anvil surface-unsafe (advisory) world=" + name
                         + " chunk=(" + cx + "," + cz + ") — handing view to vert adjustor");
@@ -337,7 +337,7 @@ public class BukkitRTPWorld extends RTPWorld<World> {
    * A null/empty return signals UNKNOWN - the caller falls back to the full
    * {@link #getChunkAt} pipeline, which remains the authoritative path.</p>
    *
-   * <p>S-005: file I/O is dispatched to {@link io.github.dailystruggle.rtp.anvil.AnvilIoPool}
+   * <p>S-005: file I/O is dispatched to {@link io.github.dailystruggle.anvil.AnvilIoPool}
    * (dedicated blocking-I/O executor, sized for disk parallelism) to stay off the tick
    * thread and avoid starving {@code ForkJoinPool.commonPool} with blocking reads. The
    * future never resolves on a live-region thread.</p>
@@ -354,16 +354,16 @@ public class BukkitRTPWorld extends RTPWorld<World> {
     final int finalMaxY = maxY;
     // Coalesced on AnvilIoPool: pending probes for one r.X.Z.mca share one open (S-005: no
     // I/O on the caller; pool threads are daemons with no region-thread affinity).
-    return io.github.dailystruggle.rtp.anvil.AnvilPrefilter.probeColumnAsync(
+    return io.github.dailystruggle.anvil.AnvilPrefilter.probeColumnAsync(
         worldFolder, dim, cx, cz, finalMinY, finalMaxY).handle((probe, err) -> {
       try {
         if (err != null) throw err;
         if (probe == null) return null;
         return io.github.dailystruggle.rtp.api.world.ChunkColumnProbe.of(
-            new io.github.dailystruggle.rtp.anvil.AnvilColumnProbeAdapter(probe, cx, cz,
+            new io.github.dailystruggle.anvil.AnvilColumnProbeAdapter(probe, cx, cz,
                 s -> (RTPRuntime.serverAccessor() != null)
                     ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                    : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s)));
+                    : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s)));
       } catch (Throwable t) {
         PlatformHookBitComponent.recordWorldHookDegraded(
             "BukkitRTPWorld#probeChunkColumn:" + name,
@@ -381,7 +381,7 @@ public class BukkitRTPWorld extends RTPWorld<World> {
    * {@inheritDoc}
    *
    * <p>Reads {@code r.<rcx>.<rcz>.mca} once under a pooled-buffer lease via {@link
-   * io.github.dailystruggle.rtp.anvil.AnvilRegionSampler#readAllBiomes} and samples each
+   * io.github.dailystruggle.anvil.AnvilRegionSampler#readAllBiomes} and samples each
    * chunk's biome at chunk-local {@code (8, y, 8)}.
    *
    * <p>Biome names are canonicalised to the same uppercase, {@code minecraft:}
@@ -389,7 +389,7 @@ public class BukkitRTPWorld extends RTPWorld<World> {
    * {@link io.github.dailystruggle.mapsapi.BiomeColorSource}'s dimension overrides
    * (keyed e.g. {@code "NETHER_WASTES"}) match.
    *
-   * <p>S-005: dispatched onto {@link io.github.dailystruggle.rtp.anvil.AnvilIoPool};
+   * <p>S-005: dispatched onto {@link io.github.dailystruggle.anvil.AnvilIoPool};
    * no tick-thread chunk I/O.
    */
   @Override
@@ -401,10 +401,10 @@ public class BukkitRTPWorld extends RTPWorld<World> {
     try {
       // regionFileFor takes a chunk coord; rcx<<5, rcz<<5 is the NW corner.
       java.nio.file.Path regionFile =
-          io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+          io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
               worldFolder, dim, rcx << 5, rcz << 5);
       if (regionFile == null) return java.util.Collections.emptyMap();
-      return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.readAllBiomes(
+      return io.github.dailystruggle.anvil.AnvilRegionSampler.readAllBiomes(
           regionFile, rcx, rcz, y, BukkitRTPWorld::canonicaliseBiome);
     } catch (RuntimeException | LinkageError t) {
       PlatformHookBitComponent.recordBiomeColorDegraded(
@@ -422,7 +422,7 @@ public class BukkitRTPWorld extends RTPWorld<World> {
    * {@inheritDoc}
    *
    * <p>Reads only the region header plus each requested chunk's sectors via {@link
-   * io.github.dailystruggle.rtp.anvil.AnvilRegionSampler} (ADR-104 section 4.6). S-005: blocking,
+   * io.github.dailystruggle.anvil.AnvilRegionSampler} (ADR-104 section 4.6). S-005: blocking,
    * off-tick only.
    */
   @Override
@@ -431,10 +431,10 @@ public class BukkitRTPWorld extends RTPWorld<World> {
     if (world == null) return java.util.Collections.emptyMap();
     try {
       java.nio.file.Path regionFile =
-          io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+          io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
               world.getWorldFolder().toPath(), dimensionRegionSubpath(world), rcx << 5, rcz << 5);
       if (regionFile == null) return java.util.Collections.emptyMap();
-      return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
+      return io.github.dailystruggle.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
           regionFile, rcx, rcz, y, localIndices, BukkitRTPWorld::canonicaliseBiome);
     } catch (java.io.IOException | RuntimeException | LinkageError t) {
       PlatformHookBitComponent.recordBiomeColorDegraded(
@@ -453,8 +453,8 @@ public class BukkitRTPWorld extends RTPWorld<World> {
   public long regionFileModifiedMillis(int rcx, int rcz) {
     if (world == null) return -1L;
     try {
-      return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.lastModifiedMillis(
-          io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+      return io.github.dailystruggle.anvil.AnvilRegionSampler.lastModifiedMillis(
+          io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
               world.getWorldFolder().toPath(), dimensionRegionSubpath(world), rcx << 5, rcz << 5));
     } catch (Throwable t) {
       RTP.log(java.util.logging.Level.FINE,
@@ -469,8 +469,8 @@ public class BukkitRTPWorld extends RTPWorld<World> {
   public java.util.List<int[]> listRegionFiles() {
     if (world == null) return null;
     try {
-      return io.github.dailystruggle.rtp.anvil.RegionFileResolver.listRegionCoords(
-          io.github.dailystruggle.rtp.anvil.RegionFileResolver.regionDirectoryFor(
+      return io.github.dailystruggle.anvil.RegionFileResolver.listRegionCoords(
+          io.github.dailystruggle.anvil.RegionFileResolver.regionDirectoryFor(
               world.getWorldFolder().toPath(), dimensionRegionSubpath(world)));
     } catch (Throwable t) {
       RTP.log(java.util.logging.Level.WARNING,
@@ -945,13 +945,13 @@ public class BukkitRTPWorld extends RTPWorld<World> {
 
     // ADR-016 fallback: no live chunk cached, but the anvil prefilter probe may
     // have produced an Anvil-backed view earlier in this candidate's evaluation.
-    io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+    io.github.dailystruggle.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
     if (view != null) {
       int cx = (int) (key & 0xffffffffL);
       int cz = (int) (key >> 32);
       java.util.Set<String> reconciled = (RTPRuntime.serverAccessor() != null)
           ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
-          : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+          : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
       return new BukkitRTPChunk(view, cx, cz, id, reconciled);
     }
     return null;
@@ -959,12 +959,12 @@ public class BukkitRTPWorld extends RTPWorld<World> {
 
   @Override
   public RTPChunk<?> createChunk(Object preformedData, int cx, int cz, Set<String> reconciledUnsafe) {
-    if (preformedData instanceof io.github.dailystruggle.rtp.anvil.AnvilChunkView view) {
+    if (preformedData instanceof io.github.dailystruggle.anvil.AnvilChunkView view) {
       java.util.Set<String> reconciled = reconciledUnsafe;
       if (reconciled == null) {
         reconciled = RTPRuntime.serverAccessor() != null
             ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
-            : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+            : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
       }
       return new BukkitRTPChunk(view, cx, cz, id, reconciled);
     }
@@ -1045,23 +1045,23 @@ public class BukkitRTPWorld extends RTPWorld<World> {
     int cz = z >> 4;
     try {
       long key = ((long) cx & 0xffffffffL) | ((long) cz << 32);
-      io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+      io.github.dailystruggle.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
       if (view != null) {
         String fromAnvil = view.getBiomeAt(x & 0xF, y, z & 0xF);
         if (fromAnvil != null) {
-          io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.record(
-              io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.ANVIL_HIT);
+          io.github.dailystruggle.anvil.BiomeSourceMetrics.record(
+              io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.ANVIL_HIT);
           return fromAnvil;
         }
-        reason = io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.VIEW_MISSING_BIOME;
+        reason = io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.VIEW_MISSING_BIOME;
       } else {
-        reason = io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.NO_VIEW_CACHED;
+        reason = io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.NO_VIEW_CACHED;
       }
     } catch (Throwable t) {
-      reason = io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.ANVIL_THROW;
+      reason = io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.ANVIL_THROW;
       thrown = t;
     }
-    io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.record(reason);
+    io.github.dailystruggle.anvil.BiomeSourceMetrics.record(reason);
     logBiomeFallthrough(reason, cx, cz, thrown);
     return getBiome.apply(new Location(world, x, y, z));
   }
@@ -1088,7 +1088,7 @@ public class BukkitRTPWorld extends RTPWorld<World> {
     // safety. Keep it at FINE so it cannot be mistaken for an error; other
     // reasons stay at INFO until the per-reason budget is exhausted.
     boolean benign =
-        io.github.dailystruggle.rtp.anvil.BiomeSourceMetrics.Reasons.NO_VIEW_CACHED.equals(reason);
+        io.github.dailystruggle.anvil.BiomeSourceMetrics.Reasons.NO_VIEW_CACHED.equals(reason);
     java.util.logging.Level level = (!benign && n <= BIOME_LOG_BUDGET_PER_REASON)
         ? java.util.logging.Level.INFO
         : java.util.logging.Level.FINE;
@@ -1137,9 +1137,9 @@ public class BukkitRTPWorld extends RTPWorld<World> {
    *   <li>{@link World#isChunkLoaded(int, int)} - a loaded chunk is by
    *       definition generated; cheapest answer, safe to call off-tick
    *       (concurrent map lookup).</li>
-   *   <li>{@link io.github.dailystruggle.rtp.anvil.AnvilRegionOccupancyCache#isOccupied}
+   *   <li>{@link io.github.dailystruggle.anvil.AnvilRegionOccupancyCache#isOccupied}
    *       against the {@code r.X.Z.mca} file resolved via
-   *       {@link io.github.dailystruggle.rtp.anvil.AnvilPrefilter#regionFileFor}.
+   *       {@link io.github.dailystruggle.anvil.AnvilPrefilter#regionFileFor}.
    *       The cache amortises the 32x32 region-tile occupancy bitmap across
    *       all ~1024 sibling-chunk queries - crucial for {@code ScanTask}
    *       PRESCAN which sweeps adjacent chunks in spiral order.</li>
@@ -1169,12 +1169,12 @@ public class BukkitRTPWorld extends RTPWorld<World> {
     try {
       java.nio.file.Path worldFolder = world.getWorldFolder().toPath();
       String dim = dimensionRegionSubpath(world);
-      io.github.dailystruggle.rtp.anvil.RegionFileResolver.ResolvedRegion resolved =
-          io.github.dailystruggle.rtp.anvil.RegionFileResolver.resolveExisting(worldFolder, dim, cx, cz);
+      io.github.dailystruggle.anvil.RegionFileResolver.ResolvedRegion resolved =
+          io.github.dailystruggle.anvil.RegionFileResolver.resolveExisting(worldFolder, dim, cx, cz);
       if (resolved == null) {
         return false;
       }
-      return io.github.dailystruggle.rtp.anvil.AnvilRegionOccupancyCache
+      return io.github.dailystruggle.anvil.AnvilRegionOccupancyCache
           .isOccupied(resolved.path(), cx, cz);
     } catch (RuntimeException | LinkageError e) {
       PlatformHookBitComponent.recordWorldHookDegraded(

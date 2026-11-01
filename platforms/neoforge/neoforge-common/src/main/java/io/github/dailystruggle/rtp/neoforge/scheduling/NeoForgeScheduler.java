@@ -138,6 +138,8 @@ public class NeoForgeScheduler implements RTPScheduler {
     this.scheduled.clear();
     this.pendingDue.clear();
     this.preStartQueue.clear();
+    ASYNC_EXECUTOR.getQueue().clear();
+    ASYNC_EXECUTOR.purge();
   }
 
   /**

@@ -1529,7 +1529,7 @@ public abstract class AbstractServerAccessor extends BukkitPluginServerAccessor
     } catch (Exception ignored) {
       // Material lookup threw; fall back to normalizer
     }
-    return io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(raw);
+    return io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(raw);
   }
 
   // ---------------------------------------------------------------------------

@@ -56,7 +56,7 @@ All 14 modules uphold four shared architectural guarantees:
 | `metrics-api` | `:metrics-api` | `metrics-api` | `io.github.dailystruggle.metrics.api` | Zero (JDK 17 only) | [`metrics-api/README.md`](metrics-api/README.md) |
 | `bstats-api` | `:bstats-api` | `bstats-api` | `io.github.dailystruggle.bstats.api` | Zero (JDK 17 only) | [`bstats-api/README.md`](bstats-api/README.md) |
 | `database-api` | `:database-api` | `database-api` | `io.github.dailystruggle.database.api` | Zero (JDK 17 only) | [`database-api/README.md`](database-api/README.md) |
-| `anvil-api` | `:anvil-api` | `anvil-api` | `io.github.dailystruggle.rtp.anvil` | `:bit-api` (JDK 17 only) | [`anvil-api/README.md`](anvil-api/README.md) |
+| `anvil-api` | `:anvil-api` | `anvil-api` | `io.github.dailystruggle.anvil` | `:bit-api` (JDK 17 only) | [`anvil-api/README.md`](anvil-api/README.md) |
 | `tags-api` | `:tags-api` | `tags-api` | `io.github.dailystruggle.rtp.tags`, `io.github.dailystruggle.rtp.api.{block,safety}` | Zero (JDK 17 only) | [`tags-api/README.md`](tags-api/README.md) |
 | `schematics-api` | `:schematics-api` | `schematics-api` | `io.github.dailystruggle.rtp.api.schematic`, `io.github.dailystruggle.rtp.api.platform` | `:tags-api`, `:server-api` (JDK 17 only) | [`schematics-api/README.md`](schematics-api/README.md) |
 | `maps-api` | `:maps-api` | `maps-api` | `io.github.dailystruggle.mapsapi` | Zero on core/image (`spigot-api` compileOnly for `.bukkit`) | [`maps-api/README.md`](maps-api/README.md) |

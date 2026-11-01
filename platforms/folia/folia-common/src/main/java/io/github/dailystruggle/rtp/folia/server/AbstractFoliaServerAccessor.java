@@ -863,7 +863,7 @@ public abstract class AbstractFoliaServerAccessor implements RTPServerAccessor {
       PlatformHookBitComponent.recordPaletteReconcilerDegraded(
           raw, e.getClass().getSimpleName() + ": " + e.getMessage());
     }
-    return io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(raw);
+    return io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(raw);
   }
 
   // ---------------------------------------------------------------------------

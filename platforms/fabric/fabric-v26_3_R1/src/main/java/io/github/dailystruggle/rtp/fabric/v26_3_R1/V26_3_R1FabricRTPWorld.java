@@ -12,8 +12,8 @@ import io.github.dailystruggle.rtp.common.configuration.enums.BlocksKeys;
 import io.github.dailystruggle.rtp.common.configuration.enums.SafetyKeys;
 import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
 import io.github.dailystruggle.rtp.common.world.BiomeOverride;
-import io.github.dailystruggle.rtp.anvil.AnvilColumnProbeAdapter;
-import io.github.dailystruggle.rtp.anvil.AnvilProbeSupport;
+import io.github.dailystruggle.anvil.AnvilColumnProbeAdapter;
+import io.github.dailystruggle.anvil.AnvilProbeSupport;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.resources.Identifier;
@@ -180,9 +180,9 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                         .probeAndPublish(worldFolder, dim, cx, cz, k, rawUnsafe,
                                 s -> (RTPRuntime.serverAccessor() != null)
                                         ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                                        : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s))
+                                        : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s))
                         .thenCompose(result -> {
-                            io.github.dailystruggle.rtp.anvil.AnvilChunkView view = result.view();
+                            io.github.dailystruggle.anvil.AnvilChunkView view = result.view();
                             if (view != null) {
                                 return CompletableFuture.completedFuture(k);
                             }
@@ -423,13 +423,13 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
     public RTPChunk<?> getCachedChunk(long key) {
         RTPChunk<?> live = getLiveCachedChunk(key);
         if (live != null) return live;
-        io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+        io.github.dailystruggle.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
         if (view != null) {
             int cx = (int) (key & 0xffffffffL);
             int cz = (int) (key >> 32);
             java.util.Set<String> reconciled = (RTPRuntime.serverAccessor() != null)
                     ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
-                    : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+                    : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
             return new V26_3_R1FabricRTPChunk(view, cx, cz, id, reconciled);
         }
         return null;
@@ -489,7 +489,7 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         final int finalMaxY = maxY;
 
         // Coalesced on AnvilIoPool: pending probes for one r.X.Z.mca share one open (S-005).
-        return io.github.dailystruggle.rtp.anvil.AnvilPrefilter.probeColumnAsync(
+        return io.github.dailystruggle.anvil.AnvilPrefilter.probeColumnAsync(
                 worldFolder, dim, cx, cz, finalMinY, finalMaxY).handle((probe, err) -> {
             try {
                 if (err != null) throw err;
@@ -497,7 +497,7 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
                 return ChunkColumnProbe.of(new AnvilColumnProbeAdapter(probe, cx, cz,
                         s -> (RTPRuntime.serverAccessor() != null)
                                 ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                                : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s)));
+                                : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s)));
             } catch (Throwable t) {
                 RTP.log(Level.FINE,
                         "[RTP][V26_3_R1] probeChunkColumn failed for world=" + name
@@ -524,11 +524,11 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         final String dim = dimensionRegionSubpath(worldFolder, level);
         try {
             java.nio.file.Path regionFile =
-                    io.github.dailystruggle.rtp.anvil.AnvilPrefilter
+                    io.github.dailystruggle.anvil.AnvilPrefilter
                             .regionFileFor(worldFolder, dim, rcx << 5, rcz << 5);
             if (regionFile == null) return java.util.Collections.emptyMap();
             // One whole-file read under a pooled-buffer lease.
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.readAllBiomes(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.readAllBiomes(
                     regionFile, rcx, rcz, y, V26_3_R1FabricRTPWorld::canonicaliseBiome);
         } catch (Throwable t) {
             RTP.log(Level.FINE,
@@ -548,10 +548,10 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
             java.nio.file.Path regionFile =
-                    io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+                    io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
                             worldFolder, dimensionRegionSubpath(worldFolder, level), rcx << 5, rcz << 5);
             if (regionFile == null) return java.util.Collections.emptyMap();
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
                     regionFile, rcx, rcz, y, localIndices, V26_3_R1FabricRTPWorld::canonicaliseBiome);
         } catch (Throwable t) {
             RTP.log(Level.FINE,
@@ -592,8 +592,8 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         if (level == null || level.getServer() == null) return -1L;
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.lastModifiedMillis(
-                    io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.lastModifiedMillis(
+                    io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
                             worldFolder, dimensionRegionSubpath(worldFolder, level), rcx << 5, rcz << 5));
         } catch (Throwable t) {
             RTP.log(Level.FINE,
@@ -610,8 +610,8 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         if (level == null || level.getServer() == null) return null;
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
-            return io.github.dailystruggle.rtp.anvil.RegionFileResolver.listAnvilRegionCoords(
-                    io.github.dailystruggle.rtp.anvil.RegionFileResolver.regionDirectoryFor(
+            return io.github.dailystruggle.anvil.RegionFileResolver.listAnvilRegionCoords(
+                    io.github.dailystruggle.anvil.RegionFileResolver.regionDirectoryFor(
                             worldFolder, dimensionRegionSubpath(worldFolder, level)));
         } catch (Throwable t) {
             RTP.log(Level.WARNING,
@@ -643,12 +643,12 @@ public final class V26_3_R1FabricRTPWorld extends RTPWorld<ServerLevel> {
         try {
             String dim = dimensionRegionSubpath(worldFolder, level);
             java.nio.file.Path regionFile =
-                    io.github.dailystruggle.rtp.anvil.AnvilPrefilter
+                    io.github.dailystruggle.anvil.AnvilPrefilter
                             .regionFileFor(worldFolder, dim, cx, cz);
             if (regionFile == null || !java.nio.file.Files.exists(regionFile)) {
                 return false;
             }
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionOccupancyCache
+            return io.github.dailystruggle.anvil.AnvilRegionOccupancyCache
                     .isOccupied(regionFile, cx, cz);
         } catch (Throwable t) {
             RTP.log(Level.FINE,

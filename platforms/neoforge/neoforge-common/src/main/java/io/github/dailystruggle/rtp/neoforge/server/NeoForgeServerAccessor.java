@@ -95,6 +95,12 @@ public final class NeoForgeServerAccessor
     }
 
     public void unbindServer() {
+        for (RTPWorld<?> w : worldsByName.values()) {
+            try {
+                w.forgetChunks();
+            } catch (Throwable ignored) {
+            }
+        }
         this.scheduler.clearServer();
         this.server = null;
         this.playersById.clear();
@@ -121,7 +127,13 @@ public final class NeoForgeServerAccessor
         // identifier accessor returns null).
         String name = NeoForgeRTPWorld.resolveDimensionName(level, false);
         RTPWorld<?> removed = worldsByName.remove(name);
-        if (removed != null) worldsById.remove(removed.id());
+        if (removed != null) {
+            worldsById.remove(removed.id());
+            try {
+                removed.forgetChunks();
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     public RTPPlayer registerPlayer(ServerPlayer player) {

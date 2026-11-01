@@ -1,6 +1,6 @@
 package io.github.dailystruggle.rtp.fabric.world;
 
-import io.github.dailystruggle.rtp.anvil.AnvilChunkView;
+import io.github.dailystruggle.anvil.AnvilChunkView;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

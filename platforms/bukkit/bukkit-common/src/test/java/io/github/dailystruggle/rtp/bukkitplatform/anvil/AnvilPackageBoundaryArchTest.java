@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 /**
  * Bytecode-level boundary rules for Anvil usage in Bukkit platform adapter.
  *
- * <p>Per ADR-016 and ADR-077, Anvil prefiltering is unified under {@code io.github.dailystruggle.rtp.anvil}.
+ * <p>Per ADR-016 and ADR-077, Anvil prefiltering is unified under {@code io.github.dailystruggle.anvil}.
  * All Bukkit platform classes must interact with Anvil through {@code anvil-api} and {@code RTPServerAccessor}.</p>
  */
 @DisplayName("ADR-016 - Anvil package boundary")

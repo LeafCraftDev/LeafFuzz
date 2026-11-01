@@ -120,6 +120,14 @@ public interface NeoForgeVersionAdapter {
     }
 
     /**
+     * Releases all active persistent and temporary RTP tickets held on {@code level}
+     * during world unload or server shutdown.
+     */
+    default void releaseAllTickets(ServerLevel level) {
+        // no-op by default
+    }
+
+    /**
      * Periodic refresh hook, called by {@code RTPNeoForgeMod} on a fixed-rate
      * scheduler. Default is a no-op - only carriers that use auto-expiring
      * tickets need to override and re-issue tickets for chunks still held.

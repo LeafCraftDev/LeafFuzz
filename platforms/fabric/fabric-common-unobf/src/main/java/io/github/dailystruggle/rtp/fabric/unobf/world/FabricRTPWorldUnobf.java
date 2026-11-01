@@ -12,7 +12,7 @@ import io.github.dailystruggle.rtp.common.configuration.enums.BlocksKeys;
 import io.github.dailystruggle.rtp.common.configuration.enums.SafetyKeys;
 import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;
 import io.github.dailystruggle.rtp.common.world.BiomeOverride;
-import io.github.dailystruggle.rtp.anvil.AnvilColumnProbeAdapter;
+import io.github.dailystruggle.anvil.AnvilColumnProbeAdapter;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.core.BlockPos;
@@ -112,11 +112,11 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
      * {@link #getChunkAt(int, int)} when the persisted {@code .mca} probe
      * succeeds and consulted by {@link #getCachedChunk(long)} as a fall-through
      * after the live caches miss. FIFO-eviction lifecycle is owned by
-     * {@link io.github.dailystruggle.rtp.anvil.AnvilProbeSupport}, mirroring
+     * {@link io.github.dailystruggle.anvil.AnvilProbeSupport}, mirroring
      * the Spigot-side wiring in {@code BukkitRTPWorld}.
      */
-    private final io.github.dailystruggle.rtp.anvil.AnvilProbeSupport anvilProbeSupport =
-            new io.github.dailystruggle.rtp.anvil.AnvilProbeSupport();
+    private final io.github.dailystruggle.anvil.AnvilProbeSupport anvilProbeSupport =
+            new io.github.dailystruggle.anvil.AnvilProbeSupport();
 
     public FabricRTPWorldUnobf(@NotNull ServerLevel level) {
         super(level);
@@ -244,11 +244,11 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
                             .probeAndPublish(worldFolder, dim, chunkX, chunkZ, key, rawUnsafe,
                                     s -> (RTPRuntime.serverAccessor() != null)
                                             ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                                            : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s))
+                                            : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s))
                             .thenCompose(result -> {
-                                io.github.dailystruggle.rtp.anvil.AnvilChunkView view = result.view();
+                                io.github.dailystruggle.anvil.AnvilChunkView view = result.view();
                                 if (view != null) {
-                                    if (result.verdict() == io.github.dailystruggle.rtp.anvil.Verdict.REJECT) {
+                                    if (result.verdict() == io.github.dailystruggle.anvil.Verdict.REJECT) {
                                         RTP.log(java.util.logging.Level.FINE,
                                                 "[RTP] Anvil surface-unsafe (advisory) world=" + name
                                                         + " chunk=(" + chunkX + "," + chunkZ
@@ -939,7 +939,7 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
      * {@code .mca}-as-advisory invariant of ADR-016.
      *
      * <p>S-005: file I/O is dispatched onto
-     * {@link io.github.dailystruggle.rtp.anvil.AnvilIoPool} (the same dedicated
+     * {@link io.github.dailystruggle.anvil.AnvilIoPool} (the same dedicated
      * blocking-I/O executor Spigot/Folia use), never on the server tick thread.</p>
      */
     @Override
@@ -972,7 +972,7 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
         // coalesced onto AnvilIoPool and share one open (S-005: no I/O on the caller).
         // Probe-cache hit / miss metrics are owned by ScanTask's probeOutcome* counters
         // and the anvil module's own diagLog channel - no per-call counter is owned here.
-        return io.github.dailystruggle.rtp.anvil.AnvilPrefilter.probeColumnAsync(
+        return io.github.dailystruggle.anvil.AnvilPrefilter.probeColumnAsync(
                 worldFolder, dim, cx, cz, finalMinY, finalMaxY).handle((probe, err) -> {
             try {
                 if (err != null) throw err;
@@ -980,7 +980,7 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
                 return ChunkColumnProbe.of(new AnvilColumnProbeAdapter(probe, cx, cz,
                     s -> (RTPRuntime.serverAccessor() != null)
                         ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                        : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s)));
+                        : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s)));
             } catch (Throwable t) {
                 RTP.log(java.util.logging.Level.FINE,
                     "[RTP] FabricRTPWorldUnobf.probeChunkColumn failed for world=" + name
@@ -1014,10 +1014,10 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
         final String dim = dimensionRegionSubpath(level);
         try {
             java.nio.file.Path regionFile =
-                io.github.dailystruggle.rtp.anvil.AnvilPrefilter
+                io.github.dailystruggle.anvil.AnvilPrefilter
                     .regionFileFor(worldFolder, dim, rcx << 5, rcz << 5);
             if (regionFile == null) return java.util.Collections.emptyMap();
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.readAllBiomes(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.readAllBiomes(
                 regionFile, rcx, rcz, y, FabricRTPWorldUnobf::canonicaliseBiome);
         } catch (Throwable t) {
             RTP.log(java.util.logging.Level.FINE,
@@ -1032,7 +1032,7 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
      * {@inheritDoc}
      *
      * <p>Reads only the region header plus each requested chunk's sectors via {@link
-     * io.github.dailystruggle.rtp.anvil.AnvilRegionSampler} (ADR-104 section 4.6). S-005:
+     * io.github.dailystruggle.anvil.AnvilRegionSampler} (ADR-104 section 4.6). S-005:
      * blocking, off-tick only.
      */
     @Override
@@ -1042,11 +1042,11 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
         if (level == null || level.getServer() == null) return java.util.Collections.emptyMap();
         try {
             java.nio.file.Path regionFile =
-                io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+                io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
                     level.getServer().getWorldPath(LevelResource.ROOT),
                     dimensionRegionSubpath(level), rcx << 5, rcz << 5);
             if (regionFile == null) return java.util.Collections.emptyMap();
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
                 regionFile, rcx, rcz, y, localIndices, FabricRTPWorldUnobf::canonicaliseBiome);
         } catch (Throwable t) {
             RTP.log(java.util.logging.Level.FINE,
@@ -1079,8 +1079,8 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
         ServerLevel level = world;
         if (level == null || level.getServer() == null) return -1L;
         try {
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.lastModifiedMillis(
-                io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.lastModifiedMillis(
+                io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
                     level.getServer().getWorldPath(LevelResource.ROOT),
                     dimensionRegionSubpath(level), rcx << 5, rcz << 5));
         } catch (Throwable t) {
@@ -1098,8 +1098,8 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
         if (level == null || level.getServer() == null) return null;
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
-            return io.github.dailystruggle.rtp.anvil.RegionFileResolver.listAnvilRegionCoords(
-                io.github.dailystruggle.rtp.anvil.RegionFileResolver.regionDirectoryFor(
+            return io.github.dailystruggle.anvil.RegionFileResolver.listAnvilRegionCoords(
+                io.github.dailystruggle.anvil.RegionFileResolver.regionDirectoryFor(
                     worldFolder, dimensionRegionSubpath(level)));
         } catch (Throwable t) {
             RTP.log(java.util.logging.Level.WARNING,
@@ -1236,7 +1236,7 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
         try {
             String dim = dimensionRegionSubpath(level);
             java.nio.file.Path regionFile =
-                io.github.dailystruggle.rtp.anvil.AnvilPrefilter
+                io.github.dailystruggle.anvil.AnvilPrefilter
                     .regionFileFor(worldFolder, dim, cx, cz);
             // Missing region file = no chunk on disk for this 32x32 tile.
             if (regionFile == null || !java.nio.file.Files.exists(regionFile)) {
@@ -1246,7 +1246,7 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
             // amortises GENSCAN's per-chunk slot lookup across the entire 32x32
             // tile. Built once per region file at first touch, reused until the
             // .mca mtime advances. Parity with v26_1_R1.
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionOccupancyCache
+            return io.github.dailystruggle.anvil.AnvilRegionOccupancyCache
                 .isOccupied(regionFile, cx, cz);
         } catch (Throwable t) {
             // Conservative default per RTPWorld javadoc: a false-positive only
@@ -1315,7 +1315,7 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
                             + " (world=" + name + " chunk=(" + cx + "," + cz + "))"));
             return failed;
         }
-        return CompletableFuture.supplyAsync(() -> {
+        Runnable action = () -> {
             try {
                 // ADR-007: wrap the ServerLevel in an RTPLevelHandle so the
                 // SPI signature stays Mojmap-name-stable. Adapter unwraps via
@@ -1329,14 +1329,20 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
                 // - getNow short-circuits without blocking and surfaces any
                 // exception via join below. Reduces to a no-op if already done.
                 f.getNow(null);
-                return null;
             } catch (Throwable t) {
                 RTP.log(java.util.logging.Level.WARNING,
                         "[RTP] FabricRTPWorldUnobf.setForceLoadedImpl failed for world=" + name
                                 + " chunk=(" + cx + "," + cz + ") forceLoad=" + forceLoad
                                 + ": " + t.getClass().getSimpleName() + ": " + t.getMessage());
-                return null;
             }
+        };
+        if (server.isSameThread()) {
+            action.run();
+            return CompletableFuture.completedFuture(null);
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            action.run();
+            return null;
         }, server);
     }
 
@@ -1393,13 +1399,13 @@ public final class FabricRTPWorldUnobf extends RTPWorld<ServerLevel> {
         }
         // ADR-016 fallback: no live chunk cached, but the prefilter may have
         // produced an Anvil-backed view earlier in this candidate's evaluation.
-        io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+        io.github.dailystruggle.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
         if (view != null) {
             int cx = (int) (key & 0xffffffffL);
             int cz = (int) (key >> 32);
             java.util.Set<String> reconciled = (RTPRuntime.serverAccessor() != null)
                     ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
-                    : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+                    : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
             return new FabricRTPChunkUnobf(view, cx, cz, id, reconciled);
         }
         return null;

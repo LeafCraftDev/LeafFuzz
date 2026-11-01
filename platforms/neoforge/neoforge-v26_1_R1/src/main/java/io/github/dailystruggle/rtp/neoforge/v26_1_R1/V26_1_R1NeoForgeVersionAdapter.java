@@ -512,6 +512,31 @@ public final class V26_1_R1NeoForgeVersionAdapter implements NeoForgeVersionAdap
         }
     }
 
+    @Override
+    public void releaseAllTickets(ServerLevel level) {
+        if (level == null) return;
+        try {
+            ServerChunkCache cache = level.getChunkSource();
+            var it = APPLIED_TICKET_DISTANCES.entrySet().iterator();
+            while (it.hasNext()) {
+                var entry = it.next();
+                TicketKey key = entry.getKey();
+                if (key.level() != level) continue;
+                var distances = entry.getValue();
+                TicketType tt = key.temporary() ? RTP_TEMP_LOAD_TICKET_TYPE : RTP_TICKET_TYPE;
+                Integer d;
+                while ((d = distances.poll()) != null) {
+                    try {
+                        cache.removeTicketWithRadius(tt, key.chunkPosition(), d);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                it.remove();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Typed player / command seams (Mojmap - no reflection needed).
     // -------------------------------------------------------------------------

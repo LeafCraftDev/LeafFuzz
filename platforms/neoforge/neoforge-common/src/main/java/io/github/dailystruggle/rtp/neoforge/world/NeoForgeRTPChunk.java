@@ -1,7 +1,7 @@
 package io.github.dailystruggle.rtp.neoforge.world;
 
-import io.github.dailystruggle.rtp.anvil.AnvilChunkView;
-import io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer;
+import io.github.dailystruggle.anvil.AnvilChunkView;
+import io.github.dailystruggle.anvil.PaletteIdentifierNormalizer;
 import io.github.dailystruggle.rtp.api.world.RTPChunk;
 import io.github.dailystruggle.rtp.api.world.RTPWorld;
 import io.github.dailystruggle.rtp.common.runtime.RTPRuntime;

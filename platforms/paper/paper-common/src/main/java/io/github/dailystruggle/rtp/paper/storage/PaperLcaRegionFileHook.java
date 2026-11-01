@@ -1,7 +1,7 @@
 package io.github.dailystruggle.rtp.paper.storage;
 
-import io.github.dailystruggle.rtp.anvil.LcaRegionFileStorage;
-import io.github.dailystruggle.rtp.anvil.LcaRegionReader;
+import io.github.dailystruggle.anvil.LcaRegionFileStorage;
+import io.github.dailystruggle.anvil.LcaRegionReader;
 import io.github.dailystruggle.rtp.bukkitplatform.world.BukkitRegionPaths;
 import org.bukkit.World;
 
@@ -39,7 +39,7 @@ public final class PaperLcaRegionFileHook implements Closeable, AutoCloseable {
     private final int defaultDataVersion;
 
     public PaperLcaRegionFileHook() {
-        this(false, true, 4671);
+        this(true, true, 4671);
     }
 
     public PaperLcaRegionFileHook(boolean modeBZstd, boolean autoMigrateLegacy, int defaultDataVersion) {

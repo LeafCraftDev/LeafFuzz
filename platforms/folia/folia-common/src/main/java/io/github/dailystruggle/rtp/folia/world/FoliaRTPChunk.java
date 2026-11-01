@@ -1,6 +1,6 @@
 package io.github.dailystruggle.rtp.folia.world;
 
-import io.github.dailystruggle.rtp.anvil.AnvilChunkView;
+import io.github.dailystruggle.anvil.AnvilChunkView;
 import io.github.dailystruggle.rtp.api.safety.CompiledUnsafeSet;
 import io.github.dailystruggle.rtp.api.world.RTPChunk;
 import io.github.dailystruggle.rtp.api.world.RTPWorld;
@@ -249,7 +249,7 @@ public final class FoliaRTPChunk extends RTPChunk<Chunk> {
         // the RTP-config-comparable form ("PLAINS"). `PaletteNormalizer` is
         // for blocks (Material registry); biomes use the pure-string
         // namespace-strip + upper-case helper from `rtp-api`.
-        String normalized = io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(id);
+        String normalized = io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(id);
         return (normalized != null && !normalized.isEmpty()) ? normalized : id;
       }
       // Anvil view had no biome container at this Y; fall back to the world
@@ -296,7 +296,7 @@ public final class FoliaRTPChunk extends RTPChunk<Chunk> {
       if (effective == null) {
         effective = RTPRuntime.serverAccessor() != null
             ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(unsafeBlocks)
-            : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(unsafeBlocks);
+            : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(unsafeBlocks);
       }
       return anvilView.isSafe(x & 0xF, y, z & 0xF, effective);
     }

@@ -161,6 +161,12 @@ public final class FabricServerAccessor
 
   /** Called by {@code FabricEventBridge} on SERVER_STOPPING. */
   public void unbindServer() {
+    for (io.github.dailystruggle.rtp.api.world.RTPWorld<?> w : worldsByName.values()) {
+      try {
+        w.forgetChunks();
+      } catch (Throwable ignored) {
+      }
+    }
     this.scheduler.clearServer();
     this.server = null;
     this.playersById.clear();
@@ -187,7 +193,13 @@ public final class FabricServerAccessor
   public void unregisterWorld(ServerLevel level) {
     String name = level.dimension().location().toString();
     io.github.dailystruggle.rtp.api.world.RTPWorld<?> removed = worldsByName.remove(name);
-    if (removed != null) worldsById.remove(removed.id());
+    if (removed != null) {
+      worldsById.remove(removed.id());
+      try {
+        removed.forgetChunks();
+      } catch (Throwable ignored) {
+      }
+    }
   }
 
   /**
@@ -264,7 +276,13 @@ public final class FabricServerAccessor
               if (loc != null) {
                 String name = loc.toString();
                 io.github.dailystruggle.rtp.api.world.RTPWorld<?> removed = worldsByName.remove(name);
-                if (removed != null) worldsById.remove(removed.id());
+                if (removed != null) {
+                  worldsById.remove(removed.id());
+                  try {
+                    removed.forgetChunks();
+                  } catch (Throwable ignored) {
+                  }
+                }
                 return;
               }
             } catch (NoSuchMethodException ignored) {}
@@ -1781,8 +1799,14 @@ public final class FabricServerAccessor
   @Override
   public void stop() {
     // Lifecycle drives this from RTPFabricMod via FabricEventBridge.
-    // Clearing maps + scheduler is handled by unbindServer().
-    unbindServer();
+    // Release world chunk tickets and clear scheduler tasks before SERVER_STOPPING finishes.
+    for (io.github.dailystruggle.rtp.api.world.RTPWorld<?> w : worldsByName.values()) {
+      try {
+        w.forgetChunks();
+      } catch (Throwable ignored) {
+      }
+    }
+    this.scheduler.clearServer();
   }
 
   @Override

@@ -1,10 +1,18 @@
 # anvil-api-ADR-002 - Multi-Format Region Support: Pluggable Region Readers (Linear via Addon)
 
-**Status:** Accepted (revised 2026-09-23, revised 2026-10-06, revised 2026-10-14 - see Revisions)
+**Status:** Accepted (revised 2026-09-23, revised 2026-10-06, revised 2026-10-14, revised 2026-10-31 - see Revisions)
 **Formerly:** ADR-077
 **Date:** 2026-08-26
 **Extends:** [anvil-api-ADR-001](anvil-api-ADR-001-anvil-subsystem.md) (Anvil Read-Only Subsystem)
 **Related:** [leafrtp-ADR-018](../../../../plugins/LeafRTP/docs/adr/leafrtp-ADR-018-l3-backlog-cache.md) (L3 Backlog Cache), [leafrtp-ADR-049](../../../../plugins/LeafRTP/docs/adr/leafrtp-ADR-049-adaptive-scan-rate-and-mca-header-generation-check.md) (Adaptive Scan Rate and Header Generation Check)
+
+## Revision (2026-10-31) - Linear v2 Bucketed (`version 3`) & BufferedLinear (`.b_linear` v2/v3) Support
+
+Modern Linear-based server forks (`Leaves 1.21.11`, `Winds-Studio/Leaf 26.2`, `Luminol`) ship two additional on-disk Linear region layouts beyond original whole-region Linear v1 (`version 1`/`2`):
+1. **Linear v2 Bucketed (`.linear`, `version == 3`, `LINEAR_V2`)**: Partitions the $32 \times 32$ region into `gridSize * gridSize` (`gridSize` $\in \{1, 2, 4, 8, 16, 32\}$, default $8 \times 8 = 64$ buckets of $4 \times 4 = 16$ chunks), embeds a 128-byte (1,024-bit) chunk existence bitmap at byte offset 26, and compresses each non-empty bucket via `ZstdOutputStream` (which emits streaming Zstd frames with `decompressedSize == 0`) paired with a 64-bit `xxHash64` checksum.
+2. **BufferedLinear (`.b_linear`, `BLINEAR_SIGNATURE = -0x200812250269L`, `version == 2` and `version == 3`)**: Used by `Luminol` and `Winds-Studio/Leaf` (`B_LINEAR`). Version 3 stores a 14-byte header and 16-entry `uint64` bucket offset table (`64` chunks per Zstd-compressed bucket, each chunk prefixed with `sectionSize`, `uncompressedLen`, `timestamp`, and `xxHash32`); Version 2 stores a single Zstd stream of 1,024 chunk sections after an 18-byte header.
+3. **`DynamicZstdBinding` Streaming Frame Support**: Added multi-ClassLoader discovery (`DynamicZstdBinding`, context ClassLoader, system ClassLoader) and `com.github.luben.zstd.ZstdInputStream` fallback when `Zstd.decompressedSize` returns `0` so streaming frames emitted by `ZstdOutputStream` decompress without buffer-sizing failures.
+4. **Automatic Registration**: `LinearRegionReader.registerIfAvailable()` registers both `.linear` and `.b_linear` in `RegionFormatRegistry`, enabling zero-config off-tick pre-filtering in `LeafRTP` and automatic `.linear`/`.b_linear` $\to$ `.lca` migration in `LeafAnvil` (`LcaRegionFileStorage`, `LeafAnvilWorldConverter`).
 
 ## Revision (2026-10-14) - Zero-Dependency Dynamic Linear Reader with Host Binding & Built-In Testing
 
@@ -67,7 +75,7 @@ maintenance line, no native binaries). The shaded decoder footprint dropped from
 ~6.3 MiB to ~0.26 MiB.
 
 Given that footprint, `LinearRegionReader` was moved into `api/anvil-api`
-(package `io.github.dailystruggle.rtp.anvil`) and `.linear` is now registered by
+(package `io.github.dailystruggle.anvil`) and `.linear` is now registered by
 default in `RegionFormatRegistry` alongside `.mca`. The standalone
 `addons/LeafRTPLinearAddon` module was retired. `.linear` off-tick pre-filtering
 is therefore built in for both the Lite and Pro editions with no operator action

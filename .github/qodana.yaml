@@ -27,6 +27,8 @@ profile:
         - "api/**"
         - "rtp-api/**"
         - "rtp-core/**"
+        - "resource/LeafRTP/rtp-api/**"
+        - "resource/LeafRTP/rtp-core/**"
         - "platforms/**"
     # Reflection across platform bridges and NMS accessors is audited under ADR-026.
     - inspection: JavaReflectionMemberAccess

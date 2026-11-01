@@ -16,8 +16,6 @@ version = providers.gradleProperty('version').get()
 spotless {
     lineEndings = 'UNIX'
     java {
-        target 'rtp-*/**/*.java', 'addons/**/*.java', 'api/**/*.java', 'plugins/**/*.java'
-        targetExclude '**/build/**', '**/.gradle/**', '**/generated/**', '**/target/**', 'api/**/build/**', 'rtp-*/**/build/**', 'plugins/**/build/**'
         removeUnusedImports()
         trimTrailingWhitespace()
         endWithNewline()
@@ -387,7 +385,7 @@ subprojects {
             ':anvil-api': [
                     instruction: 0.85,
                     branch: 0.77,
-                    excludes: ['io/github/dailystruggle/rtp/anvil/Lca*']
+                    excludes: ['io/github/dailystruggle/anvil/Lca*']
             ],
             // maps-api measured via jacocoTestReport (2026-10-08): 96.2% instruction / 84.6% branch.
             ':maps-api': [instruction: 0.90, branch: 0.80],

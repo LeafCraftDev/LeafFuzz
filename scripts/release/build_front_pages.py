@@ -139,13 +139,15 @@ PRODUCTS = {
         repo_base="https://github.com/LeafCraftDev/LeafFuzz",
         repo_branch="main",
     ),
-    "leafarchive": ProductSpec(
-        "leafarchive",
-        "LeafArchive",
-        None,
-        "LeafArchive-x.y.z.jar",
-        None,
-        ROOT / "resource" / "LeafArchive" / "docs" / "publishing" / "FRONT_PAGE.md",
+    "leafanvil": ProductSpec(
+        "leafanvil",
+        "LeafAnvil",
+        "LeafAnvil",
+        "LeafAnvil-x.y.z.jar",
+        "LeafAnvil-x.y.z.jar",
+        ROOT / "resource" / "LeafAnvil" / "docs" / "publishing" / "FRONT_PAGE.md",
+        repo_base="https://github.com/LeafCraftDev/LeafAnvil",
+        repo_branch="main",
     ),
 }
 

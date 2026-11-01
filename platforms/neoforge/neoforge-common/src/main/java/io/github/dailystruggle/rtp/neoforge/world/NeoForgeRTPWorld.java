@@ -16,7 +16,7 @@ import io.github.dailystruggle.rtp.common.tools.GenerationBudget;
 import io.github.dailystruggle.rtp.common.tools.TicketGenerationWatch;
 import io.github.dailystruggle.rtp.common.selection.region.TicketFootprint;
 import io.github.dailystruggle.rtp.common.world.BiomeOverride;
-import io.github.dailystruggle.rtp.anvil.AnvilColumnProbeAdapter;
+import io.github.dailystruggle.anvil.AnvilColumnProbeAdapter;
 import io.github.dailystruggle.rtp.neoforge.version.NeoForgeVersionAdapter;
 import io.github.dailystruggle.rtp.neoforge.version.NeoForgeVersionAdapterRegistry;
 import net.minecraft.world.level.storage.LevelResource;
@@ -78,8 +78,9 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
     private final ConcurrentHashMap<Long, NeoForgeRTPChunk> rtpChunkCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, TicketGenerationWatch> ticketGenerationWatches =
             new ConcurrentHashMap<>();
-    private final io.github.dailystruggle.rtp.anvil.AnvilProbeSupport anvilProbeSupport =
-            new io.github.dailystruggle.rtp.anvil.AnvilProbeSupport();
+    private final io.github.dailystruggle.anvil.AnvilProbeSupport anvilProbeSupport =
+            new io.github.dailystruggle.anvil.AnvilProbeSupport();
+    private volatile boolean inactive = false;
 
     public NeoForgeRTPWorld(@NotNull ServerLevel level) {
         super(level);
@@ -194,6 +195,10 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
 
     private CompletableFuture<Long> resolveChunkKey(
             int chunkX, int chunkZ, boolean allowLive, GenerationBudget.Reservation generationSlot) {
+        if (inactive) {
+            if (generationSlot != null) generationSlot.close();
+            return CompletableFuture.completedFuture(null);
+        }
         final long key = ((long) chunkX & 0xffffffffL) | ((long) chunkZ << 32);
 
         if (shouldPrefilter(chunkX, chunkZ)) {
@@ -213,16 +218,21 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
                             .probeAndPublish(worldFolder, dim, chunkX, chunkZ, key, rawUnsafe,
                                     s -> (RTPRuntime.serverAccessor() != null)
                                             ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                                            : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s))
+                                            : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s))
                             .thenCompose(result -> {
-                                io.github.dailystruggle.rtp.anvil.AnvilChunkView view = result.view();
+                                if (inactive) {
+                                    if (generationSlot != null) generationSlot.close();
+                                    return CompletableFuture.completedFuture(null);
+                                }
+                                io.github.dailystruggle.anvil.AnvilChunkView view = result.view();
                                 if (view != null) {
-                                    if (result.verdict() == io.github.dailystruggle.rtp.anvil.Verdict.REJECT) {
+                                    if (result.verdict() == io.github.dailystruggle.anvil.Verdict.REJECT) {
                                         RTP.log(java.util.logging.Level.FINE,
                                                 "[RTP] Anvil surface-unsafe (advisory) world=" + name
                                                         + " chunk=(" + chunkX + "," + chunkZ
                                                         + ") — handing view to vert adjustor");
                                     }
+                                    if (generationSlot != null) generationSlot.close();
                                     return CompletableFuture.completedFuture(key);
                                 }
                                 return allowLive
@@ -233,7 +243,10 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
             }
         }
 
-        if (!allowLive && !isChunkLoaded(chunkX, chunkZ)) return CompletableFuture.completedFuture(null);
+        if (!allowLive && !isChunkLoaded(chunkX, chunkZ)) {
+            if (generationSlot != null) generationSlot.close();
+            return CompletableFuture.completedFuture(null);
+        }
         return loadLiveChunk(chunkX, chunkZ, key, generationSlot);
     }
 
@@ -282,8 +295,11 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
      */
     private CompletableFuture<Long> loadLiveChunk(
             int chunkX, int chunkZ, long key, GenerationBudget.Reservation generationSlot) {
-        if (world == null) {
+        if (inactive || world == null) {
             if (generationSlot != null) generationSlot.close();
+            if (inactive) {
+                return CompletableFuture.completedFuture(null);
+            }
             CompletableFuture<Long> failed = new CompletableFuture<>();
             failed.completeExceptionally(new IllegalStateException(
                     "NeoForgeRTPWorld.getChunkAt: ServerLevel is null (world=" + name + ")"));
@@ -538,7 +554,7 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
         final int finalMaxY = maxY;
 
         // Coalesced on AnvilIoPool: pending probes for one r.X.Z.mca share one open (S-005).
-        return io.github.dailystruggle.rtp.anvil.AnvilPrefilter.probeColumnAsync(
+        return io.github.dailystruggle.anvil.AnvilPrefilter.probeColumnAsync(
                 worldFolder, dim, cx, cz, finalMinY, finalMaxY).handle((probe, err) -> {
             try {
                 if (err != null) throw err;
@@ -546,7 +562,7 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
                 return ChunkColumnProbe.of(new AnvilColumnProbeAdapter(probe, cx, cz,
                     s -> (RTPRuntime.serverAccessor() != null)
                         ? RTPRuntime.serverAccessor().reconcilePaletteIdentifier(s)
-                        : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalize(s)));
+                        : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalize(s)));
             } catch (Throwable t) {
                 RTP.log(java.util.logging.Level.FINE,
                     "[RTP] NeoForgeRTPWorld.probeChunkColumn failed for world=" + name
@@ -575,11 +591,11 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
         final String dim = dimensionRegionSubpath(worldFolder, level);
         try {
             java.nio.file.Path regionFile =
-                io.github.dailystruggle.rtp.anvil.AnvilPrefilter
+                io.github.dailystruggle.anvil.AnvilPrefilter
                     .regionFileFor(worldFolder, dim, rcx << 5, rcz << 5);
             if (regionFile == null) return java.util.Collections.emptyMap();
             // One whole-file read under a pooled-buffer lease.
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.readAllBiomes(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.readAllBiomes(
                 regionFile, rcx, rcz, y, NeoForgeRTPWorld::canonicaliseBiome);
         } catch (RuntimeException | LinkageError t) {
             PlatformHookBitComponent.recordBiomeColorDegraded(
@@ -602,10 +618,10 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
             java.nio.file.Path regionFile =
-                io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+                io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
                     worldFolder, dimensionRegionSubpath(worldFolder, level), rcx << 5, rcz << 5);
             if (regionFile == null) return java.util.Collections.emptyMap();
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.sampleBiomesOrThrow(
                 regionFile, rcx, rcz, y, localIndices, NeoForgeRTPWorld::canonicaliseBiome);
         } catch (java.io.IOException | RuntimeException | LinkageError t) {
             PlatformHookBitComponent.recordBiomeColorDegraded(
@@ -655,8 +671,8 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
         if (level == null) return -1L;
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionSampler.lastModifiedMillis(
-                io.github.dailystruggle.rtp.anvil.AnvilPrefilter.regionFileFor(
+            return io.github.dailystruggle.anvil.AnvilRegionSampler.lastModifiedMillis(
+                io.github.dailystruggle.anvil.AnvilPrefilter.regionFileFor(
                     worldFolder, dimensionRegionSubpath(worldFolder, level), rcx << 5, rcz << 5));
         } catch (Throwable t) {
             RTP.log(java.util.logging.Level.FINE,
@@ -673,8 +689,8 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
         if (level == null) return null;
         try {
             java.nio.file.Path worldFolder = level.getServer().getWorldPath(LevelResource.ROOT);
-            return io.github.dailystruggle.rtp.anvil.RegionFileResolver.listAnvilRegionCoords(
-                io.github.dailystruggle.rtp.anvil.RegionFileResolver.regionDirectoryFor(
+            return io.github.dailystruggle.anvil.RegionFileResolver.listAnvilRegionCoords(
+                io.github.dailystruggle.anvil.RegionFileResolver.regionDirectoryFor(
                     worldFolder, dimensionRegionSubpath(worldFolder, level)));
         } catch (Throwable t) {
             RTP.log(java.util.logging.Level.WARNING,
@@ -831,7 +847,7 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
         try {
             String dim = dimensionRegionSubpath(worldFolder, level);
             java.nio.file.Path regionFile =
-                io.github.dailystruggle.rtp.anvil.AnvilPrefilter
+                io.github.dailystruggle.anvil.AnvilPrefilter
                     .regionFileFor(worldFolder, dim, cx, cz);
             if (regionFile == null || !java.nio.file.Files.exists(regionFile)) {
                 RTP.log(java.util.logging.Level.FINE,
@@ -840,7 +856,7 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
                         + ") -> " + regionFile);
                 return false;
             }
-            return io.github.dailystruggle.rtp.anvil.AnvilRegionOccupancyCache
+            return io.github.dailystruggle.anvil.AnvilRegionOccupancyCache
                 .isOccupied(regionFile, cx, cz);
         } catch (RuntimeException | LinkageError t) {
             PlatformHookBitComponent.recordWorldHookDegraded(
@@ -856,7 +872,7 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
 
     @Override
     protected CompletableFuture<Void> setForceLoadedImpl(int cx, int cz, boolean forceLoad) {
-        if (world == null) {
+        if ((forceLoad && inactive) || world == null) {
             return CompletableFuture.completedFuture(null);
         }
         final MinecraftServer server = world.getServer();
@@ -869,7 +885,7 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
             return failed;
         }
         final long key = chunkKey(cx, cz);
-        return CompletableFuture.supplyAsync(() -> {
+        Runnable action = () -> {
             TicketGenerationWatch watch = null;
             try {
                 ServerChunkCache cache = world.getChunkSource();
@@ -899,15 +915,21 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
                     });
                 }
                 ticketFuture.getNow(null);
-                return null;
             } catch (Throwable t) {
                 if (watch != null) watch.close();
                 RTP.log(java.util.logging.Level.WARNING,
                         "[RTP] NeoForgeRTPWorld.setForceLoadedImpl failed for world=" + name
                                 + " chunk=(" + cx + "," + cz + ") forceLoad=" + forceLoad
                                 + ": " + t.getClass().getSimpleName() + ": " + t.getMessage());
-                return null;
             }
+        };
+        if (server != null && server.isSameThread()) {
+            action.run();
+            return CompletableFuture.completedFuture(null);
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            action.run();
+            return null;
         }, server);
     }
 
@@ -1020,13 +1042,13 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
             anvilProbeSupport.evict(key);
             return built;
         }
-        io.github.dailystruggle.rtp.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
+        io.github.dailystruggle.anvil.AnvilChunkView view = anvilProbeSupport.takeCached(key);
         if (view != null) {
             int cx = (int) (key & 0xffffffffL);
             int cz = (int) (key >> 32);
             java.util.Set<String> reconciled = (RTPRuntime.serverAccessor() != null)
                     ? RTPRuntime.serverAccessor().reconcilePaletteIdentifiers(currentUnsafeBlocks())
-                    : io.github.dailystruggle.rtp.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
+                    : io.github.dailystruggle.anvil.PaletteIdentifierNormalizer.normalizeAll(currentUnsafeBlocks());
             return new NeoForgeRTPChunk(view, cx, cz, id, reconciled);
         }
         return null;
@@ -1039,17 +1061,25 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
 
     @Override
     public void forgetChunkAt(int chunkX, int chunkZ) {
-        RTPRuntime.scheduler().runTask(this, chunkX, chunkZ, () -> {
+        Runnable release = () -> {
             setForceLoaded(chunkX, chunkZ, false);
             long key = ((long) chunkX & 0xffffffffL) | ((long) chunkZ << 32);
             chunkCache.remove(key);
             rtpChunkCache.remove(key);
             anvilProbeSupport.evict(key);
-        });
+        };
+        if (inactive || (world != null && world.getServer() != null && world.getServer().isSameThread())) {
+            release.run();
+        } else {
+            RTPRuntime.scheduler().runTask(this, chunkX, chunkZ, release);
+        }
     }
 
     @Override
     public void forgetChunks() {
+        inactive = true;
+        ticketGenerationWatches.values().forEach(TicketGenerationWatch::close);
+        ticketGenerationWatches.clear();
         chunkTickets.forEach((key, count) -> {
             int cx = (int) (key & 0xffffffffL);
             int cz = (int) (key >> 32);
@@ -1057,6 +1087,10 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
                 setForceLoaded(cx, cz, false);
             }
         });
+        NeoForgeVersionAdapter adapter = NeoForgeVersionAdapterRegistry.peek();
+        if (adapter != null && world != null) {
+            adapter.releaseAllTickets(world);
+        }
         chunkCache.clear();
         rtpChunkCache.clear();
         anvilProbeSupport.clear();
@@ -1093,7 +1127,7 @@ public final class NeoForgeRTPWorld extends RTPWorld<ServerLevel> {
 
     @Override
     public boolean isInactive() {
-        return world == null || world.getServer() == null;
+        return inactive || world == null || world.getServer() == null;
     }
 
     /**
