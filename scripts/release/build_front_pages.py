@@ -197,6 +197,17 @@ DENYLIST = [
 # Zone 3 (Performance / How it works); a Zone 1 hit fails the build so the
 # plain-language top survives later passes. Link targets are not checked.
 ZONE1_START = "## What it is"
+ZONE1_START_HEADINGS = frozenset({
+    ZONE1_START,
+    "## Storage",
+    "## Teleportation",
+    "## Sleep",
+    "## Worldgen",
+    "## Configuration",
+    "## Diagnostics",
+    "## Fuzzing",
+    "## Overview",
+})
 ZONE1_JARGON = [
     (re.compile(r"TP/s"), "'TP/s' (say 'teleports per second')"),
     (re.compile(r"\bMSPT\b"), "'MSPT'"),
@@ -467,7 +478,14 @@ def _resolve_images(line_no, line, source_dir=SOURCE.parent, raw_base=RAW_BASE):
         except ValueError:
             raise FrontPageError(f"line {line_no}: local image '{src}' resolves outside the repository: {candidate}")
 
-        new_url = f"{raw_base.rstrip('/')}/{rel_to_root}{suffix}"
+        eff_raw_base = raw_base
+        if raw_base == RAW_BASE:
+            owner = _match_product_for_rel(rel_to_root)
+            if owner is not None and owner.repo_base != REPO_BASE and owner.repo_base.startswith("https://github.com/"):
+                repo_slug = owner.repo_base[len("https://github.com/"):].strip("/")
+                eff_raw_base = f"https://raw.githubusercontent.com/{repo_slug}/{owner.repo_branch}"
+
+        new_url = f"{eff_raw_base.rstrip('/')}/{rel_to_root}{suffix}"
         return f"![{alt}]({new_url})"
 
     return _IMAGE.sub(repl, line)
@@ -483,29 +501,56 @@ def _site_url(docs_rel):
     return SITE_BASE + "/" + "/".join(parts) + ("/" if parts else "")
 
 
+def _match_product_for_rel(rel):
+    rel_lower = rel.lower()
+    for spec in PRODUCTS.values():
+        res_dir = spec.source.parents[2]
+        if not res_dir.is_relative_to(ROOT):
+            continue
+        res_root = res_dir.relative_to(ROOT).as_posix().lower()
+        if rel_lower == res_root or rel_lower.startswith(res_root + "/"):
+            return spec
+    return None
+
+
 def _resolve_doc_links(line_no, line, source_dir=SOURCE.parent, repo_base=REPO_BASE, repo_branch=REPO_BRANCH):
     """Rewrites relative links to absolute URLs, validating the target exists on disk.
 
     Published docs/**/*.md become website URLs; every other repo path (code,
     unpublished docs, directories) becomes a GitHub blob/tree URL on the release branch.
     """
+    resolved_src_dir = pathlib.Path(source_dir).resolve()
+    source_product = (
+        _match_product_for_rel(resolved_src_dir.relative_to(ROOT).as_posix())
+        if resolved_src_dir.is_relative_to(ROOT)
+        else None
+    )
+
     def repl(m):
         target = m.group(1)
         path, hash_, anchor = target.partition("#")
         if not path:
             return m.group(0)
-        candidate = (source_dir / path).resolve()
+        primary = (source_dir / path).resolve()
+        candidate = primary
         if not candidate.exists():
             candidate = (ROOT / path.lstrip("/\\")).resolve()
         if not candidate.exists() and path.lstrip("/\\").startswith("docs/"):
             candidate = (DOCS_DIR / path.lstrip("/\\")[len("docs/"):]).resolve()
+        sibling_product_md = False
         if not candidate.exists():
-            raise FrontPageError(f"line {line_no}: relative link '{target}' does not exist on disk")
+            primary_rel = primary.relative_to(ROOT).as_posix() if primary.is_relative_to(ROOT) else ""
+            owner = _match_product_for_rel(primary_rel) if primary_rel else None
+            if owner is not None and not owner.source.parents[2].exists() and primary_rel.endswith(".md"):
+                candidate = primary
+                sibling_product_md = True
+            else:
+                raise FrontPageError(f"line {line_no}: relative link '{target}' does not exist on disk")
         try:
             rel = candidate.relative_to(ROOT).as_posix()
         except ValueError:
             raise FrontPageError(f"line {line_no}: relative link '{target}' resolves outside the repository")
-        if candidate.is_file() and (
+        if (candidate.is_file() or sibling_product_md) and (
             candidate.suffix.lower() in _FORBIDDEN_CODE_SUFFIXES
             or "/src/main/" in f"/{rel}/"
             or "/src/test/" in f"/{rel}/"
@@ -514,15 +559,24 @@ def _resolve_doc_links(line_no, line, source_dir=SOURCE.parent, repo_base=REPO_B
                 f"line {line_no}: relative link '{target}' points to source/test code or a build script ({rel}); "
                 "link to a Markdown doc or directory instead"
             )
+        owner = _match_product_for_rel(rel)
+        eff_repo_base = repo_base
+        eff_repo_branch = repo_branch
+        cross_product = owner is not None and (source_product is None or owner.product_id != source_product.product_id)
+        if cross_product:
+            eff_repo_base = owner.repo_base
+            eff_repo_branch = owner.repo_branch
         url = None
-        if candidate.is_file() and candidate.suffix == ".md":
+        if cross_product and rel.lower().endswith("/docs/publishing/front_page.md"):
+            url = eff_repo_base
+        elif (candidate.is_file() or sibling_product_md) and candidate.suffix == ".md":
             try:
                 url = _site_url(candidate.relative_to(DOCS_DIR).as_posix())
             except ValueError:
                 pass
         if url is None:
             kind = "tree" if candidate.is_dir() else "blob"
-            url = f"{repo_base}/{kind}/{repo_branch}/{rel}"
+            url = f"{eff_repo_base}/{kind}/{eff_repo_branch}/{rel}"
         return f"]({url}{hash_}{anchor})"
 
     return _RELATIVE_LINK.sub(repl, line)
@@ -767,14 +821,14 @@ def check_denylist(target, text):
 
 
 def check_zone1_jargon(kept):
-    """Returns problems for jargon in Zone 1; empty when the page has no `## What it is`."""
-    if not any(line.strip() == ZONE1_START for _, line in kept):
+    """Returns problems for jargon in Zone 1; empty when the page has no Zone 1 heading."""
+    if not any(line.strip() in ZONE1_START_HEADINGS for _, line in kept):
         return []
     problems = []
     seen_start = False
     for n, line in kept:
         stripped = line.strip()
-        if stripped == ZONE1_START:
+        if stripped in ZONE1_START_HEADINGS:
             seen_start = True
         elif seen_start and stripped.startswith("## "):
             break

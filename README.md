@@ -1,6 +1,8 @@
 # LeafFuzz
 
-**One-command in-JVM quality control, persona-driven bot fuzzing, main-thread stall attribution, post-GC memory leak screening, and bytecode claim-delivery auditing for Paper, Spigot, Folia, Fabric, and NeoForge.**
+![LeafFuzz: 1-command plugin security, permission-leak scanner, memory-leak detector, and 500-bot stress tester](resource/LeafFuzz/docs/assets/leaffuzz-header-banner.png)
+
+**1-command plugin & mod security scanner, `LuckPerms` permission-leak finder, GUI menu item-leak & bot stress tester (`1..500` players), post-GC memory-leak detector, and unwired config/command auditor for Paper, Spigot, Folia, Fabric, and NeoForge.**
 
 ---
 

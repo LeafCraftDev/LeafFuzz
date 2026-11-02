@@ -2,12 +2,17 @@
 Single source for every LeafFuzz storefront page (BuiltByBit, Modrinth, Hangar, SpigotMC).
 Follows docs/dev/RULES.md Rule D-006 (first-person plain voice, 3-Zone hierarchy,
 ASCII punctuation only, concrete benchmark numbers and honest caveats).
-  Title: "LeafFuzz"  tagline: "In-game plugin and mod quality checker, command fuzzer, and memory-leak screener for Paper, Folia, Fabric & NeoForge"
+  BuiltByBit Card Title: "LeafFuzz - 1-Command Plugin Security & Memory-Leak Scanner"
+  BuiltByBit Card Thumbnail: docs/assets/leaffuzz-card-thumbnail.png
+  BuiltByBit Carousel Slides: docs/assets/leaffuzz-card-thumbnail.png, docs/assets/leaffuzz-benchmark-comparison.png, docs/assets/leaffuzz-architecture-workflow.png
+  Title: "LeafFuzz"  tagline: "1-command plugin security, permission-leak scanner, memory-leak detector & bot stress tester for Paper, Folia, Fabric & NeoForge"
 -->
 
 <div align="center">
 
-# {{name}}: In-Game Plugin & Mod QC, Command Fuzzer & Memory-Leak Screener
+![LeafFuzz: 1-command plugin security, permission-leak scanner, memory-leak detector, and 500-bot stress tester](../assets/leaffuzz-header-banner.png)
+
+# {{name}}: 1-Command Plugin Security, Permission-Leak Scanner & Memory-Leak Detector
 
 [![Build](https://github.com/LeafCraftDev/LeafFuzz/actions/workflows/gradle.yml/badge.svg)](https://github.com/LeafCraftDev/LeafFuzz/actions/workflows/gradle.yml)
 [![Java](https://img.shields.io/badge/Java-17%2B-blue)](https://adoptium.net/)
@@ -15,30 +20,33 @@ ASCII punctuation only, concrete benchmark numbers and honest caveats).
 
 </div>
 
-## What it is
+## Fuzzing
 
-**{{name}} is an in-game plugin and mod quality checker, command fuzzer, and memory-leak screener.** Drop the jar into `plugins/` or `mods/`, run `/fuzz check target=<PluginOrMod>` (or `target=PluginA,PluginB`), and in one pass it checks five things: which commands are exposed to regular players vs ops, what happens when synthetic test players send edge-case arguments, click GUI menu items, or disconnect mid-countdown, whether the target throws exceptions or stalls the server, whether player sessions stay in memory after garbage collection, and whether advertised commands and config keys are actually wired in bytecode.
+**{{name}} vets any plugin or mod in one command - finding admin commands left open to default players, GUI menu item-stealing bugs, memory leaks, lag spikes, and dead config options before they hit your live server.** Drop the jar into `plugins/` or `mods/` and run `/fuzz check target=<PluginOrMod>` (or `target=PluginA,PluginB`). In one pass it audits permissions, spawns up to 500 synthetic test players to fuzz commands and GUI menus, attributes exceptions and lag spikes to the exact `.jar`, screens post-GC heap snapshots for leaked sessions, and checks whether advertised config keys are wired in bytecode.
 
-I built it from the behavior fuzzer in `LeafRTP` - the same tool that caught and verified the pre-3.3.0 disconnected-player retention bug in `LeafRTP` - so server admins and developers can vet any new plugin, mod, or update in three steps without setting up external bot harnesses or heap profilers.
+I built it from the behavior fuzzer in [`LeafRTP`](../../../LeafRTP/docs/publishing/FRONT_PAGE.md) - the tool that caught the pre-3.3.0 disconnected-player retention bug in `LeafRTP` - so server owners and plugin authors can vet any plugin or update in three steps without external bot harnesses or heap profilers.
 
-One jar for Paper and Spigot (1.20+), Folia (1.21+), Fabric (1.21+), and NeoForge (1.21+), up to 26.3. It can also be run from a terminal (`java -jar {{jar}} swarm ...`) as a standalone external load tester.
+One jar for Paper and Spigot (1.20+), Folia (1.21+), Fabric (1.21+), and NeoForge (1.21+), up to 26.3. It also runs from a terminal (`java -jar {{jar}} swarm ...`) as a standalone load tester.
+
+![LeafFuzz 5-stage automated QC verification, 0.000% false-positive leak detection, and 500-player bot stress summary](../assets/leaffuzz-benchmark-comparison.png)
 
 ### The short version
 
-**Audits one plugin, a list of plugins, or a staging server in one command (`/fuzz check target=<Name>`) - producing an in-game book scorecard (`/fuzz report`) and a Markdown report with 1-line reproducers and ready-to-paste permission fixes.**
+**Vets one plugin, a list of plugins, or a staging server in one command (`/fuzz check target=<Name>`) - producing an in-game book scorecard (`/fuzz report`) and a Markdown report with ready-to-paste `LuckPerms` permission fixes and 1-line bug reproducers.**
 
 - [**Easy**](#install): 3-step workflow - drop `{{jar}}` into `plugins/` or `mods/`, run `/fuzz check target=<PluginOrMod>`, and read the in-game book scorecard (`/fuzz report`) or `reports/<target>-qc-report.md`.
 - [**Safe**](#how-it-works): built-in command denylist (`stop`, `restart`, `op`, `deop`, `ban`, `kick`, `reload`, `whitelist`, `save-all`), target-scoped isolation, and zero synchronous chunk loads.
-- [**Thorough**](#features): spawns synthetic in-game test players across `default` and `op` tiers (and up to 500 concurrent players via `players=auto`) to exercise player-only commands, GUI menus, movement, and mid-countdown disconnects.
-- [**Leak proof**](#performance): compares background post-GC memory snapshots against an idle control window to catch retained player sessions while ignoring normal bounded caches.
-- [**One jar**](#install): runs the same `/fuzz` command tree and 5-stage checker on Paper, Spigot, Folia, Fabric, and NeoForge.
+- [**Permission scanner**](#features): finds every admin or state-changing command accidentally left open to non-op players across Bukkit and Brigadier trees, outputting ready-to-paste `LuckPerms` and `commands.yml` fixes.
+- [**Leak detector**](#performance): compares background post-GC memory snapshots against an idle control window to blame the exact `.jar` and Java class leaking departed player sessions while ignoring normal bounded caches.
+- [**Bot stress**](#features): spawns up to 500 synthetic in-game test players (`players=auto`) across `default` and `op` tiers to test player-only commands, GUI menu item-stealing bugs, movement, and mid-countdown disconnects.
+- [**One jar**](#install): runs on Paper, Spigot, Folia, Fabric, and NeoForge (1.20 to 26.3), plus standalone CLI swarm mode (`java -jar {{jar}} swarm`).
 
 <details>
 <summary><b>More highlights</b></summary>
 
-- **Dual fixes:** every finding outputs both a minimized 1-to-2 command reproducer for the developer and an immediate `commands.yml` or LuckPerms workaround for the server owner.
-- **Claim & config wiring audit (`stage=claims`):** scans `.jar` bytecode and YAML files without loading classes to flag dead config keys, unregistered event listeners, and hollow commands (`Claims X -> Does Not Deliver Y`).
-- **Boundary-exact multi-target isolation:** test one plugin (`target=RTP`), compare two plugins side-by-side (`target=RTP,LeafSleep`), or audit a disposable test server (`target=all`) without substring cross-talk.
+- **Fixes for both server owners and developers:** every finding outputs an immediate `LuckPerms` or `commands.yml` workaround to protect your live server today, plus a minimized 1-to-2 command reproducer you can hand to the plugin author.
+- **Catch "fake" or unwired plugin features (`stage=claims`):** scans `.jar` bytecode and YAML files without loading classes to flag dead config keys, unregistered event listeners, and hollow commands (`Claims X -> Does Not Deliver Y`).
+- **Boundary-exact multi-target isolation:** test one plugin (`target=RTP`), compare two plugins side-by-side (`target=RTP,LeafSleep`), or audit a staging server (`target=all`) without substring cross-talk.
 - **Custom player personas (`personas.jsonl`):** ships with 8 survival and stress behavior profiles out of the box and loads custom exported player profiles when placed in the plugin/mod folder.
 - **Built-in self-test (`[FUZZ bit]`):** `/fuzz test` verifies archive ownership indexing, command denylisting, reproducer shrinking, leak detection math, claim-delivery scanning, and live server canaries in under 15 ms.
 
@@ -48,9 +56,9 @@ One jar for Paper and Spigot (1.20+), Folia (1.21+), Fabric (1.21+), and NeoForg
 
 These work out of the box on a staging server or local test instance:
 
-- **Pre-install vetting for a new plugin or mod:** Drop the new jar alongside `{{jar}}` and run `/fuzz check target=<NewPlugin> episodes=24` before putting it on your live production server.
-- **Permission-leak audit on an existing stack (`/fuzz check stage=commands`):** Run `/fuzz check target=all stage=commands` to list every state-changing command (`reload`, `clear`, `debug`, `give`, `delete`) accidentally left open to non-op players, with ready-to-paste LuckPerms revoke commands.
-- **Release & pull-request regression gate:** Run `/fuzz check target=RTP episodes=24` over RCON or console and attach `reports/<target>-qc-report.md` (`json` / `yml` also generated) to the release or pull request.
+- **Find open admin commands & permission leaks (`/fuzz check stage=commands`):** Run `/fuzz check target=all stage=commands` to list every state-changing command (`reload`, `clear`, `debug`, `give`, `delete`) accidentally left open to non-op players, with ready-to-paste `LuckPerms` revoke commands.
+- **Vet a new plugin or update before putting it on your live server:** Drop the new jar alongside `{{jar}}` and run `/fuzz check target=<NewPlugin> episodes=24` to check for memory leaks, GUI menu icon-stealing bugs, uncaught exceptions, and lag spikes.
+- **Stress-test up to 500 concurrent bots or gate plugin releases:** Run `/fuzz check target=RTP episodes=24 players=auto` in-game or over RCON and attach `reports/<target>-qc-report.md` (`json` / `yml` also generated) to a bug report or pull request.
 
 ---
 
@@ -66,18 +74,18 @@ These work out of the box on a staging server or local test instance:
 
 ## Features
 
-- **Stage 1 - Command & permission surface audit:** walks the live command tree for both `default` (permission level 0) and `op` (permission level 4) players, seeds hidden subcommands and inline permission checks directly from `.class` bytecode, folds `namespace:command` aliases into canonical commands, enforces the built-in command denylist, and flags unguarded admin subcommands.
-- **Stage 2 - Synthetic player, GUI menu & concurrent swarm fuzzer:** spawns in-game synthetic players (single-player or ramping up to 500 concurrent players with `players=auto`) that run player-only commands with boundary numbers (`-1`, `0`, `Integer.MAX_VALUE`), click salient GUI menu items (verifying cancelled menu clicks never leak icons into player inventories), and perform realistic follow-up actions (disconnecting within 1 second of a command, moving across blocks or chunks, or sending rapid command bursts) before shrinking any failure down to the shortest command sequence that reproduces it.
-- **Stage 3 - Exception, sync-hazard & slow-tick attribution:** watches the server log and tick loop for uncaught exceptions (`exc:`), slow ticks (`> 100 ms` outside garbage-collection pauses, `stall:`), and synchronous main-thread hazards (`hazard:sync-chunk:`, `hazard:gui-item-leak:`), attributing each stack trace to the exact `.jar` that owns the offending class.
-- **Stage 4 - Post-GC memory-leak screener:** takes background post-GC class histograms across an idle baseline and paced episode batches, flagging classes that keep growing with each departed player session while ignoring fixed-capacity caches.
-- **Stage 5 - Claim & causal delivery audit:** scans target `.jar` bytecode and YAML configuration files without loading classes to flag dead config keys, unregistered event listeners, and hollow commands (`Claims X -> Does Not Deliver Y`), cross-checking them against live Stage 2 command runs.
-- **In-game Book scorecard & Markdown/YAML/JSON export:** opens a multi-page written book (`/fuzz report`) checked for high-contrast readability on both parchment pages and dark hover tooltips, and writes `reports/<target>-qc-report.md` alongside status-leading `reports/<target>-qc-data.yml` and `reports/<target>-qc-data.json` moderation summaries.
+- **Stage 1 - Command & permission audit:** walks the live command tree for `default` and `op` players, discovers hidden subcommands from `.class` bytecode, enforces the command denylist, and flags unguarded admin commands with `LuckPerms` fixes.
+- **Stage 2 - Synthetic player, GUI & swarm fuzzer:** spawns up to 500 in-game synthetic players that test boundary arguments (`-1`, `0`, `Integer.MAX_VALUE`), click GUI menu items to catch inventory-steal bugs, disconnect mid-countdown, and shrink any failure down to a minimal reproducer.
+- **Stage 3 - Exception, sync-hazard & slow-tick attribution:** watches the log and tick loop for uncaught exceptions (`exc:`), slow ticks (`> 100 ms` outside GC, `stall:`), and synchronous chunk loads (`hazard:sync-chunk:`), blaming the owning `.jar`.
+- **Stage 4 - Post-GC memory-leak screener:** compares post-GC class histograms across an idle baseline and paced episode batches to flag classes that grow with departed player sessions while ignoring fixed-size caches.
+- **Stage 5 - Claim & causal delivery audit:** scans target `.jar` bytecode and YAML files without loading classes to flag dead config keys, unregistered listeners, and hollow commands (`Claims X -> Does Not Deliver Y`).
+- **In-game Book scorecard & Markdown/YAML/JSON export:** opens a written book (`/fuzz report`) and writes `reports/<target>-qc-report.md` alongside `.yml` and `.json` summaries.
 
 ---
 
 ## Performance
 
-All JAR class-ownership indexing and heap histogram snapshots run on background worker threads with zero main-thread chunk loads, while synthetic player command dispatches and disconnect follow-ups are paced across server ticks so async plugin callbacks and warmup timers settle cleanly between checkpoints.
+All JAR class-ownership indexing and heap histogram snapshots run on background worker threads with zero main-thread chunk loads. Synthetic player commands and disconnect follow-ups are paced across server ticks so async callbacks and warmup timers settle between checkpoints.
 
 **Live `Paper 26.2-56` (`bamboo`) Verification & `LeafRTP` Regression Summary:**
 
@@ -89,11 +97,13 @@ All JAR class-ownership indexing and heap histogram snapshots run on background 
 | **In-JVM `Int8[16x16]` Persona Policy Bot & Claim Scanner** | Exercises player-only commands (`sender instanceof Player`), GUI menu clicks, and Order-1/Order-2 bytecode claim delivery across `default` & `op` tiers | **`0` synchronous main-thread chunk loads** across static source and runtime checks | Platform integration suite & `/fuzz check` |
 | **Built-In Self-Test Suite (`/fuzz test`, `[FUZZ bit]`)** | **`6 / 6 PASS` offline** (`FUZZ-PBIT-001..002`, `FUZZ-CBIT-001..003`, `FUZZ-IBIT-001`) and **`9 / 9 PASS` live** (`FUZZ-LIVE-001..003`) | **`< 15 ms`** total execution time off-thread; **`0`** book contrast violations | Live `Paper 26.2-56` `/fuzz test` |
 
-**What fuzzing found and verified in `LeafRTP` (full logs in [`LEAK_FUZZING.md`](https://github.com/DailyStruggle/RTP/blob/V3/helpers/StressTestRTP/LEAK_FUZZING.md)):**
+### Findings in `LeafRTP`
 
-- **Player session cleanup on mid-warmup quit (fixed in `LeafRTP 3.3.0`):** Every platform player wrapper (`Bukkit`, `Paper`, `Folia`, `Fabric`, `NeoForge`) now holds the live player through a `WeakReference` plus a pure-data snapshot (`toPureData()`), and countdown boss bars clear on quit (`PersonalBossBars`). Earlier fuzzing flagged `latestTeleportData` cooldown caches, `FoliaRTPPlayer`, and active countdown boss bars retaining `+3` to `+4` player sessions per episode whenever a bot ran `/rtp` and disconnected within 1 second; post-fix runs verified `0` retained sessions across 86 episodes (including `/rtp reload`).
-- **Bounded cache vs. per-departure leak separation (verified in `LeafRTP 3.3.0`):** Fixed-capacity region pre-filter caches (`RegionFileResolver$ResolvedRegion` and chunk section palettes) are separated from true memory leaks by regressing post-GC growth per repetition and per ended player session against an idle baseline. When `ResolvedRegion` climbed to the 48-bot ladder in `LeafRTP`, growth flattened below the linear leak prediction (`146` vs `506.35` predicted), confirming bounded cache warm-up rather than a leak.
-- **Arrival chunk-ticket hold across initial ticks (fixed in `LeafRTP 3.3.0`):** Arrival chunk tickets remain held through the arriving player's first ticks so landing never triggers a synchronous main-thread chunk load or slow-tick stall.
+Full logs: [`LEAK_FUZZING.md`](https://github.com/DailyStruggle/RTP/blob/V3/helpers/StressTestRTP/LEAK_FUZZING.md).
+
+- **Player session cleanup on mid-warmup quit (fixed in `LeafRTP 3.3.0`):** Platform player wrappers now hold live players via `WeakReference` (`toPureData()`) and clear countdown boss bars on quit. Earlier fuzzing caught `+3` to `+4` retained sessions per episode when bots disconnected within 1 second of `/rtp`; post-fix runs verified `0` retained sessions across 86 episodes.
+- **Bounded cache vs. leak separation (verified in `LeafRTP 3.3.0`):** Regressing post-GC growth against an idle baseline separates fixed-capacity region caches (`ResolvedRegion`) from true per-session memory leaks (`146` cached regions vs `506.35` linear leak threshold).
+- **Arrival chunk-ticket hold (fixed in `LeafRTP 3.3.0`):** Arrival chunk tickets stay held through the player's initial ticks so landing never triggers a synchronous chunk load.
 
 ---
 
@@ -101,11 +111,19 @@ All JAR class-ownership indexing and heap histogram snapshots run on background 
 
 All archive ownership indexing, synthetic persona evaluation, bytecode claim scanning, and post-GC retention regressions run automatically in the background from a single `/fuzz check` command without external bot accounts or JVM attach agents:
 
-- **Off-thread archive ownership map:** Scans `plugins/*.jar` and `mods/*.jar` zip headers off-thread to map every unique `.class` entry to its owning archive while excluding shaded libraries present in multiple jars (`com.google.gson.*`, `org.slf4j.*`) so shared dependencies are never falsely blamed.
-- **In-JVM behavioral bot & concurrent player ramp:** Each episode spawns a synthetic player (or a concurrent roster up to 500 players when `players=auto` or `players=<n>` is passed) with a unique per-episode `UUID` and evaluates a 256-byte `Int8[16x16]` policy matrix over 16 state features and 16 gameplay micro-skills. After dispatching the target command through the platform command map or Brigadier dispatcher, the bot clicks salient GUI menu slots, executes its assigned follow-up behavior (disconnecting immediately, moving across blocks/chunks, closing an inventory window, or repeating commands), and fires target-scoped lifecycle events.
-- **UCB1 bandit exploration & `ddmin` shrinking:** Prioritizes under-explored `(command, followUp)` combinations using Upper Confidence Bound (`UCB1`) rewards weighted by new stack frames, slow ticks, and memory deltas. When an episode triggers a fault, the shrinker reduces the action list via Zeller's `ddmin` algorithm and bisects numeric arguments to report the exact threshold where the command breaks.
-- **Idle-controlled Bonferroni OLS leak regression:** Before running fuzz batches, `/fuzz check` captures `qc-baseline` and `qc-idle-control` post-GC histograms to measure background server noise, then paces weighted episode batches across server ticks (`qc-batch-1..3`). A class is flagged only if its post-GC instance count grows monotonically with player departures or commands (`slope >= +0.20 inst/event`, `R^2 >= 0.85`, and Bonferroni-corrected `p < 0.01 / K`).
-- **Zero-classloading bytecode & config claim audit:** Parses `.class` constant pools, method bodies, and `BootstrapMethods` off-thread (`BytecodeCausalGraphScanner`) to extract hidden subcommands and verify first-order (0-hop command, listener, and config-key registration) and second-order (multi-hop causal chains to effect sinks) delivery (`Claims X -> Does Not Deliver Y`), corroborated by Stage 2 runtime telemetry.
+- **Off-thread archive ownership map:** Scans `plugins/*.jar` and `mods/*.jar` zip headers off-thread to map each `.class` to its owning jar while excluding shared shaded libraries (`gson`, `slf4j`).
+- **In-JVM behavioral bot & concurrent player ramp:** Spawns synthetic players (up to 500 with `players=auto`) that run target commands, click GUI menu slots, and fire follow-up disconnect, move, or inventory-close events.
+- **UCB1 exploration & `ddmin` shrinking:** Prioritizes under-explored `(command, followUp)` pairs and shrinks any fault down to the shortest command sequence and exact numeric threshold that reproduces it.
+- **Idle-controlled leak regression:** Captures `qc-baseline` and `qc-idle-control` post-GC histograms before running episode batches (`qc-batch-1..3`), flagging only classes that grow monotonically with player departures (`slope >= +0.20 inst/event`, `R^2 >= 0.85`).
+- **Zero-classloading bytecode claim audit:** Parses `.class` constant pools and method bodies off-thread to find hidden subcommands and verify whether config keys, listeners, and commands are wired to real behavior.
+
+### 3-step workflow and 5-stage QC pipeline
+
+![LeafFuzz 3-step plugin vetting and 5-stage automated QC architecture](../assets/leaffuzz-architecture-workflow.png)
+
+Each `/fuzz check` run pairs server-owner workarounds with developer-ready bug reproducers:
+- **For server owners & network operators:** Stage 1 and Stage 3 output copy-pasteable `LuckPerms` permission revokes and `commands.yml` overrides so you can lock down an exposed subcommand or isolate a lagging `.jar` immediately without waiting on an upstream patch.
+- **For plugin & mod authors:** Stage 2, Stage 4, and Stage 5 shrink noisy multi-bot episodes down to a 1-line command reproducer, name the exact Java class retaining departed player sessions after GC, and pinpoint unwired config keys or listeners in bytecode.
 
 ---
 
@@ -209,5 +227,8 @@ Support is me, in my spare time, so it's best effort.
 - [**Configuration Reference**](../admin/CONFIGURATION.md): `config.yml`, `messages.yml`, and `personas.jsonl` reference
 - [**BIT Diagnostic Codes**](../dev/BIT_CODES.md): `FUZZ-PBIT-001` through `FUZZ-LIVE-003` reference
 - [**Changelog**](../../CHANGELOG.md)
-- [**LeafRTP**](https://github.com/DailyStruggle/RTP): zero-wait random teleportation (`/rtp` & `/wild`) with `.mca`/`.linear` region pre-filtering
+- [**LeafSleuth**](../../../LeafSleuth/docs/publishing/FRONT_PAGE.md): contraption-safe lag governor (`-68.6%` hotspot load), VPN ban-evader detector, and zero-day anti-dupe forensics
+- [**LeafRTP**](https://github.com/DailyStruggle/RTP): zero-wait random teleportation (`/rtp` & `/wild`) with `.mca`/`.linear`/`.lca` region pre-filtering
+- [**LeafAnvil**](https://github.com/LeafCraftDev/LeafAnvil): 50% smaller worlds, 15.5x faster shutdown saves, and 4-tier self-healing `.lca` world storage
+- [**LeafTreeGen**](https://github.com/LeafCraftDev/LeafTreeGen): procedural custom biome trees baked into native vanilla jigsaw worldgen datapacks
 - [**Source on GitHub**](https://github.com/LeafCraftDev/LeafFuzz): MIT source code, issues, and verification suites
