@@ -1,13 +1,13 @@
-package io.github.dailystruggle.rtp.common.bit.config.atlas;
+package io.github.dailystruggle.bytecode;
 
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.CausalChainSlice;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.CausalGraphReport;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.ClaimDeliveryFinding;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.ConfidenceTier;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.FindingKind;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.LlmConfigDocSynthesizer.HttpTransport;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.LlmConfigDocSynthesizer.LlmHookConfig;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.LlmConfigDocSynthesizer.Provider;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalChainSlice;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalFinding;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalGraphReport;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.ConfidenceTier;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.FindingKind;
+import io.github.dailystruggle.bytecode.LlmConfigDocSynthesizer.HttpTransport;
+import io.github.dailystruggle.bytecode.LlmConfigDocSynthesizer.LlmHookConfig;
+import io.github.dailystruggle.bytecode.LlmConfigDocSynthesizer.Provider;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -34,13 +34,13 @@ import java.util.regex.Pattern;
  * <ol>
  *   <li><b>AST-Grounded Root-Cause Explanations for Proven Fuzz/Wiring Faults:</b> Given an
  *       already-proven Stage 2/3/4/5 fault (stack signature, minimized {@code ddmin} command
- *       sequence, or deterministic {@link ClaimDeliveryFinding}), queries the configured
+ *       sequence, or deterministic {@link CausalFinding}), queries the configured
  *       {@link Provider} ({@code GEMINI}, {@code OPENAI_COMPATIBLE}, {@code ANTHROPIC},
  *       {@code OLLAMA}) with the compact {@code Jminor} causal chain and verifies every cited
  *       {@code Class#method} symbol against {@link CausalGraphReport#closedWorldSymbols()} in
  *       {@code < 5 ms}. Never alters scorecard pass/fail verdicts.</li>
- *   <li><b>Opt-In Advisory Semantic Claim Audit:</b> Evaluates {@code Jminor} causal slices against
- *       advertised command/config claims to surface semantic/guard-polarity mismatches as
+ *   <li><b>Opt-In Advisory Semantic Causal Audit:</b> Evaluates {@code Jminor} causal slices against
+ *       declared command/config behavior to surface semantic/guard-polarity mismatches as
  *       {@link ConfidenceTier#ADVISORY} findings, rejecting any finding that cites a hallucinated
  *       symbol outside {@link CausalGraphReport#closedWorldSymbols()}.</li>
  * </ol>
@@ -110,14 +110,14 @@ public final class LlmCausalChainAuditor {
     }
 
     /**
-     * Enriches deterministic {@link ClaimDeliveryFinding} records with AST-grounded LLM root-cause
+     * Enriches deterministic {@link CausalFinding} records with AST-grounded LLM root-cause
      * explanations when {@link Provider} is not {@link Provider#OFF}.
      *
      * @param report      causal graph report containing slices and closed-world symbol set
      * @param maxFindings maximum number of findings to enrich
      * @return list of findings (with {@code llmExplanation} populated on grounded successes)
      */
-    public List<ClaimDeliveryFinding> enrichFindingsWithExplanations(
+    public List<CausalFinding> enrichFindingsWithExplanations(
             CausalGraphReport report,
             int maxFindings
     ) {
@@ -125,11 +125,11 @@ public final class LlmCausalChainAuditor {
         if (config.provider() == Provider.OFF || report.findings().isEmpty() || maxFindings <= 0) {
             return report.findings();
         }
-        List<ClaimDeliveryFinding> enriched = new ArrayList<>(report.findings().size());
+        List<CausalFinding> enriched = new ArrayList<>(report.findings().size());
         int count = 0;
-        for (ClaimDeliveryFinding f : report.findings()) {
+        for (CausalFinding f : report.findings()) {
             if (count < maxFindings && f.llmExplanation().isEmpty()) {
-                String explanation = explainClaimFinding(f, report);
+                String explanation = explainCausalFinding(f, report);
                 if (!explanation.isEmpty()) {
                     enriched.add(f.withLlmExplanation(explanation));
                     count++;
@@ -204,14 +204,14 @@ public final class LlmCausalChainAuditor {
     }
 
     /**
-     * Runs an opt-in second-order semantic claim audit over the extracted {@link CausalChainSlice}s,
+     * Runs an opt-in second-order semantic causal audit over the extracted {@link CausalChainSlice}s,
      * returning only findings that pass the closed-world AST symbol grounding gate.
      *
      * @param report    causal graph report
      * @param maxChains maximum number of entry chains to audit
      * @return list of {@link ConfidenceTier#ADVISORY} semantic findings
      */
-    public List<ClaimDeliveryFinding> auditCausalChainsWithLlm(
+    public List<CausalFinding> auditCausalChainsWithLlm(
             CausalGraphReport report,
             int maxChains
     ) {
@@ -219,7 +219,7 @@ public final class LlmCausalChainAuditor {
         if (config.provider() == Provider.OFF || report.entryChains().isEmpty() || maxChains <= 0) {
             return List.of();
         }
-        List<ClaimDeliveryFinding> advisoryFindings = new ArrayList<>();
+        List<CausalFinding> advisoryFindings = new ArrayList<>();
         int audited = 0;
         int seq = report.findings().size() + 1;
 
@@ -230,11 +230,11 @@ public final class LlmCausalChainAuditor {
             audited++;
             String prompt = "TARGET: " + report.displayName() + "\n"
                     + slice.toJminorPromptBlock() + "\n"
-                    + "Check if the causal chain contradicts its CLAIM (e.g. inverted guard, missing sink, or broken continuation).\n"
+                    + "Check if the causal chain contradicts its DECLARED behavior (e.g. inverted guard, missing sink, or broken continuation).\n"
                     + "If intact, return {\"status\":\"OK\"}.\n"
                     + "If broken, return {\"status\":\"BUG\",\"entrySymbol\":\""
                     + LlmConfigDocSynthesizer.stripPackagePrefixes(slice.entrySymbol())
-                    + "\",\"claims\":\"...\",\"doesNotDeliver\":\"...\",\"clearsWhen\":\"...\"} citing only symbols from the chain.";
+                    + "\",\"declaredSurface\":\"...\",\"causalDefect\":\"...\",\"clearsWhen\":\"...\"} citing only symbols from the chain.";
             try {
                 String raw = invokeProvider(
                         "You are a bytecode causal-chain verifier. Only report a BUG when the provided Jminor slice proves a contradiction. "
@@ -245,27 +245,27 @@ public final class LlmCausalChainAuditor {
                 if (!"BUG".equalsIgnoreCase(parsed.getOrDefault("status", ""))) {
                     continue;
                 }
-                String claims = parsed.getOrDefault("claims", slice.advertisedClaim()).trim();
-                String doesNotDeliver = parsed.getOrDefault("doesNotDeliver", "").trim();
+                String declaredSurface = parsed.getOrDefault("declaredSurface", slice.declaredBehavior()).trim();
+                String causalDefect = parsed.getOrDefault("causalDefect", "").trim();
                 String clearsWhen = parsed.getOrDefault("clearsWhen", "").trim();
-                String combinedText = claims + " " + doesNotDeliver + " " + clearsWhen;
-                if (doesNotDeliver.isEmpty()
+                String combinedText = declaredSurface + " " + causalDefect + " " + clearsWhen;
+                if (causalDefect.isEmpty()
                         || !passesClosedWorldSymbolGate(combinedText, report.closedWorldSymbols())) {
                     continue;
                 }
-                advisoryFindings.add(new ClaimDeliveryFinding(
-                        "CLAIM-LLM-" + (seq++),
+                advisoryFindings.add(new CausalFinding(
+                        "CAUSAL-LLM-" + (seq++),
                         report.displayName(),
                         2,
-                        FindingKind.CLAIM_LLM_SEMANTIC_MISMATCH,
+                        FindingKind.CAUSAL_LLM_SEMANTIC_MISMATCH,
                         ConfidenceTier.ADVISORY,
                         55,
                         slice.entrySymbol(),
-                        claims,
-                        "[ADVISORY / LLM-HYPOTHESIS] " + doesNotDeliver,
+                        declaredSurface,
+                        "[ADVISORY / LLM-HYPOTHESIS] " + causalDefect,
                         clearsWhen.isEmpty() ? ("Inspect " + slice.entrySymbol()) : clearsWhen,
                         slice.hopTrace(),
-                        doesNotDeliver
+                        causalDefect
                 ));
             } catch (IOException | RuntimeException e) {
                 LOGGER.log(Level.FINE, "[LeafConfig] LLM causal chain audit fallback for " + slice.entrySymbol() + ": " + e.getMessage(), e);
@@ -317,12 +317,12 @@ public final class LlmCausalChainAuditor {
         return true;
     }
 
-    private String explainClaimFinding(ClaimDeliveryFinding finding, CausalGraphReport report) {
+    private String explainCausalFinding(CausalFinding finding, CausalGraphReport report) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("TARGET: ").append(report.displayName()).append('\n');
         prompt.append("FINDING_KIND: ").append(finding.kind().name()).append(" (Order ").append(finding.order()).append(")\n");
-        prompt.append("CLAIMS: ").append(finding.claims()).append('\n');
-        prompt.append("DOES_NOT_DELIVER: ").append(finding.doesNotDeliver()).append('\n');
+        prompt.append("DECLARED_SURFACE: ").append(finding.declaredSurface()).append('\n');
+        prompt.append("CAUSAL_DEFECT: ").append(finding.causalDefect()).append('\n');
         prompt.append("CAUSAL_CHAIN: ").append(String.join(" -> ", finding.causalChainSteps())).append('\n');
         prompt.append("Return compact JSON: {\"explanation\": \"1-sentence AST-grounded explanation citing only symbols from the prompt\"}");
         try {
@@ -336,7 +336,7 @@ public final class LlmCausalChainAuditor {
                 return exp;
             }
         } catch (IOException | RuntimeException e) {
-            LOGGER.log(Level.FINE, "[LeafConfig] LLM claim finding explanation fallback for " + finding.findingId() + ": " + e.getMessage(), e);
+            LOGGER.log(Level.FINE, "[LeafConfig] LLM causal finding explanation fallback for " + finding.findingId() + ": " + e.getMessage(), e);
         }
         return "";
     }

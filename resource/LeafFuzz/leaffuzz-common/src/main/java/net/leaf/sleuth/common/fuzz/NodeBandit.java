@@ -186,9 +186,9 @@ public final class NodeBandit {
     private final List<ArmKey> defaultArms = new ArrayList<>();
     private final List<ArmKey> opArms = new ArrayList<>();
     private final Set<String> seenNoveltyTokens = new LinkedHashSet<>();
-    private int totalPulls;
-    private int defaultPulls;
-    private int opPulls;
+    private volatile int totalPulls;
+    private volatile int defaultPulls;
+    private volatile int opPulls;
 
     public NodeBandit(CommandTree tree) {
         this(tree, List.of("default"), DEFAULT_BUDGET_SHARE, DEFAULT_EXPLORATION_C, DEFAULT_FOLLOW_UP_SHAPES, new Random(1L));
@@ -232,7 +232,7 @@ public final class NodeBandit {
      *
      * @return chosen {@code (nodeId, followUpShape)} arm
      */
-    public ArmKey selectArm() {
+    public synchronized ArmKey selectArm() {
         String stratum;
         List<ArmKey> pool;
         if (!defaultArms.isEmpty() && !opArms.isEmpty()) {
@@ -292,7 +292,7 @@ public final class NodeBandit {
      * @param feedback      episode telemetry feedback
      * @return computed scalar reward added to the arm
      */
-    public double update(String nodeId, String followUpShape, EpisodeFeedback feedback) {
+    public synchronized double update(String nodeId, String followUpShape, EpisodeFeedback feedback) {
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(followUpShape, "followUpShape");
         Objects.requireNonNull(feedback, "feedback");

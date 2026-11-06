@@ -1,6 +1,8 @@
 package net.leaf.fuzz.common.cli;
 
 import net.leaf.fuzz.common.LeafFuzzScorecardReport.Verdict;
+import net.leaf.fuzz.common.cli.LeafFuzzBatchTriageRunner.TriageBatchReport;
+import net.leaf.fuzz.common.cli.LeafFuzzBatchTriageRunner.TriageConfig;
 import net.leaf.fuzz.common.cli.LeafFuzzTcpSwarmClient.SwarmConfig;
 import net.leaf.fuzz.common.cli.LeafFuzzTcpSwarmClient.SwarmReadinessReport;
 
@@ -67,10 +69,11 @@ public final class LeafFuzzStandaloneCli {
                 yield 0;
             }
             case "-v", "--version", "version" -> {
-                out.println("LeafFuzz Standalone Swarm & Production Readiness CLI v0.1.0");
+                out.println("LeafFuzz Standalone Swarm & Production Readiness CLI v0.1.1");
                 yield 0;
             }
             case "extract-mineflayer" -> handleExtractMineflayer(args, out, err);
+            case "triage", "scan" -> handleTriage(args, out, err);
             case "swarm" -> handleSwarm(args, out, err);
             default -> {
                 if (sub.startsWith("--")) {
@@ -214,13 +217,115 @@ public final class LeafFuzzStandaloneCli {
         return report.verdict() == Verdict.FAIL ? 1 : 0;
     }
 
-    private static void printUsage(PrintStream out) {
-        out.println("LeafFuzz Standalone Swarm & Server Production Readiness CLI");
-        out.println("Usage:");
-        out.println("  java -jar LeafFuzz.jar swarm [--host 127.0.0.1] [--port 25565] [--players auto|100] [--duration-sec 30] [--report report.md]");
-        out.println("  java -jar LeafFuzz.jar extract-mineflayer [--out ./bench-swarm.js]");
-        out.println("  java -jar LeafFuzz.jar --version");
-    }
+      private static int handleTriage(String[] args, PrintStream out, PrintStream err) {
+          Path inputDir = null;
+          int maxPass = LeafFuzzBatchTriageRunner.DEFAULT_MAX_PASS;
+          int threads = Math.max(1, Math.min(16, Runtime.getRuntime().availableProcessors()));
+          boolean strictS004S005 = true;
+          boolean failOnReject = false;
+          Path jsonOut = null;
+          Path csvOut = null;
+          Path mdOut = null;
+
+          for (int i = 1; i < args.length; i++) {
+              String arg = args[i];
+              if (("--input-dir".equals(arg) || "-i".equals(arg) || "--jar".equals(arg) || "--input-jar".equals(arg))
+                      && i + 1 < args.length) {
+                  inputDir = Path.of(args[++i]);
+              } else if (arg.startsWith("--input-dir=")) {
+                  inputDir = Path.of(arg.substring("--input-dir=".length()));
+              } else if (arg.startsWith("--jar=")) {
+                  inputDir = Path.of(arg.substring("--jar=".length()));
+              } else if (arg.startsWith("--input-jar=")) {
+                  inputDir = Path.of(arg.substring("--input-jar=".length()));
+              } else if ("--max-pass".equals(arg) && i + 1 < args.length) {
+                  maxPass = parseIntOrDefault(args[++i], LeafFuzzBatchTriageRunner.DEFAULT_MAX_PASS);
+              } else if (arg.startsWith("--max-pass=")) {
+                  maxPass = parseIntOrDefault(
+                          arg.substring("--max-pass=".length()),
+                          LeafFuzzBatchTriageRunner.DEFAULT_MAX_PASS
+                  );
+              } else if (("--threads".equals(arg) || "-t".equals(arg)) && i + 1 < args.length) {
+                  threads = parseIntOrDefault(args[++i], threads);
+              } else if (arg.startsWith("--threads=")) {
+                  threads = parseIntOrDefault(arg.substring("--threads=".length()), threads);
+              } else if ("--out-json".equals(arg) && i + 1 < args.length) {
+                  jsonOut = Path.of(args[++i]);
+              } else if (arg.startsWith("--out-json=")) {
+                  jsonOut = Path.of(arg.substring("--out-json=".length()));
+              } else if ("--out-csv".equals(arg) && i + 1 < args.length) {
+                  csvOut = Path.of(args[++i]);
+              } else if (arg.startsWith("--out-csv=")) {
+                  csvOut = Path.of(arg.substring("--out-csv=".length()));
+              } else if (("--out-md".equals(arg) || "--report".equals(arg)) && i + 1 < args.length) {
+                  mdOut = Path.of(args[++i]);
+              } else if (arg.startsWith("--out-md=")) {
+                  mdOut = Path.of(arg.substring("--out-md=".length()));
+              } else if ("--strict-s004-s005".equals(arg)) {
+                  if (i + 1 < args.length && ("true".equalsIgnoreCase(args[i + 1]) || "false".equalsIgnoreCase(args[i + 1]))) {
+                      strictS004S005 = Boolean.parseBoolean(args[++i]);
+                  } else {
+                      strictS004S005 = true;
+                  }
+              } else if ("--no-strict-s004-s005".equals(arg)) {
+                  strictS004S005 = false;
+              } else if (arg.startsWith("--strict-s004-s005=")) {
+                  strictS004S005 = Boolean.parseBoolean(arg.substring("--strict-s004-s005=".length()));
+              } else if ("--fail-on-reject".equals(arg)) {
+                  if (i + 1 < args.length && ("true".equalsIgnoreCase(args[i + 1]) || "false".equalsIgnoreCase(args[i + 1]))) {
+                      failOnReject = Boolean.parseBoolean(args[++i]);
+                  } else {
+                      failOnReject = true;
+                  }
+              } else if (arg.startsWith("--fail-on-reject=")) {
+                  failOnReject = Boolean.parseBoolean(arg.substring("--fail-on-reject=".length()));
+              }
+          }
+
+          if (inputDir == null) {
+              err.println("Missing required --input-dir <directory> or --jar <file.jar> argument for triage.");
+              printUsage(out);
+              return 2;
+          }
+
+          TriageConfig config = new TriageConfig(
+                  inputDir,
+                  maxPass,
+                  threads,
+                  strictS004S005,
+                  jsonOut,
+                  csvOut,
+                  mdOut
+          );
+          try {
+              TriageBatchReport report = LeafFuzzBatchTriageRunner.runBatchTriage(config);
+              out.printf(
+                      Locale.ROOT,
+                      "Pass 1 Static Batch Triage Complete: scanned=%d shortlist_pass=%d deferred_rank=%d rejected=%d elapsed=%dms%n",
+                      report.totalScanned(),
+                      report.shortlistPassCount(),
+                      report.deferredRankCount(),
+                      report.rejectedCount(),
+                      report.elapsedMillis()
+              );
+              if (failOnReject && report.rejectedCount() > 0) {
+                  return 3;
+              }
+              return 0;
+          } catch (IOException e) {
+              err.println("Batch triage failed: " + e.getMessage());
+              return 1;
+          }
+      }
+
+      private static void printUsage(PrintStream out) {
+          out.println("LeafFuzz Standalone Swarm & Server Production Readiness CLI");
+          out.println("Usage:");
+          out.println("  java -jar LeafFuzz.jar triage (--input-dir <dir> | --jar <file.jar>) [--max-pass 200] [--threads <n>] [--fail-on-reject] [--out-json triage.json] [--out-csv triage.csv] [--out-md triage.md]");
+          out.println("  java -jar LeafFuzz.jar swarm [--host 127.0.0.1] [--port 25565] [--players auto|100] [--duration-sec 30] [--report report.md]");
+          out.println("  java -jar LeafFuzz.jar extract-mineflayer [--out ./bench-swarm.js]");
+          out.println("  java -jar LeafFuzz.jar --version");
+      }
 
     private static int parseIntOrDefault(String raw, int fallback) {
         if (raw == null || raw.isBlank()) {

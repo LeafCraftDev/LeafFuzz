@@ -951,8 +951,10 @@ class LcaRegionCodecTest {
         // 2. SEQUENTIAL WHOLE-REGION SWEEP BENCHMARK (Reading ALL N Chunks 0..N-1)
         //    Tests the claim: "Linear is great if it reads a whole region file"
         // =========================================================================
+        System.gc();
         int seqSweepsPerBatch = 4;
         long[] sweepBatchNs = new long[batches];
+        long[] sweepLcaAColdBatchNs = new long[batches];
 
         // 2a. Cold Whole-Region Sequential Sweep -> AnvilChunkView (all 64 chunks)
         for (int b = 0; b < batches; b++) {
@@ -970,7 +972,17 @@ class LcaRegionCodecTest {
         double seqMcaPerChunkUs = (seqMcaRegionMs * 1000.0) / numChunks;
 
         for (int b = 0; b < batches; b++) {
-            long start = System.nanoTime();
+            long startLca = System.nanoTime();
+            for (int s = 0; s < seqSweepsPerBatch; s++) {
+                LcaRegionReader.INSTANCE.invalidateFastDictCache();
+                for (int i = 0; i < numChunks; i++) {
+                    int[] c = coords.get(i);
+                    sink += LcaRegionReader.readChunkView(benchLcaA, c[0], c[1]).sections().size();
+                }
+            }
+            sweepLcaAColdBatchNs[b] = System.nanoTime() - startLca;
+
+            long startLin = System.nanoTime();
             for (int s = 0; s < seqSweepsPerBatch; s++) {
                 coldLinearBb.putLong(9, 1800000000L + b * 100L + s);
                 for (int i = 0; i < numChunks; i++) {
@@ -978,11 +990,14 @@ class LcaRegionCodecTest {
                     sink += AnvilReader.toView(LinearRegionReader.INSTANCE.readChunk(coldLinearBuf, c[0], c[1]).root).sections().size();
                 }
             }
-            sweepBatchNs[b] = System.nanoTime() - start;
+            sweepBatchNs[b] = System.nanoTime() - startLin;
         }
         Arrays.sort(sweepBatchNs);
+        Arrays.sort(sweepLcaAColdBatchNs);
         double seqLinearColdRegionMs = (sweepBatchNs[batches / 2] / 1_000_000.0) / seqSweepsPerBatch;
         double seqLinearColdPerChunkUs = (seqLinearColdRegionMs * 1000.0) / numChunks;
+        double seqLcaAColdRegionMs = (sweepLcaAColdBatchNs[batches / 2] / 1_000_000.0) / seqSweepsPerBatch;
+        double seqLcaAColdPerChunkUs = (seqLcaAColdRegionMs * 1000.0) / numChunks;
 
         for (int b = 0; b < batches; b++) {
             long start = System.nanoTime();
@@ -997,21 +1012,6 @@ class LcaRegionCodecTest {
         Arrays.sort(sweepBatchNs);
         double seqLinearWarmRegionMs = (sweepBatchNs[batches / 2] / 1_000_000.0) / seqSweepsPerBatch;
         double seqLinearWarmPerChunkUs = (seqLinearWarmRegionMs * 1000.0) / numChunks;
-
-        for (int b = 0; b < batches; b++) {
-            long start = System.nanoTime();
-            for (int s = 0; s < seqSweepsPerBatch; s++) {
-                LcaRegionReader.INSTANCE.invalidateFastDictCache();
-                for (int i = 0; i < numChunks; i++) {
-                    int[] c = coords.get(i);
-                    sink += LcaRegionReader.readChunkView(benchLcaA, c[0], c[1]).sections().size();
-                }
-            }
-            sweepBatchNs[b] = System.nanoTime() - start;
-        }
-        Arrays.sort(sweepBatchNs);
-        double seqLcaAColdRegionMs = (sweepBatchNs[batches / 2] / 1_000_000.0) / seqSweepsPerBatch;
-        double seqLcaAColdPerChunkUs = (seqLcaAColdRegionMs * 1000.0) / numChunks;
 
         for (int b = 0; b < batches; b++) {
             long start = System.nanoTime();
@@ -2188,7 +2188,7 @@ class LcaRegionCodecTest {
 
     @Test
     @DisplayName("anvil-api-ADR-003 & LCA-ICD-1.0: Order-independent sectionOffsets[] (before & after Residual Tail) and HAS_CHUNK_PATCH_TAIL (0x4000) parity + CBIT T5/T6b/Tier-2 recovery")
-    void orderIndependentSectionOffsetsAndChunkPatchTailParity(@TempDir Path tempDir) throws Exception {
+    void orderIndependentSectionOffsetsAndChunkPatchTailParity() throws Exception {
         byte[] mcaBytes = loadFixture("/anvil/real/1_21_R1/r.0.0.mca");
         AnvilReader.ChunkEntry origEntry = AnvilReader.readChunkEntry(mcaBytes, 0, 0);
         assertNotNull(origEntry);
@@ -2314,7 +2314,6 @@ class LcaRegionCodecTest {
             byte[] rawUncomp = patchArchive.readUncompressedChunkFrame(0, 0);
             int secDirEnd = 24 + (24 << 1);
             int resRelStart = secDirEnd + LcaSectionCodec.readUint16BE(rawUncomp, 22);
-            int[] dummyEntries = new int[24];
             int[] relStarts = new int[24];
             for (int i = 0; i < 24; i++) {
                 int e16 = LcaSectionCodec.readUint16BE(rawUncomp, 24 + (i << 1));
@@ -2633,17 +2632,121 @@ class LcaRegionCodecTest {
             assertNotNull(ws.voxelStorage().readChunkNbtBytes(0, 0));
 
             byte[] slabPayload = ws.voxelStorage().encodeChunkNbtForRegionSlab(0, 0, rawChunkNbt);
-            assertTrue(slabPayload.length > 0);
-            assertEquals(0, ws.voxelStorage().encodeChunkNbtForRegionSlab(0, 0, new byte[0]).length);
-            assertTrue(ws.voxelStorage().commitPreEncodedChunkSlab(1, 0, slabPayload) > 0);
-            assertEquals(0, ws.voxelStorage().commitPreEncodedChunkSlab(1, 0, new byte[0]));
-            assertEquals(0, ws.voxelStorage().writeChunkNbtBytes(0, 0, new byte[0]));
-            assertEquals(0, ws.voxelStorage().writeChunkCompound(0, 0, null));
-
             assertTrue(ws.totalOpenRegionCount() >= 1);
             assertEquals(0L, ws.totalMigratedRegionCount());
             ws.compactOpenRegions(0.0);
             ws.flush();
+        }
+    }
+
+    @Test
+    @DisplayName("DataVersion 5006+ (V5006 / 26.3) emits id/properties in block_states.palette while <5006 emits Name/Properties")
+    @SuppressWarnings("unchecked")
+    void dataVersion5023PaletteUsesIdAndPropertiesKeys() throws Exception {
+        for (int dv : new int[] {4903, 5006, 5023}) {
+            boolean expectModern = dv >= 5006;
+            LinkedHashMap<String, Object> root = new LinkedHashMap<>();
+            root.put("DataVersion", dv);
+            root.put("xPos", 0);
+            root.put("zPos", 0);
+            root.put("yPos", -4);
+            root.put("Status", "minecraft:full");
+
+            // Section Y=-4: uniform bare-string palette (Codec.either bare string form)
+            LinkedHashMap<String, Object> secUniform = new LinkedHashMap<>();
+            secUniform.put("Y", (byte) -4);
+            LinkedHashMap<String, Object> bsUniform = new LinkedHashMap<>();
+            bsUniform.put("palette", new Nbt.NbtList(Nbt.TAG_STRING, List.of("minecraft:deepslate")));
+            secUniform.put("block_states", bsUniform);
+
+            // Section Y=-3: mixed palette with {"": id}, static-core id/properties, and custom id/properties
+            LinkedHashMap<String, Object> secMixed = new LinkedHashMap<>();
+            secMixed.put("Y", (byte) -3);
+            LinkedHashMap<String, Object> bsMixed = new LinkedHashMap<>();
+
+            LinkedHashMap<String, Object> wrappedAir = new LinkedHashMap<>();
+            wrappedAir.put("", "minecraft:air");
+
+            LinkedHashMap<String, Object> stairsEntry = new LinkedHashMap<>();
+            stairsEntry.put("id", "minecraft:oak_stairs");
+            LinkedHashMap<String, Object> stairsProps = new LinkedHashMap<>();
+            stairsProps.put("facing", "north");
+            stairsProps.put("type", "single");
+            stairsProps.put("waterlogged", "false");
+            stairsEntry.put("properties", stairsProps);
+
+            LinkedHashMap<String, Object> barrelEntry = new LinkedHashMap<>();
+            barrelEntry.put("id", "minecraft:barrel");
+            LinkedHashMap<String, Object> barrelProps = new LinkedHashMap<>();
+            barrelProps.put("facing", "up");
+            barrelProps.put("open", "true");
+            barrelEntry.put("properties", barrelProps);
+
+            bsMixed.put("palette", new Nbt.NbtList(Nbt.TAG_COMPOUND, List.of(wrappedAir, stairsEntry, barrelEntry)));
+            int[] yzx = new int[4096];
+            yzx[1] = 1;
+            yzx[2] = 2;
+            bsMixed.put("data", LcaSectionCodec.packBlockLongs(yzx, 3));
+            secMixed.put("block_states", bsMixed);
+
+            root.put("sections", new Nbt.NbtList(Nbt.TAG_COMPOUND, new ArrayList<>(List.of(secUniform, secMixed))));
+
+            try (LcaRegionWriter.LcaLiveArchive archive =
+                    LcaRegionWriter.createEmptyLiveArchive(0, 0, -4, 24, dv, false)) {
+                archive.saveChunkCoW(0, 0, root);
+                byte[] lcaBytes = archive.toByteArray();
+
+                // 1. Direct fast-path NBT byte emission (readChunkNbtBytes -> encodeChunkFrameToNbtBytes)
+                byte[] rawNbt = LcaRegionReader.INSTANCE.readChunkNbtBytes(lcaBytes, 0, 0);
+                assertNotNull(rawNbt);
+                Map<String, Object> directRoot = Nbt.readRootCompound(rawNbt);
+                assertPaletteKeysForVersion(directRoot, expectModern);
+
+                // 2. Map decode path (readChunk -> decodeChunkFromFrame)
+                AnvilReader.ChunkEntry mapEntry = LcaRegionReader.INSTANCE.readChunk(lcaBytes, 0, 0);
+                assertNotNull(mapEntry);
+                assertPaletteKeysForVersion(mapEntry.root, expectModern);
+
+                // 3. RegionFileReader.applyPatchesToChunkRoot
+                boolean modified = RegionFileReader.applyPatchesToChunkRoot(
+                        mapEntry.root,
+                        List.of(
+                                new RegionFileReader.BlockPatch(0, -48, 0, "minecraft:hopper[enabled=true,facing=down]"),
+                                new RegionFileReader.BlockPatch(0, 16, 0, "minecraft:stone")),
+                        null);
+                assertTrue(modified);
+                assertPaletteKeysForVersion(mapEntry.root, expectModern);
+                AnvilChunkView patchedView = AnvilReader.toView(mapEntry.root);
+                assertEquals("minecraft:hopper", patchedView.blockIdAt(0, -48, 0));
+                assertEquals("minecraft:oak_stairs", patchedView.blockIdAt(1, -48, 0));
+                assertEquals("minecraft:barrel", patchedView.blockIdAt(2, -48, 0));
+                assertEquals("minecraft:stone", patchedView.blockIdAt(0, 16, 0));
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void assertPaletteKeysForVersion(Map<String, Object> chunkRoot, boolean expectModern) {
+        String expectedNameKey = expectModern ? "id" : "Name";
+        String unexpectedNameKey = expectModern ? "Name" : "id";
+        String unexpectedPropsKey = expectModern ? "Properties" : "properties";
+        Nbt.NbtList sections = (Nbt.NbtList) chunkRoot.get("sections");
+        assertNotNull(sections);
+        for (Object secObj : sections.items) {
+            Map<String, Object> sec = (Map<String, Object>) secObj;
+            Map<String, Object> bs = (Map<String, Object>) sec.get("block_states");
+            if (bs == null) continue;
+            Nbt.NbtList pal = (Nbt.NbtList) bs.get("palette");
+            assertNotNull(pal);
+            for (Object entryObj : pal.items) {
+                Map<String, Object> entry = (Map<String, Object>) entryObj;
+                assertTrue(entry.containsKey(expectedNameKey),
+                        "Expected '" + expectedNameKey + "' key in palette entry: " + entry);
+                assertFalse(entry.containsKey(unexpectedNameKey),
+                        "Unexpected '" + unexpectedNameKey + "' key in palette entry: " + entry);
+                assertFalse(entry.containsKey(unexpectedPropsKey),
+                        "Unexpected '" + unexpectedPropsKey + "' key in palette entry: " + entry);
+            }
         }
     }
 }

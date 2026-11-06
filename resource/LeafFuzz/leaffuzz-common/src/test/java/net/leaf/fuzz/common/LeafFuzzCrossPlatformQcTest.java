@@ -1,12 +1,12 @@
 package net.leaf.fuzz.common;
 
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalFinding;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalGraphReport;
+import io.github.dailystruggle.bytecode.JarConfigScanner;
 import io.github.dailystruggle.commandsapi.common.CommandsAPI;
 import io.github.dailystruggle.menu.api.BookContrastValidator;
 import io.github.dailystruggle.menu.api.MenuDescriptor;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.CausalGraphReport;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.ClaimDeliveryFinding;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.JarConfigScanner;
 import io.github.dailystruggle.server.api.BookMenuSpec;
 import io.github.dailystruggle.server.api.PlayerLifecycleHook;
 import io.github.dailystruggle.server.api.ServerAccessor;
@@ -482,7 +482,16 @@ class LeafFuzzCrossPlatformQcTest {
                 "Root /fuzz command must expose target=, episodes=, players=, and stage= parameters"
         );
 
-        // Verify bare positional arguments are rejected by CommandsAPI (commands-api-ADR-001 Rule 4 & 6)
+        // Verify bare positional arguments are rejected by CommandsAPI on both 4-arg and 6-arg entry points (commands-api-ADR-001 Rule 4 & 6)
+        java.util.concurrent.CompletableFuture<Boolean> badPositional4Arg = cmd.onCommand(
+                CommandsAPI.serverId,
+                perm -> true,
+                messages::add,
+                new String[]{"check", "NeoQuarry", "16"}
+        );
+        CommandsAPI.execute();
+        assertFalse(badPositional4Arg.join(), "Bare positional tokens without '=' must be rejected by 4-arg TreeCommand.onCommand");
+
         java.util.concurrent.CompletableFuture<Boolean> badPositional = cmd.onCommand(
                 CommandsAPI.serverId,
                 perm -> true,
@@ -493,7 +502,6 @@ class LeafFuzzCrossPlatformQcTest {
         );
         CommandsAPI.execute();
         assertFalse(badPositional.join(), "Bare positional tokens without '=' must be rejected by CommandsAPI");
-
         // Verify root-level parameters `/fuzz target=NeoQuarry episodes=16` delegate directly to checkSub
         java.util.concurrent.CompletableFuture<Boolean> cmdFuture = cmd.onCommand(
                 CommandsAPI.serverId,
@@ -542,7 +550,7 @@ class LeafFuzzCrossPlatformQcTest {
 
         // Verify [FUZZ bit] self-test suite passes 100%
         List<LeafFuzzBitSuite.CheckResult> bitResults = runtime.bitSuite().executeAll();
-        assertEquals(6, bitResults.size());
+        assertEquals(7, bitResults.size());
         assertTrue(bitResults.stream().allMatch(LeafFuzzBitSuite.CheckResult::passed));
 
         // Verify LeafFuzzMenuBuilder produces WCAG 2.1 contrast-compliant Book scorecard and /fuzz report opens it
@@ -656,8 +664,8 @@ class LeafFuzzCrossPlatformQcTest {
     }
 
     @Test
-    @DisplayName("Stage 5: LeafFuzzRuntime & LeafFuzzScorecardReport audit first-order and second-order claim delivery, corroborate hollow commands with Stage 2 telemetry, and pass BookContrastValidator")
-    void stage5ClaimDeliveryAuditAndScorecardIntegration(@TempDir Path tempDir) throws IOException {
+    @DisplayName("Stage 5: LeafFuzzRuntime & LeafFuzzScorecardReport audit first-order and second-order causal invariants, corroborate hollow commands with Stage 2 telemetry, and pass BookContrastValidator")
+    void stage5CausalAuditAndScorecardIntegration(@TempDir Path tempDir) throws IOException {
         List<String> messages = new ArrayList<>();
         AtomicReference<Consumer<UUID>> quitListenerRef = new AtomicReference<>();
         FakeServerAccessor accessor = new FakeServerAccessor(tempDir, messages, quitListenerRef);
@@ -684,18 +692,18 @@ class LeafFuzzCrossPlatformQcTest {
         // Simulate Stage 2 live command execution with 0 teleports and 0 menus
         runtime.recordEpisodeObservation("/unwiredwild", 1, 6, 0, 0, List.of(), 0, 0.0, 6, false);
 
-        List<ClaimDeliveryFinding> findings = runtime.auditClaimDelivery("VibecodedWild");
-        assertFalse(findings.isEmpty(), "Expected Order 1/Order 2 claim delivery findings");
+        List<CausalFinding> findings = runtime.auditCausalDelivery("VibecodedWild");
+        assertFalse(findings.isEmpty(), "Expected Order 1/Order 2 causal audit findings");
 
         LeafFuzzScorecardReport card = runtime.runQcCheck("VibecodedWild", 1);
-        assertFalse(card.claimFindings().isEmpty());
-        assertEquals(LeafFuzzScorecardReport.Verdict.WARN, card.stage5ClaimDeliveryVerdict());
+        assertFalse(card.causalFindings().isEmpty());
+        assertEquals(LeafFuzzScorecardReport.Verdict.WARN, card.stage5CausalAuditVerdict());
 
         String md = card.toMarkdownReport();
-        assertTrue(md.contains("5. Claim & Causal Delivery Audit"));
-        assertTrue(md.contains("Stage 5 Findings: First-Order & Second-Order Claim Delivery"));
-        assertTrue(md.contains("Claims:"));
-        assertTrue(md.contains("Does Not Deliver:"));
+        assertTrue(md.contains("5. Bytecode & Causal Audit"));
+        assertTrue(md.contains("Stage 5 Findings: First-Order & Second-Order Bytecode & Causal Audit"));
+        assertTrue(md.contains("Declared:"));
+        assertTrue(md.contains("Finding:"));
 
         LeafFuzzMenuBuilder menuBuilder = new LeafFuzzMenuBuilder();
         MenuDescriptor book = menuBuilder.buildScorecardBook(card);
@@ -705,17 +713,17 @@ class LeafFuzzCrossPlatformQcTest {
                 () -> "Expected zero WCAG 2.1 contrast violations on Stage 5 book page, got: " + contrastViolations
         );
 
-        // Verify `/fuzz check target=VibecodedWild stage=claims` command
+        // Verify `/fuzz check target=VibecodedWild stage=causal` command
         LeafFuzzCommand cmd = new LeafFuzzCommand("fuzz", accessor, runtime);
         messages.clear();
         assertTrue(cmd.onCommand(
                 UUID.randomUUID(),
-                Map.of("target", List.of("VibecodedWild"), "stage", List.of("claims")),
+                Map.of("target", List.of("VibecodedWild"), "stage", List.of("causal")),
                 null
         ));
         assertTrue(
-                messages.stream().anyMatch(m -> m.contains("Claim Delivery Audit") && m.contains("VibecodedWild")),
-                "Expected stage=claims output in command reply"
+                messages.stream().anyMatch(m -> m.contains("Bytecode & Causal Audit") && m.contains("VibecodedWild")),
+                "Expected stage=causal output in command reply"
         );
         runtime.close();
     }
@@ -913,16 +921,16 @@ class LeafFuzzCrossPlatformQcTest {
 
         // Register a CausalGraphReport carrying white-box BytecodeCommandSchema hints extracted from bytecode:
         // `args[0].equalsIgnoreCase("confirm")` + `Integer.parseInt(args[1])` + `hasPermission("vibewild.admin")`
-        io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.BytecodeCommandSchema schema =
-                new io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.BytecodeCommandSchema(
+        io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.BytecodeCommandSchema schema =
+                new io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.BytecodeCommandSchema(
                         "wild",
                         "dev/vibe/wild/WildCommand#onCommand",
                         List.of("confirm", "reload"),
                         List.of("brigadier:integer"),
                         List.of("vibewild.admin")
                 );
-        io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.CausalGraphReport causalReport =
-                new io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.CausalGraphReport(
+        io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalGraphReport causalReport =
+                new io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalGraphReport(
                         "plugin:vibewild",
                         "VibeWild",
                         List.of(),
@@ -985,6 +993,707 @@ class LeafFuzzCrossPlatformQcTest {
         runtime.close();
     }
 
+    @Test
+    @DisplayName("SliceBitHarness & auditSliceBit: Runs per-slice PBIT/CBIT/IBIT in memory, restores EphemeralSliceClassLoader state, and never mutates .jar files on disk")
+    void sliceBitHarnessRunsInMemoryRestoresStateAndLeavesDiskJarUntouched(@TempDir Path tempDir) throws Exception {
+        Path pluginsDir = Files.createDirectories(tempDir.resolve("plugins"));
+        Path jarPath = pluginsDir.resolve("SliceTarget.jar");
+        byte[] sampleClassBytes;
+        try (var in = FakeBrigadierCommand.class.getResourceAsStream(
+                "/" + FakeBrigadierCommand.class.getName().replace('.', '/') + ".class")) {
+            assertNotNull(in);
+            sampleClassBytes = in.readAllBytes();
+        }
+        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(jarPath.toFile()))) {
+            zos.putNextEntry(new ZipEntry("plugin.yml"));
+            zos.write(("name: SliceTarget\nversion: 1.0.0\nmain: dev.slice.SliceTarget\n"
+                    + "commands:\n  slicetp:\n    description: Teleports player\n").getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+            zos.putNextEntry(new ZipEntry(FakeBrigadierCommand.class.getName().replace('.', '/') + ".class"));
+            zos.write(sampleClassBytes);
+            zos.closeEntry();
+        }
+
+        byte[] shaBefore = SliceBitHarness.computeFileSha256(jarPath);
+        long mtimeBefore = Files.getLastModifiedTime(jarPath).toMillis();
+
+        // 1. Verify EphemeralSliceClassLoader + InMemorySliceBitSession loads class in memory and restores state on close
+        Map<String, Object> baselineAttrs = Map.of("counter", 0, "status", "BASELINE");
+        SliceBitHarness.InMemorySliceBitSession capturedSession;
+        try (SliceBitHarness.InMemorySliceBitSession session = new SliceBitHarness.InMemorySliceBitSession(
+                LeafFuzzCrossPlatformQcTest.class.getClassLoader(),
+                Map.of(FakeBrigadierCommand.class.getName(), sampleClassBytes),
+                baselineAttrs,
+                null
+        )) {
+            capturedSession = session;
+            session.putTemporaryProbeAttribute("counter", 99);
+            session.putTemporaryProbeAttribute("ibit.injected", Boolean.TRUE);
+            assertEquals(99, session.currentAttributes().get("counter"));
+            Class<?> loaded = session.ephemeralLoader().findClass(FakeBrigadierCommand.class.getName());
+            assertNotNull(loaded);
+            assertEquals(FakeBrigadierCommand.class.getName(), loaded.getName());
+        }
+        assertTrue(capturedSession.isRestored(), "Session must mark restored=true after close()");
+        assertTrue(capturedSession.ephemeralLoader().isClosed(), "EphemeralSliceClassLoader must be closed after session exit");
+        assertEquals(baselineAttrs, capturedSession.currentAttributes(), "Working attributes must revert to exact baseline map");
+
+        // 2. Verify LeafFuzzRuntime#auditSliceBit and BitRegistry integration without mutating disk .jar
+        FakeServerAccessor accessor = new FakeServerAccessor(tempDir, new ArrayList<>(), new AtomicReference<>());
+        LeafFuzzRuntime runtime = new LeafFuzzRuntime(accessor);
+        runtime.setOwnershipIndex(JarClassOwnershipIndex.fromJarClassMap(Map.of(
+                "SliceTarget.jar", Set.of(FakeBrigadierCommand.class.getName())
+        )));
+        CausalGraphReport scannedFromJar = BytecodeCausalGraphScanner.scanJar(jarPath);
+        assertNotNull(scannedFromJar);
+        CausalGraphReport syntheticReport = new CausalGraphReport(
+                "plugin:slicetarget",
+                "SliceTarget",
+                List.of(new BytecodeCausalGraphScanner.CausalChainSlice(
+                        BytecodeCausalGraphScanner.EntryPointKind.COMMAND,
+                        FakeBrigadierCommand.class.getName() + "#run",
+                        "/slicetp teleports player",
+                        BytecodeCausalGraphScanner.ListenerRegistrationMode.NOT_APPLICABLE,
+                        "",
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of(FakeBrigadierCommand.class.getName() + "#run"),
+                        Set.of("TELEPORT")
+                )),
+                Map.of(),
+                Map.of(),
+                List.of(),
+                Set.of()
+        );
+        runtime.registerCausalGraphReport("SliceTarget.jar", syntheticReport);
+
+        List<SliceBitHarness.SliceBitReport> sliceReports = runtime.auditSliceBit("SliceTarget");
+        assertEquals(1, sliceReports.size());
+        SliceBitHarness.SliceBitReport sr = sliceReports.get(0);
+        assertTrue(sr.allPassed(), "Clean slice with 0 faults/leaks must pass PBIT, CBIT, and IBIT: " + sr);
+        assertTrue(sr.stateRestored(), "SliceBitReport must confirm in-memory state restoration");
+
+        io.github.dailystruggle.bit.BitRegistry registry = new io.github.dailystruggle.bit.BitRegistry();
+        SliceBitHarness harness = new SliceBitHarness(
+                "SliceTarget",
+                syntheticReport.entryChains().get(0),
+                List.of(),
+                Map.of(FakeBrigadierCommand.class.getName(), sampleClassBytes)
+        );
+        assertTrue(registry.register("leaffuzz:slice:slicetp", harness));
+        assertEquals(io.github.dailystruggle.bit.BitHealth.HEALTHY, registry.getHealthStatus());
+
+        // 3. Verify PBIT invariant attribution for CAUSAL_SHARED_STATE_RACE, CAUSAL_SYNC_MAIN_THREAD_IO, and CAUSAL_UNCLOSED_RESOURCE_LEAK
+        String entrySym = FakeBrigadierCommand.class.getName() + "#run";
+        List<BytecodeCausalGraphScanner.CausalFinding> parityFindings = List.of(
+                new BytecodeCausalGraphScanner.CausalFinding(
+                        "CAUSAL-10",
+                        "SliceTarget",
+                        2,
+                        BytecodeCausalGraphScanner.FindingKind.CAUSAL_SHARED_STATE_RACE,
+                        BytecodeCausalGraphScanner.ConfidenceTier.CONFIRMED,
+                        95,
+                        entrySym,
+                        "Shared state",
+                        "Lock-set mismatch",
+                        "Synchronize",
+                        List.of(entrySym),
+                        ""
+                ),
+                new BytecodeCausalGraphScanner.CausalFinding(
+                        "CAUSAL-11",
+                        "SliceTarget",
+                        2,
+                        BytecodeCausalGraphScanner.FindingKind.CAUSAL_SYNC_MAIN_THREAD_IO,
+                        BytecodeCausalGraphScanner.ConfidenceTier.CONFIRMED,
+                        95,
+                        entrySym,
+                        "Main thread command",
+                        "Synchronous chunk load",
+                        "Use async chunk load",
+                        List.of(entrySym),
+                        ""
+                ),
+                new BytecodeCausalGraphScanner.CausalFinding(
+                        "CAUSAL-12",
+                        "SliceTarget",
+                        2,
+                        BytecodeCausalGraphScanner.FindingKind.CAUSAL_UNCLOSED_RESOURCE_LEAK,
+                        BytecodeCausalGraphScanner.ConfidenceTier.CONFIRMED,
+                        95,
+                        entrySym,
+                        "Resource allocation",
+                        "Unclosed FileOutputStream",
+                        "Use try-with-resources",
+                        List.of(entrySym),
+                        ""
+                )
+        );
+        SliceBitHarness parityHarness = new SliceBitHarness(
+                "SliceTarget",
+                syntheticReport.entryChains().get(0),
+                parityFindings,
+                Map.of(FakeBrigadierCommand.class.getName(), sampleClassBytes)
+        );
+        SliceBitHarness.SliceBitReport parityBitReport = parityHarness.executeFullSliceBit(List.of(), List.of(), 1, 1);
+        assertFalse(parityBitReport.pbitResult().passed(), "PBIT must fail when parity findings are present");
+        assertTrue(parityBitReport.violatedInvariants().contains("CAUSAL-SHARED-STATE-RACE"));
+        assertTrue(parityBitReport.violatedInvariants().contains("S-005-SYNC-MAIN-IO"));
+        assertTrue(parityBitReport.violatedInvariants().contains("S-002-RESOURCE-LEAK"));
+
+        byte[] shaAfter = SliceBitHarness.computeFileSha256(jarPath);
+        long mtimeAfter = Files.getLastModifiedTime(jarPath).toMillis();
+        assertTrue(java.util.Arrays.equals(shaBefore, shaAfter), "Target .jar SHA-256 on disk must remain 100% identical");
+        assertEquals(mtimeBefore, mtimeAfter, "Target .jar mtime on disk must remain untouched");
+        runtime.close();
+    }
+
+    @Test
+    @DisplayName("commands-api-ADR-001 & leaffuzz-ADR-001: LeafFuzzCommand enforces pure CommandsAPI structure without String[] interception, full tab completion, and execution of all clickable book/chat commands")
+    void leafFuzzCommandTreeTabCompletionAndClickableCommandExecution(@TempDir Path tempDir) throws Exception {
+        // 1. Structural guard: LeafFuzzCommand must not declare any method intercepting raw String[] args
+        for (java.lang.reflect.Method m : LeafFuzzCommand.class.getDeclaredMethods()) {
+            boolean hasStringArrayParam = java.util.Arrays.stream(m.getParameterTypes())
+                    .anyMatch(pt -> pt == String[].class);
+            assertFalse(
+                    hasStringArrayParam,
+                    () -> "LeafFuzzCommand must rely on pure TreeCommand (CommandsAPI) dispatch without raw String[] interception: " + m
+            );
+        }
+
+        Path modsDir = Files.createDirectories(tempDir.resolve("mods"));
+        createSyntheticJar(
+                modsDir.resolve("NeoQuarry.jar"),
+                "META-INF/neoforge.mods.toml",
+                "modLoader=\"javafml\"\n[[mods]]\nmodId=\"NeoQuarry\"\n",
+                List.of("dev/example/neoquarry/QuarryTicker.class", "dev/example/neoquarry/QuarrySession.class")
+        );
+
+        List<String> messages = new ArrayList<>();
+        AtomicReference<Consumer<UUID>> quitListenerRef = new AtomicReference<>();
+        FakeServerAccessor accessor = new FakeServerAccessor(tempDir, messages, quitListenerRef);
+        LeafFuzzRuntime runtime = new LeafFuzzRuntime(accessor);
+        runtime.load();
+
+        RawCommandNode speedArg = new RawCommandNode(
+                "speed",
+                "argument",
+                "brigadier:integer",
+                Map.of("min", 1, "max", 512),
+                true,
+                null,
+                null,
+                "NeoQuarry.jar",
+                List.of()
+        );
+        RawCommandNode exposedReload = new RawCommandNode(
+                "reload",
+                "literal",
+                null,
+                Map.of(),
+                true,
+                null,
+                null,
+                "NeoQuarry.jar",
+                List.of()
+        );
+        RawCommandNode quarryRoot = new RawCommandNode(
+                "quarry",
+                "literal",
+                null,
+                Map.of(),
+                false,
+                null,
+                null,
+                "NeoQuarry.jar",
+                List.of(speedArg, exposedReload)
+        );
+        runtime.setPlatformCommandGraphSupplier(() -> Map.of(
+                "default", List.of(quarryRoot),
+                "op", List.of(quarryRoot)
+        ));
+        runtime.setCustomEpisodeRunner(actions -> {
+            runtime.recordEpisodeObservation("/quarry 256", 1, 1, 1, 1, List.of("QuarryGui"), 1, 32.0, 1, false);
+            for (EpisodeAction act : actions) {
+                if (act.commandLine().contains("256") || act.commandLine().contains("512")) {
+                    runtime.faultOracle().recordSlowTickStack(
+                            150.0,
+                            new StackTraceElement[]{
+                                    new StackTraceElement("dev.example.neoquarry.QuarryTicker", "tickQuarry", "QuarryTicker.java", 88)
+                            },
+                            0L
+                    );
+                    return EpisodeOutcome.fault(
+                            "stall:dev.example.neoquarry.QuarryTicker.tickQuarry",
+                            "NeoQuarry.jar",
+                            10.0,
+                            150.0,
+                            List.of("dev.example.neoquarry.QuarryTicker.tickQuarry")
+                    );
+                }
+            }
+            return EpisodeOutcome.clean();
+        });
+        runtime.start();
+        runtime.setOwnershipIndex(JarClassOwnershipIndex.scanArchiveDirectories(List.of(modsDir), List.of("leaffuzz")));
+        // 2. Command tree hierarchy & parameter definitions across /fuzz, /leaffuzz, /qc, and blank fallback
+        LeafFuzzCommand defaultNameCmd = new LeafFuzzCommand("   ", accessor, runtime);
+        assertEquals("fuzz", defaultNameCmd.name());
+
+        LeafFuzzCommand fuzzCmd = new LeafFuzzCommand("fuzz", accessor, runtime);
+        LeafFuzzCommand leafFuzzCmd = new LeafFuzzCommand("leaffuzz", accessor, runtime);
+        LeafFuzzCommand qcCmd = new LeafFuzzCommand("qc", accessor, runtime);
+        Map<String, LeafFuzzCommand> commandRoots = Map.of(
+                "fuzz", fuzzCmd,
+                "leaffuzz", leafFuzzCmd,
+                "qc", qcCmd
+        );
+
+        for (Map.Entry<String, LeafFuzzCommand> rootEntry : commandRoots.entrySet()) {
+            LeafFuzzCommand root = rootEntry.getValue();
+            assertEquals(rootEntry.getKey(), root.name());
+            assertEquals("leaffuzz.admin", root.permission());
+            assertFalse(root.description().isBlank());
+            assertEquals(null, root.parent());
+            assertEquals(0L, root.avgTime());
+            assertEquals(Set.of("CHECK", "REPORT", "RESET", "TEST", "RELOAD"), root.getCommandLookup().keySet());
+            assertEquals(Set.of("target", "episodes", "players", "stage"), root.getParameterLookup().keySet());
+
+            for (Map.Entry<String, io.github.dailystruggle.commandsapi.common.CommandsAPICommand> subEntry : root.getCommandLookup().entrySet()) {
+                io.github.dailystruggle.commandsapi.common.CommandsAPICommand sub = subEntry.getValue();
+                assertNotNull(sub);
+                assertEquals(subEntry.getKey(), sub.name().toUpperCase(Locale.ROOT));
+                assertEquals("leaffuzz.admin", sub.permission());
+                assertFalse(sub.description().isBlank());
+                assertEquals(root, sub.parent());
+                assertEquals(0L, sub.avgTime());
+                assertTrue(sub instanceof io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand);
+                io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand subTree =
+                        (io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand) sub;
+                assertTrue(subTree.getCommandLookup().isEmpty(), "Leaf subcommands must have no nested children");
+            }
+            io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand checkNode =
+                    (io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand) root.getCommandLookup().get("CHECK");
+            assertEquals(Set.of("target", "episodes", "players", "stage"), checkNode.getParameterLookup().keySet());
+
+            io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand resetNode =
+                    (io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand) root.getCommandLookup().get("RESET");
+            assertEquals(Set.of("scope"), resetNode.getParameterLookup().keySet());
+
+            for (String noParamSub : List.of("REPORT", "TEST", "RELOAD")) {
+                io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand leaf =
+                        (io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand) root.getCommandLookup().get(noParamSub);
+                assertTrue(leaf.getParameterLookup().isEmpty());
+            }
+        }
+
+        UUID playerId = UUID.fromString("00000000-0000-0000-0000-000000000042");
+
+        // 3. Reject bare positional tokens on BOTH 4-arg and 6-arg onCommand overloads, plus bad parameters & permissions
+        for (String[] positionalArgs : List.of(
+                new String[]{"NeoQuarry"},
+                new String[]{"check", "NeoQuarry"},
+                new String[]{"check", "NeoQuarry", "16"},
+                new String[]{"reset", "faults"}
+        )) {
+            messages.clear();
+            java.util.concurrent.CompletableFuture<Boolean> res4 = fuzzCmd.onCommand(
+                    playerId, perm -> true, messages::add, positionalArgs
+            );
+            CommandsAPI.execute();
+            assertFalse(res4.join(), () -> "4-arg onCommand must reject positional args: " + java.util.Arrays.toString(positionalArgs));
+            assertTrue(messages.stream().anyMatch(m -> m.contains("Unknown subcommand")), () -> "Expected invalid-command message, got: " + messages);
+
+            messages.clear();
+            java.util.concurrent.CompletableFuture<Boolean> res6 = fuzzCmd.onCommand(
+                    playerId, perm -> true, messages::add, positionalArgs, 0, Map.of()
+            );
+            CommandsAPI.execute();
+            assertFalse(res6.join(), () -> "6-arg onCommand must reject positional args: " + java.util.Arrays.toString(positionalArgs));
+            assertTrue(messages.stream().anyMatch(m -> m.contains("Unknown subcommand")), () -> "Expected invalid-command message, got: " + messages);
+        }
+
+        for (String[] malformedParamArgs : List.of(
+                new String[]{"check", "unknown=value"},
+                new String[]{"check", "target="},
+                new String[]{"unknown=value"}
+        )) {
+            messages.clear();
+            java.util.concurrent.CompletableFuture<Boolean> res = fuzzCmd.onCommand(
+                    playerId, perm -> true, messages::add, malformedParamArgs
+            );
+            CommandsAPI.execute();
+            assertFalse(res.join());
+            assertTrue(messages.stream().anyMatch(m -> m.contains("Invalid parameter")), () -> "Expected badParameter message, got: " + messages);
+        }
+
+        for (String[] badValueArgs : List.of(
+                new String[]{"check", "episodes=0"},
+                new String[]{"check", "episodes=100001"},
+                new String[]{"check", "episodes=abc"},
+                new String[]{"check", "players=0"},
+                new String[]{"check", "players=501"},
+                new String[]{"check", "players=invalid"},
+                new String[]{"check", "stage=bogus"},
+                new String[]{"reset", "scope=bogus"}
+        )) {
+            messages.clear();
+            java.util.concurrent.CompletableFuture<Boolean> badRes =
+                    fuzzCmd.onCommand(playerId, perm -> true, messages::add, badValueArgs);
+            CommandsAPI.execute();
+            assertFalse(badRes.join(), () -> "Invalid parameter value must return false: " + java.util.Arrays.toString(badValueArgs));
+            assertTrue(
+                    messages.stream().anyMatch(m -> m.contains("Invalid parameter")),
+                    () -> "Expected badParameter message for " + java.util.Arrays.toString(badValueArgs) + ", got: " + messages
+            );
+        }
+        // Permission denial on root and subcommands
+        for (String[] deniedArgs : List.of(
+                new String[0],
+                new String[]{"check", "target=NeoQuarry"},
+                new String[]{"report"},
+                new String[]{"reset"},
+                new String[]{"test"},
+                new String[]{"reload"}
+        )) {
+            messages.clear();
+            java.util.concurrent.CompletableFuture<Boolean> denied = fuzzCmd.onCommand(
+                    playerId, perm -> false, messages::add, deniedArgs
+            );
+            CommandsAPI.execute();
+            assertFalse(denied.join());
+            assertTrue(messages.stream().anyMatch(m -> m.contains("do not have permission")), () -> "Expected noPermission message, got: " + messages);
+        }
+
+        // Help output on root and all 5 subcommands
+        for (String[] helpArgs : List.of(
+                new String[]{"help"},
+                new String[]{"check", "help"},
+                new String[]{"report", "help"},
+                new String[]{"reset", "help"},
+                new String[]{"test", "help"},
+                new String[]{"reload", "help"}
+        )) {
+            messages.clear();
+            fuzzCmd.onCommand(playerId, perm -> true, messages::add, helpArgs);
+            CommandsAPI.execute();
+            assertTrue(messages.stream().anyMatch(m -> m.contains("Command: ")), () -> "Expected help output for " + java.util.Arrays.toString(helpArgs) + ", got: " + messages);
+        }
+
+        // 4. Tab completion across root, subcommands, parameter keys/values, comma-lists, permissions, and Brigadier bridge
+        List<String> rootTab = fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{""});
+        assertEquals(
+                Set.of("check", "report", "reset", "test", "reload", "target=", "episodes=", "players=", "stage=", "help"),
+                Set.copyOf(rootTab)
+        );
+        assertEquals(Set.of("report", "reset", "reload"), Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"re"})));
+        assertEquals(List.of("check"), fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"c"}));
+        assertEquals(Set.of("test", "target="), Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"t"})));
+
+        List<String> targetTab = fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"target="});
+        assertTrue(targetTab.containsAll(List.of("target=all", "target=NeoQuarry", "target=NeoQuarry.jar")), "Expected indexed targets in target= completion: " + targetTab);
+
+        List<String> chainedTargetTab = fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"target=NeoQuarry,"});
+        assertTrue(chainedTargetTab.contains("target=NeoQuarry,all"));
+        assertFalse(chainedTargetTab.contains("target=NeoQuarry,NeoQuarry"));
+
+        assertEquals(
+                Set.of("episodes=24", "episodes=100", "episodes=250", "episodes=1000", "episodes=5000", "episodes=7200"),
+                Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"episodes="}))
+        );
+        assertEquals(
+                Set.of("players=auto", "players=ramp", "players=1", "players=10", "players=25", "players=50", "players=100", "players=200"),
+                Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"players="}))
+        );
+        assertEquals(
+                Set.of("stage=all", "stage=commands", "stage=fuzz", "stage=faults", "stage=leaks", "stage=causal", "stage=snapshot"),
+                Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"stage="}))
+        );
+
+        List<String> afterRootParamTab = fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"target=NeoQuarry", ""});
+        assertFalse(afterRootParamTab.contains("target="), "Already-used parameter must not be suggested again");
+        assertTrue(afterRootParamTab.containsAll(List.of("episodes=", "players=", "stage=")));
+
+        assertEquals(
+                Set.of("target=", "episodes=", "players=", "stage=", "help"),
+                Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"check", ""}))
+        );
+        assertEquals(
+                Set.of("stage=all", "stage=commands", "stage=fuzz", "stage=faults", "stage=leaks", "stage=causal", "stage=snapshot"),
+                Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"check", "stage="}))
+        );
+        assertEquals(List.of("stage=causal"), fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"check", "stage=ca"}));
+        assertEquals(List.of("players=ramp"), fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"check", "players=r"}));
+        assertEquals(
+                Set.of("episodes=", "players=", "stage=", "help"),
+                Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"check", "target=NeoQuarry", ""}))
+        );
+
+        assertEquals(Set.of("scope=", "help"), Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"reset", ""})));
+        assertEquals(
+                Set.of("scope=all", "scope=faults", "scope=leaks", "scope=campaign"),
+                Set.copyOf(fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"reset", "scope="}))
+        );
+        assertEquals(List.of("scope=campaign"), fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"reset", "scope=ca"}));
+        assertEquals(List.of("help"), fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"report", ""}));
+        assertEquals(List.of("help"), fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"test", ""}));
+        assertEquals(List.of("help"), fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"reload", ""}));
+
+        // Permission-denied tab completion must not leak admin subcommands or parameters
+        assertEquals(List.of("help"), fuzzCmd.onTabComplete(playerId, perm -> false, new String[]{""}));
+        assertEquals(List.of("help"), fuzzCmd.onTabComplete(playerId, perm -> false, new String[]{"check", ""}));
+        assertEquals(List.of("help"), fuzzCmd.onTabComplete(playerId, perm -> false, new String[]{"reset", ""}));
+
+        // Brigadier bridge tab completion & execution parity
+        io.github.dailystruggle.commandsapi.brigadier.BrigadierBridgeContext<UUID> brigCtx =
+                new io.github.dailystruggle.commandsapi.brigadier.BrigadierBridgeContext<>(
+                        id -> id,
+                        (id, perm) -> true,
+                        (id, msg) -> messages.add(msg)
+                );
+        com.mojang.brigadier.CommandDispatcher<UUID> brigDispatcher = new com.mojang.brigadier.CommandDispatcher<>();
+        for (LeafFuzzCommand root : commandRoots.values()) {
+            brigDispatcher.register(io.github.dailystruggle.commandsapi.brigadier.BrigadierCommandAdapter.toBrigadier(root, brigCtx));
+        }
+
+        com.mojang.brigadier.ParseResults<UUID> parseRoot = brigDispatcher.parse("fuzz ", playerId);
+        List<String> brigRootSuggestions = brigDispatcher.getCompletionSuggestions(parseRoot).join()
+                .getList().stream().map(com.mojang.brigadier.suggestion.Suggestion::getText).toList();
+        assertTrue(brigRootSuggestions.containsAll(List.of("check", "report", "reset", "test", "reload", "target=", "episodes=", "players=", "stage=")));
+
+        com.mojang.brigadier.ParseResults<UUID> parseCheckStage = brigDispatcher.parse("fuzz check stage=", playerId);
+        List<String> brigStageSuggestions = brigDispatcher.getCompletionSuggestions(parseCheckStage).join()
+                .getList().stream().map(com.mojang.brigadier.suggestion.Suggestion::getText).toList();
+        assertTrue(brigStageSuggestions.containsAll(List.of("stage=all", "stage=commands", "stage=fuzz", "stage=faults", "stage=leaks", "stage=causal", "stage=snapshot")));
+
+        com.mojang.brigadier.ParseResults<UUID> parseResetScope = brigDispatcher.parse("fuzz reset scope=", playerId);
+        List<String> brigScopeSuggestions = brigDispatcher.getCompletionSuggestions(parseResetScope).join()
+                .getList().stream().map(com.mojang.brigadier.suggestion.Suggestion::getText).toList();
+        assertTrue(brigScopeSuggestions.containsAll(List.of("scope=all", "scope=faults", "scope=leaks", "scope=campaign")));
+
+        // 5. Execute all clickable commands from Idle Overview Book (before any QC scorecard exists)
+        LeafFuzzRuntime idleRuntime = new LeafFuzzRuntime(accessor);
+        idleRuntime.load();
+        LeafFuzzCommand idleFuzzCmd = new LeafFuzzCommand("fuzz", accessor, idleRuntime);
+        java.util.concurrent.CompletableFuture<Boolean> bareFuzzFuture = idleFuzzCmd.onCommand(
+                playerId, perm -> true, messages::add, new String[0]
+        );
+        CommandsAPI.execute();
+        assertTrue(bareFuzzFuture.join());
+        BookMenuSpec idleBook = accessor.lastRenderedBook();
+        idleRuntime.close();
+        assertNotNull(idleBook, "Bare /fuzz must render the idle overview BookMenuSpec when no scorecard exists");
+        assertTrue(BookContrastValidator.auditBookMenuSpec(idleBook).isEmpty());
+
+        List<BookMenuSpec.Fragment> idleClickables = collectClickableFragments(idleBook);
+        assertEquals(5, idleClickables.size(), "Idle overview book must expose 5 clickable fragments");
+
+        List<String> idleSuggests = idleClickables.stream()
+                .filter(f -> f.clickAction() == BookMenuSpec.ClickAction.SUGGEST_COMMAND)
+                .map(BookMenuSpec.Fragment::clickValue)
+                .toList();
+        assertEquals(List.of("/fuzz check target="), idleSuggests);
+        // Verify the suggested prefix tab-completes and executes once a target is filled in
+        List<String> suggestCompletions = fuzzCmd.onTabComplete(playerId, perm -> true, new String[]{"check", "target="});
+        assertTrue(suggestCompletions.contains("target=NeoQuarry"));
+        assertTrue(dispatchClickableCommand(commandRoots, brigDispatcher, playerId, idleSuggests.get(0) + "NeoQuarry episodes=4", messages));
+
+        List<String> idleRunCmds = idleClickables.stream()
+                .filter(f -> f.clickAction() == BookMenuSpec.ClickAction.RUN_COMMAND)
+                .map(BookMenuSpec.Fragment::clickValue)
+                .toList();
+        assertEquals(
+                List.of(
+                        "/fuzz check players=auto",
+                        "/fuzz check stage=commands target=all",
+                        "/fuzz check stage=leaks",
+                        "/fuzz test"
+                ),
+                idleRunCmds
+        );
+        for (String clickCmd : idleRunCmds) {
+            assertTrue(
+                    dispatchClickableCommand(commandRoots, brigDispatcher, playerId, clickCmd, messages),
+                    () -> "Idle book clickable RUN_COMMAND failed to execute: " + clickCmd
+            );
+        }
+
+        // 6. Execute all clickable commands from interactive chat action bars across /fuzz, /leaffuzz, and /qc
+        for (String alias : List.of("fuzz", "leaffuzz", "qc")) {
+            accessor.interactiveLines().clear();
+            LeafFuzzCommand root = commandRoots.get(alias);
+            java.util.concurrent.CompletableFuture<Boolean> checkFut = root.onCommand(
+                    playerId, perm -> true, messages::add, new String[]{"check", "target=NeoQuarry", "episodes=4"}
+            );
+            CommandsAPI.execute();
+            assertTrue(checkFut.join());
+            assertFalse(accessor.interactiveLines().isEmpty(), "Expected interactive chat line for /" + alias + " check");
+
+            List<String> chatRunCmds = accessor.interactiveLines().stream()
+                    .flatMap(l -> l.fragments().stream())
+                    .filter(f -> f.clickAction() == BookMenuSpec.ClickAction.RUN_COMMAND)
+                    .map(BookMenuSpec.Fragment::clickValue)
+                    .toList();
+            assertEquals(
+                    List.of("/" + alias + " report", "/" + alias + " check target=NeoQuarry"),
+                    chatRunCmds
+            );
+            for (String chatClickCmd : chatRunCmds) {
+                assertTrue(
+                        dispatchClickableCommand(commandRoots, brigDispatcher, playerId, chatClickCmd, messages),
+                        () -> "Interactive chat clickable RUN_COMMAND failed: " + chatClickCmd
+                );
+            }
+        }
+
+        // 7. Populate all 5 scorecard stages (Commands, Reproducers/Telemetry, Faults, Leaks, Causal) and execute all 5-page Book clickable commands
+        for (int i = 0; i < 4; i++) {
+            if (quitListenerRef.get() != null) {
+                quitListenerRef.get().accept(UUID.randomUUID());
+            }
+            String histo = String.format(
+                    Locale.ROOT,
+                    " num     #instances         #bytes  class name (module)%n"
+                            + "-------------------------------------------------------%n"
+                            + "   1: %14d %14d  dev.example.neoquarry.QuarrySession%n",
+                    5 + i * 6,
+                    (5 + i * 6) * 256
+            );
+            runtime.retentionScreener().recordHistogramText(
+                    "cp-cmd-" + i,
+                    1000L + i * 1000L,
+                    runtime.retentionScreener().totalDepartures(),
+                    i * 2L,
+                    histo
+            );
+        }
+        CausalGraphReport causalReport = BytecodeCausalGraphScanner.analyzeClasses(
+                "mod:neoquarry",
+                "NeoQuarry",
+                List.of(),
+                List.of(new JarConfigScanner.CommandDescriptor(
+                        "quarry",
+                        "NeoQuarry",
+                        "Teleports player to quarry",
+                        "/quarry",
+                        List.of(),
+                        "neoquarry.use",
+                        "true"
+                )),
+                Map.of("config.yml", "warmup:\n  dead-cancel-on-move: true\n")
+        );
+        runtime.registerCausalGraphReport("NeoQuarry.jar", causalReport);
+
+        assertTrue(dispatchClickableCommand(commandRoots, brigDispatcher, playerId, "/fuzz check target=NeoQuarry episodes=16", messages));
+        assertTrue(dispatchClickableCommand(commandRoots, brigDispatcher, playerId, "/fuzz report", messages));
+
+        BookMenuSpec fullBook = accessor.lastRenderedBook();
+        assertNotNull(fullBook);
+        assertEquals(5, fullBook.pages().size(), "Full scorecard book must contain all 5 pages (Overview, Telemetry, Perms/Reproducers, Faults/Leaks, Causal)");
+        assertTrue(BookContrastValidator.auditBookMenuSpec(fullBook).isEmpty());
+
+        List<BookMenuSpec.Fragment> fullBookClickables = collectClickableFragments(fullBook);
+        List<String> fullBookRunCmds = fullBookClickables.stream()
+                .filter(f -> f.clickAction() == BookMenuSpec.ClickAction.RUN_COMMAND)
+                .map(BookMenuSpec.Fragment::clickValue)
+                .toList();
+        assertTrue(fullBookRunCmds.containsAll(List.of(
+                "/fuzz check stage=commands target=NeoQuarry",
+                "/fuzz check stage=faults",
+                "/fuzz check stage=leaks",
+                "/fuzz check stage=causal target=NeoQuarry",
+                "/fuzz check target=NeoQuarry",
+                "/fuzz test"
+        )), "Expected all stage drill-downs, re-check, and BIT self-test clickable commands in scorecard book: " + fullBookRunCmds);
+
+        for (String bookRunCmd : fullBookRunCmds) {
+            messages.clear();
+            assertTrue(
+                    dispatchClickableCommand(commandRoots, brigDispatcher, playerId, bookRunCmd, messages),
+                    () -> "Scorecard book clickable RUN_COMMAND failed: " + bookRunCmd
+            );
+            assertFalse(messages.isEmpty(), () -> "Expected output messages when executing clickable book command: " + bookRunCmd);
+        }
+
+        List<String> fullBookSuggestCmds = fullBookClickables.stream()
+                .filter(f -> f.clickAction() == BookMenuSpec.ClickAction.SUGGEST_COMMAND)
+                .map(BookMenuSpec.Fragment::clickValue)
+                .toList();
+        assertTrue(fullBookSuggestCmds.contains("/fuzz check target=NeoQuarry"));
+        assertTrue(
+                fullBookSuggestCmds.stream().anyMatch(s -> s.contains("lp group default permission set ") && s.endsWith(" false")),
+                "Expected LuckPerms remediation SUGGEST_COMMAND on Perms & Reproducers page: " + fullBookSuggestCmds
+        );
+        for (String suggestCmd : fullBookSuggestCmds) {
+            if (suggestCmd.startsWith("/fuzz ")) {
+                assertTrue(dispatchClickableCommand(commandRoots, brigDispatcher, playerId, suggestCmd, messages));
+            }
+        }
+
+        // 8. Exercise remaining stage=snapshot, reset scopes, and reload subcommands
+        assertTrue(dispatchClickableCommand(commandRoots, brigDispatcher, playerId, "/fuzz check stage=snapshot", messages));
+        for (String scope : List.of("faults", "leaks", "campaign", "all")) {
+            messages.clear();
+            assertTrue(dispatchClickableCommand(commandRoots, brigDispatcher, playerId, "/fuzz reset scope=" + scope, messages));
+            assertTrue(messages.stream().anyMatch(m -> m.contains("Reset complete") && m.contains("scope=&f" + scope)));
+        }
+        messages.clear();
+        assertTrue(dispatchClickableCommand(commandRoots, brigDispatcher, playerId, "/fuzz reload", messages));
+        assertTrue(messages.stream().anyMatch(m -> m.toLowerCase(Locale.ROOT).contains("configuration and messages reloaded")));
+
+        runtime.close();
+    }
+
+    private static List<BookMenuSpec.Fragment> collectClickableFragments(BookMenuSpec book) {
+        List<BookMenuSpec.Fragment> out = new ArrayList<>();
+        for (BookMenuSpec.Page page : book.pages()) {
+            for (BookMenuSpec.Line line : page.lines()) {
+                for (BookMenuSpec.Fragment frag : line.fragments()) {
+                    if (frag.clickAction() != BookMenuSpec.ClickAction.NONE) {
+                        out.add(frag);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    private static boolean dispatchClickableCommand(
+            Map<String, LeafFuzzCommand> commandRoots,
+            com.mojang.brigadier.CommandDispatcher<UUID> brigDispatcher,
+            UUID callerId,
+            String clickCommandLine,
+            List<String> messages
+    ) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        assertNotNull(clickCommandLine);
+        assertTrue(clickCommandLine.startsWith("/"), "Clickable command must start with '/': " + clickCommandLine);
+        String withoutSlash = clickCommandLine.substring(1).trim();
+        String[] parts = withoutSlash.split("\\s+");
+        assertTrue(parts.length >= 1);
+        LeafFuzzCommand root = commandRoots.get(parts[0]);
+        assertNotNull(root, "Unknown root command in clickable action: " + parts[0]);
+        String[] args = java.util.Arrays.copyOfRange(parts, 1, parts.length);
+
+        // Execute through 4-arg TreeCommand.onCommand (Bukkit/Paper path)
+        java.util.concurrent.CompletableFuture<Boolean> fut = root.onCommand(
+                callerId,
+                perm -> true,
+                messages::add,
+                args
+        );
+        CommandsAPI.execute();
+        if (!Boolean.TRUE.equals(fut.join())) {
+            return false;
+        }
+
+        // Also execute through BrigadierCommandAdapter (Fabric/NeoForge/Brigadier path)
+        int brigResult = brigDispatcher.execute(withoutSlash, callerId);
+        CommandsAPI.execute();
+        return brigResult == 1;
+    }
     private static void handleMockMinecraftConnection(java.net.Socket client) {
         try (client) {
             client.setSoTimeout(2000);
@@ -1116,6 +1825,7 @@ class LeafFuzzCrossPlatformQcTest {
         private final List<String> messages;
         private final AtomicReference<Consumer<UUID>> quitListenerRef;
         private volatile BookMenuSpec lastRenderedBook;
+        private final List<BookMenuSpec.Line> interactiveLines = new ArrayList<>();
 
         FakeServerAccessor(
                 Path rootFolder,
@@ -1131,11 +1841,19 @@ class LeafFuzzCrossPlatformQcTest {
             return lastRenderedBook;
         }
 
+        List<BookMenuSpec.Line> interactiveLines() {
+            return interactiveLines;
+        }
+
         @Override
         public void renderBookOrChat(UUID playerId, BookMenuSpec spec) {
             this.lastRenderedBook = spec;
         }
 
+        @Override
+        public void sendInteractiveLine(UUID playerId, BookMenuSpec.Line line) {
+            this.interactiveLines.add(line);
+        }
         @Override
         public String getServerVersion() {
             return "26.1.2";
@@ -1225,5 +1943,151 @@ class LeafFuzzCrossPlatformQcTest {
                 }
             });
         }
+    }
+
+    @Test
+    @DisplayName("LeafFuzzRuntime supplies self-contained Plugin UML workspaceTab and configKeyBadges bundle for LeafConfig")
+    void leafFuzzSuppliesPluginUmlWorkspaceTabAndCausalKeyBadgesToLeafConfig() {
+        BytecodeCausalGraphScanner.CausalChainSlice cmdSlice =
+                new BytecodeCausalGraphScanner.CausalChainSlice(
+                        BytecodeCausalGraphScanner.EntryPointKind.COMMAND,
+                        "com.example.crate.CrateCommand#onCommand",
+                        "/crate open",
+                        BytecodeCausalGraphScanner.ListenerRegistrationMode.NOT_APPLICABLE,
+                        "broadcast-wins",
+                        List.of("if (config.getBoolean(\"broadcast-wins\"))"),
+                        List.of("cooldownSeconds", "broadcast-wins"),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of("CrateCommand#onCommand", "CrateService#openCrate"),
+                        Set.of("INVENTORY_MENU", "MESSAGE_SEND"),
+                        BytecodeCausalGraphScanner.EffectFrame.empty(),
+                        List.of(),
+                        List.of(new BytecodeCausalGraphScanner.ProofObligation(
+                                "S-005",
+                                BytecodeCausalGraphScanner.ProofStatus.VIOLATED,
+                                "Synchronous JDBC query on command thread"
+                        ))
+                );
+        CausalFinding deadKeyFinding =
+                new CausalFinding(
+                        "CAUSAL-1",
+                        "StandaloneCrate",
+                        1,
+                        BytecodeCausalGraphScanner.FindingKind.CAUSAL_DEAD_CONFIG_KEY,
+                        BytecodeCausalGraphScanner.ConfidenceTier.CONFIRMED,
+                        100,
+                        "legacy-placebo-toggle",
+                        "Config key 'legacy-placebo-toggle' declared in config.yml",
+                        "0 bytecode readers in JAR",
+                        "Read 'legacy-placebo-toggle' or remove from config.yml",
+                        List.of("No ldc 'legacy-placebo-toggle' in class pool"),
+                        ""
+                );
+        CausalGraphReport report =
+                new CausalGraphReport(
+                        "plugin:standalonecrate",
+                        "StandaloneCrate",
+                        List.of(cmdSlice),
+                        Map.of(),
+                        Map.of("com.example.crate.CrateWinListener", "broadcast-wins"),
+                        List.of(deadKeyFinding),
+                        Set.of("com.example.crate.CrateCommand#onCommand"),
+                        List.of()
+                );
+
+        Map<String, Object> bundle = LeafFuzzRuntime.buildLeafConfigWorkspaceExtensionForReports(List.of(report));
+        assertEquals("leaffuzz", bundle.get("providerId"));
+        assertEquals("LeafFuzz", bundle.get("displayName"));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> tabs = (List<Map<String, Object>>) bundle.get("workspaceTabs");
+        assertEquals(1, tabs.size());
+        Map<String, Object> umlTab = tabs.get(0);
+        assertEquals("plugin-uml", umlTab.get("tabId"));
+        assertEquals("LeafFuzzUmlTabKernel.render", umlTab.get("clientRendererFn"));
+        String payloadJson = String.valueOf(umlTab.get("initialPayloadJson"));
+        assertTrue(payloadJson.contains("\"artifactId\":\"plugin:standalonecrate\"")
+                && payloadJson.contains("\"stereotype\":\"COMMAND\"")
+                && payloadJson.contains("\"stereotype\":\"CONFIG_GUARD\""));
+        assertTrue(
+                payloadJson.contains("Main-Thread Blocking I/O: Synchronous JDBC query on command thread"),
+                "Violated S-005 proof obligation must be translated to plain-English Main-Thread Blocking I/O warning"
+        );
+        assertFalse(
+                payloadJson.contains("\"S-005:") || payloadJson.contains("CAUSAL_DEAD_CONFIG_KEY:"),
+                "Operator-facing Plugin UML payload must not leak raw S-005 or CAUSAL_* enum prefixes"
+        );
+        String kernelJs = String.valueOf(umlTab.get("clientScriptKernel"));
+        assertTrue(kernelJs.contains("window.LeafFuzzUmlTabKernel=")
+                && kernelJs.contains("zoomIntoUmlComponent")
+                && kernelJs.contains("setViewMode")
+                && kernelJs.contains("uml-state-causal-svg")
+                && kernelJs.contains("stateDiagram-v2")
+                && kernelJs.contains("humanizeHazard")
+                && kernelJs.contains("humanizeRegMode")
+                && kernelJs.contains("4. SERVER ACTIONS & WARNINGS"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> badges = (List<Map<String, Object>>) bundle.get("configKeyBadges");
+        assertTrue(badges.stream().anyMatch(b -> "legacy-placebo-toggle".equals(b.get("keyPath"))
+                && "DEAD_KEY".equals(b.get("status"))
+                && "leaffuzz:plugin-uml".equals(b.get("targetTabId"))));
+        assertTrue(badges.stream().anyMatch(b -> "cooldownSeconds".equals(b.get("keyPath"))
+                && "HOT_RELOAD".equals(b.get("provenReloadTier"))));
+        net.leaf.sleuth.common.fuzz.DualAudienceMitigationReport mitigation =
+                net.leaf.sleuth.common.fuzz.DualAudienceMitigationReport.build(
+                        "exc:StandaloneCrate:CrateGiveAll",
+                        "StandaloneCrate.jar",
+                        List.of("/crate giveall diamond 64"),
+                        "SOLO",
+                        Optional.of("64"),
+                        null,
+                        null
+                );
+        LeafFuzzScorecardReport scorecard = new LeafFuzzScorecardReport(
+                "StandaloneCrate",
+                "paper",
+                "1.21.4",
+                1,
+                4,
+                2,
+                List.of(new net.leaf.sleuth.common.fuzz.CommandSurfaceAuditor.LeastPrivilegeFinding(
+                        "/crate giveall",
+                        List.of("crate"),
+                        "STATE_MUTATING_DEFAULT_EXPOSURE",
+                        "HIGH",
+                        "StandaloneCrate.jar",
+                        "<none>",
+                        "economy/reward mutation keyword",
+                        "aliases:\n  crate: []"
+                )),
+                12,
+                4,
+                List.of(mitigation),
+                List.of(),
+                3,
+                List.of(),
+                450L,
+                LeafFuzzScorecardReport.ExecutionTelemetry.empty(),
+                List.of(deadKeyFinding)
+        );
+
+        Map<String, Object> enrichedBundle = LeafFuzzRuntime.buildLeafConfigWorkspaceExtensionForReports(
+                List.of(report),
+                List.of(scorecard)
+        );
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> enrichedTabs = (List<Map<String, Object>>) enrichedBundle.get("workspaceTabs");
+        String enrichedPayload = String.valueOf(enrichedTabs.get(0).get("initialPayloadJson"));
+        assertTrue(enrichedPayload.contains("\"scorecard\":{")
+                        && enrichedPayload.contains("\"stage1Verdict\":\"WARN\"")
+                        && enrichedPayload.contains("\"stage2Verdict\":\"FAIL\"")
+                        && enrichedPayload.contains("crate giveall"),
+                "Scorecard-enriched LeafFuzz bundle must embed 5-stage QC verdict and open-command mitigations");
+        String enrichedKernel = String.valueOf(enrichedTabs.get(0).get("clientScriptKernel"));
+        assertTrue(enrichedKernel.contains("lockCommandInConfig")
+                        && enrichedKernel.contains("stageCommandsYmlOverride"),
+                "LeafFuzz UML tab kernel must expose 1-click lockCommandInConfig -> stageCommandsYmlOverride handoff");
     }
 }

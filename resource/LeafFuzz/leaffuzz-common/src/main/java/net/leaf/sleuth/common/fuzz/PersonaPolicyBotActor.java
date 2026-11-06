@@ -301,17 +301,17 @@ public final class PersonaPolicyBotActor {
     private final int initialSeed;
     private int rngState;
 
-    private int x;
-    private int y;
-    private int z;
+    private volatile int x;
+    private volatile int y;
+    private volatile int z;
     private int anchorX;
     private int anchorY;
     private int anchorZ;
-    private int yawIdx;
-    private float yawDeg;
-    private float pitchDeg;
+    private volatile int yawIdx;
+    private volatile float yawDeg;
+    private volatile float pitchDeg;
     private int hotbarCursor;
-    private int currentHotbarSlot;
+    private volatile int currentHotbarSlot;
     private int stepCount;
     private int stepsSinceProgress;
     private int rtpCount;
@@ -321,8 +321,8 @@ public final class PersonaPolicyBotActor {
     private int torchesCount;
     private int utilitiesCount;
     private int oresCount;
-    private boolean containerOpen;
-    private boolean online = true;
+    private volatile boolean containerOpen;
+    private volatile boolean online = true;
     private final Set<String> chunksExplored = new LinkedHashSet<>();
     private final List<BotStepRecord> stepHistory = new ArrayList<>();
     private final List<String> executedCommands = new ArrayList<>();
@@ -430,7 +430,7 @@ public final class PersonaPolicyBotActor {
      *
      * @return 16-byte context vector
      */
-    public byte[] computeContextInt8() {
+    public synchronized byte[] computeContextInt8() {
         byte[] ctx = new byte[POLICY_NUM_FEATURES];
         ctx[0] = 127; // bias (+1.0 in Q7)
         int enclosed = Math.min(4, planksCount >> 2);
@@ -456,12 +456,13 @@ public final class PersonaPolicyBotActor {
     }
 
     /**
-     * Steps the bot autonomously by evaluating its 256-byte {@code Int8[16x16]} policy genome
+     * Advances the bot by one autonomous episode step, computing the 16-feature context vector,
+     * sampling an action via {@link #selectPolicyActionInt(byte[], byte[], int, int, int[])},
      * and executing the chosen micro-skill from {@link #POLICY_MICRO_SKILLS}.
      *
      * @return record of the executed micro-skill and updated bot kinematics
      */
-    public BotStepRecord stepAutonomousPolicy() {
+    public synchronized BotStepRecord stepAutonomousPolicy() {
         if (!online) {
             online = true;
         }
@@ -476,7 +477,7 @@ public final class PersonaPolicyBotActor {
      * @param skillIdx index into {@link #POLICY_MICRO_SKILLS}
      * @return record of the executed micro-skill and updated bot kinematics
      */
-    public BotStepRecord executeMicroSkillByIndex(int skillIdx) {
+    public synchronized BotStepRecord executeMicroSkillByIndex(int skillIdx) {
         int clampedIdx = Math.floorMod(skillIdx, POLICY_MICRO_SKILLS.size());
         String skill = POLICY_MICRO_SKILLS.get(clampedIdx);
         int[] dir = CARDINAL_DIRS[yawIdx & 3];
@@ -572,7 +573,7 @@ public final class PersonaPolicyBotActor {
      * @param rawCommandLine raw command line from {@link SleuthServerFuzzer}
      * @return normalized command string without leading slash ready for platform dispatch
      */
-    public String prepareCommandForDispatch(String rawCommandLine) {
+    public synchronized String prepareCommandForDispatch(String rawCommandLine) {
         if (!online) {
             online = true;
         }
@@ -595,14 +596,14 @@ public final class PersonaPolicyBotActor {
     }
 
     /**
-     * Manipulates the bot to perform a post-command lifecycle or behavioral follow-up shape
-     * ({@code quit_lt1s}, {@code quit_delay}, {@code move}, {@code chunk_border_thrash},
+     * Executes a follow-up lifecycle shape after command dispatch ({@code quit_lt1s}, {@code quit_delay},
+     * {@code move}, {@code explorer_wander}, {@code chunk_border_thrash}, {@code world_switch},
      * {@code window_click}, {@code repeat}, {@code concurrent}).
      *
      * @param followUpShape follow-up shape identifier
      * @return record of the executed follow-up behavior and resulting bot state
      */
-    public BotStepRecord performFollowUpBehavior(String followUpShape) {
+    public synchronized BotStepRecord performFollowUpBehavior(String followUpShape) {
         String shape = (followUpShape == null || followUpShape.isBlank())
                 ? "repeat"
                 : followUpShape.trim().toLowerCase(Locale.ROOT);
@@ -637,7 +638,7 @@ public final class PersonaPolicyBotActor {
         }
     }
 
-    private BotStepRecord advanceBiometricKinematics(String skillName, int skillIdx) {
+    private synchronized BotStepRecord advanceBiometricKinematics(String skillName, int skillIdx) {
         int step = this.stepCount++;
         double gcd = Math.max(0.01, persona.mouseGcdDeg());
         int yawSteps = Math.max(1, (int) Math.round(persona.angularSpeedDeg() / gcd));
@@ -896,7 +897,7 @@ public final class PersonaPolicyBotActor {
         );
     }
 
-    public void setLocation(int newX, int newY, int newZ) {
+    public synchronized void setLocation(int newX, int newY, int newZ) {
         this.x = newX;
         this.y = newY;
         this.z = newZ;

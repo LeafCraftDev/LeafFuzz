@@ -83,7 +83,24 @@ public final class PaperLeafFuzzPlugin extends JavaPlugin {
                         resumed -> this.runtime.runQcCheck("all", Math.max(1, resumed.targetEpisodes() - resumed.completedEpisodes()))
                 )
         );
+        registerWithLeafConfigWorkspaceIfPresent();
         getLogger().info("LeafFuzz (Paper/Folia) enabled. Run /fuzz check <PluginName|all> to run a 4-stage QC pass.");
+    }
+
+    private void registerWithLeafConfigWorkspaceIfPresent() {
+        try {
+            org.bukkit.plugin.Plugin leafConfig = getServer().getPluginManager().getPlugin("LeafConfig");
+            if (leafConfig != null && leafConfig.isEnabled()) {
+                var runtimeGetter = leafConfig.getClass().getMethod("runtime");
+                Object cfgRuntime = runtimeGetter.invoke(leafConfig);
+                if (cfgRuntime != null) {
+                    var ingestMethod = cfgRuntime.getClass().getMethod("ingestPeerWorkspaceExtension", Object.class);
+                    ingestMethod.invoke(cfgRuntime, this.runtime);
+                }
+            }
+        } catch (Throwable ex) {
+            getLogger().log(java.util.logging.Level.WARNING, "[LeafFuzz] Failed to register Plugin UML workspace tab with LeafConfig", ex);
+        }
     }
 
     @Override

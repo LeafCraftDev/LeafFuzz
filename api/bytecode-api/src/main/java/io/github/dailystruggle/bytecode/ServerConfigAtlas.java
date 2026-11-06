@@ -1,9 +1,9 @@
-package io.github.dailystruggle.rtp.common.bit.config.atlas;
+package io.github.dailystruggle.bytecode;
 
-import io.github.dailystruggle.rtp.common.configuration.yaml.RtpYamlConfig;
-import io.github.dailystruggle.rtp.common.search.FuzzySearchEngine;
-import io.github.dailystruggle.rtp.common.search.OnlineQueryExpander;
-import io.github.dailystruggle.rtp.common.search.SearchThesaurus;
+import io.github.dailystruggle.search.FuzzySearchEngine;
+import io.github.dailystruggle.search.OnlineQueryExpander;
+import io.github.dailystruggle.search.SearchThesaurus;
+import io.github.dailystruggle.yaml.YamlConfig;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -370,7 +370,15 @@ public final class ServerConfigAtlas {
 
     public static final List<String> DEFAULT_ENGINE_CONFIG_FILES = List.of(
             "server.properties", "bukkit.yml", "spigot.yml", "paper-global.yml", "paper-world-defaults.yml",
-            "purpur.yml", "velocity.toml", "config/paper-global.yml", "config/paper-world-defaults.yml"
+            "purpur.yml", "pufferfish.yml", "folia.yml", "leaf.yml", "leaves.yml",
+            "commands.yml", "permissions.yml", "help.yml", "velocity.toml", "bungeecord.yml", "waterfall.yml",
+            "config/paper-global.yml", "config/paper-world-defaults.yml",
+            "config/leaf-global.yml", "config/leaf-world-defaults.yml",
+            "config/folia-global.yml", "config/folia-world-defaults.yml"
+    );
+
+    private static final Set<String> NON_WORLD_ROOT_DIRS = Set.of(
+            "plugins", "mods", "config", "logs", "libraries", "versions", "cache", "crash-reports", "bundler", "debug"
     );
 
     /**
@@ -400,12 +408,37 @@ public final class ServerConfigAtlas {
                 : candidateEngineNames;
         ServerConfigAtlas atlas = new ServerConfigAtlas();
 
-        // 1. Scan engine YAML files at root or config/
+        // 1. Scan engine YAML/properties/TOML/JSON files at root, config/, and per-world directories
         Map<String, String> engineFiles = new LinkedHashMap<>();
         for (String name : engineNames) {
             Path p = serverRoot.resolve(name);
             if (Files.isRegularFile(p)) {
                 engineFiles.put(name, Files.readString(p, StandardCharsets.UTF_8));
+            }
+        }
+        if (candidateEngineNames == null || candidateEngineNames == DEFAULT_ENGINE_CONFIG_FILES) {
+            try (Stream<Path> rootStream = Files.list(serverRoot)) {
+                List<Path> rootEntries = rootStream.sorted().toList();
+                for (Path entry : rootEntries) {
+                    String fn = entry.getFileName().toString();
+                    String low = fn.toLowerCase(Locale.ROOT);
+                    if (Files.isRegularFile(entry)) {
+                        if (!fn.startsWith(".")
+                                && (low.endsWith(".yml") || low.endsWith(".yaml")
+                                || low.endsWith(".properties") || low.endsWith(".toml") || low.endsWith(".conf"))
+                                && !engineFiles.containsKey(fn)) {
+                            engineFiles.put(fn, Files.readString(entry, StandardCharsets.UTF_8));
+                        }
+                    } else if (Files.isDirectory(entry) && !fn.startsWith(".") && !NON_WORLD_ROOT_DIRS.contains(low)) {
+                        for (String worldCfg : List.of("paper-world.yml", "spigot.yml", "purpur.yml", "leaf-world.yml")) {
+                            Path wp = entry.resolve(worldCfg);
+                            if (Files.isRegularFile(wp)) {
+                                String relKey = fn + "/" + worldCfg;
+                                engineFiles.putIfAbsent(relKey, Files.readString(wp, StandardCharsets.UTF_8));
+                            }
+                        }
+                    }
+                }
             }
         }
         if (!engineFiles.isEmpty()) {
@@ -428,9 +461,10 @@ public final class ServerConfigAtlas {
             atlas.registerArtifact(engineArtifact, engineFiles);
         }
 
-        // 2. Scan plugins/*.jar and corresponding plugins/<PluginName>/**/*.yml
+        // 2. Scan plugins/*.jar and corresponding plugins/<PluginName>/**/* plus standalone plugin folders
         Path pluginsDir = serverRoot.resolve("plugins");
         if (Files.isDirectory(pluginsDir)) {
+            Set<Path> claimedPluginDirs = new LinkedHashSet<>();
             try (Stream<Path> stream = Files.list(pluginsDir)) {
                 List<Path> jars = stream
                         .filter(p -> Files.isRegularFile(p) && p.getFileName().toString().endsWith(".jar"))
@@ -438,9 +472,54 @@ public final class ServerConfigAtlas {
                         .toList();
                 for (Path jar : jars) {
                     JarConfigScanner.HarvestedArtifact art = JarConfigScanner.scanJar(jar);
-                    Path dataDir = pluginsDir.resolve(art.displayName());
+                    Path dataDir = resolvePluginDataDirectory(pluginsDir, art, jar);
+                    if (dataDir != null) {
+                        claimedPluginDirs.add(dataDir.toAbsolutePath().normalize());
+                    }
                     Map<String, String> liveFiles = readLiveYamlTree(dataDir);
                     atlas.registerArtifact(art, liveFiles);
+                }
+            }
+            try (Stream<Path> dirStream = Files.list(pluginsDir)) {
+                List<Path> subDirs = dirStream
+                        .filter(Files::isDirectory)
+                        .filter(d -> {
+                            String dn = d.getFileName().toString();
+                            String low = dn.toLowerCase(Locale.ROOT);
+                            return !dn.startsWith(".")
+                                    && !"update".equals(low)
+                                    && !"bstats".equals(low)
+                                    && !"spark".equals(low)
+                                    && !claimedPluginDirs.contains(d.toAbsolutePath().normalize());
+                        })
+                        .sorted()
+                        .toList();
+                for (Path unclaimedDir : subDirs) {
+                    String folderName = unclaimedDir.getFileName().toString();
+                    String artifactId = "plugin:" + folderName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", "");
+                    if (atlas.artifacts().containsKey(artifactId)) {
+                        continue;
+                    }
+                    Map<String, String> liveFiles = readLiveYamlTree(unclaimedDir);
+                    if (!liveFiles.isEmpty()) {
+                        JarConfigScanner.HarvestedArtifact folderArtifact = new JarConfigScanner.HarvestedArtifact(
+                                artifactId,
+                                folderName,
+                                "disk",
+                                "paper",
+                                "",
+                                "",
+                                List.of(),
+                                List.of(),
+                                List.of(),
+                                JarConfigScanner.ReloadStrategy.BUKKIT_FILECONFIG_INJECT,
+                                liveFiles,
+                                Map.of(),
+                                Map.of(),
+                                false
+                        );
+                        atlas.registerArtifact(folderArtifact, liveFiles);
+                    }
                 }
             }
         }
@@ -477,14 +556,67 @@ public final class ServerConfigAtlas {
         return atlas;
     }
 
+    private static Path resolvePluginDataDirectory(
+            Path pluginsDir,
+            JarConfigScanner.HarvestedArtifact art,
+            Path jarPath
+    ) throws IOException {
+        Path direct = pluginsDir.resolve(art.displayName());
+        if (Files.isDirectory(direct)) {
+            return direct;
+        }
+        String displayNorm = art.displayName().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+        String idStem = art.artifactId().replaceFirst("^plugin:", "").toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+        String jarFileName = jarPath.getFileName().toString();
+        String jarStem = jarFileName.replaceFirst("(?i)\\.jar$", "")
+                .replaceFirst("[-_vV]+\\d.*$", "")
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]", "");
+        try (Stream<Path> s = Files.list(pluginsDir)) {
+            for (Path candidate : s.filter(Files::isDirectory).sorted().toList()) {
+                String folderNorm = candidate.getFileName().toString().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+                if (folderNorm.isEmpty()) continue;
+                if (folderNorm.equals(displayNorm) || folderNorm.equals(idStem) || folderNorm.equals(jarStem)) {
+                    return candidate;
+                }
+            }
+        }
+        return direct;
+    }
     public static boolean isSupportedConfigFile(String relPath) {
         if (relPath == null || relPath.isBlank()) {
             return false;
         }
-        String low = relPath.toLowerCase(Locale.ROOT);
-        return low.endsWith(".yml") || low.endsWith(".yaml") || low.endsWith(".toml") || low.endsWith(".properties");
+        String low = relPath.replace('\\', '/').toLowerCase(Locale.ROOT);
+        if (low.startsWith("lang/") || low.startsWith("locale/") || low.startsWith("locales/")
+                || low.startsWith("translations/") || low.startsWith("i18n/")
+                || low.startsWith("editor/") || low.startsWith("workspace/")
+                || low.contains("/lang/") || low.contains("/locale/") || low.contains("/locales/")
+                || low.contains("/translations/") || low.contains("/i18n/")
+                || low.contains("/editor/") || low.contains("/workspace/")) {
+            return false;
+        }
+        String fileName = low.contains("/") ? low.substring(low.lastIndexOf('/') + 1) : low;
+        int dotIdx = fileName.indexOf('.');
+        boolean isLocaleStem = (dotIdx == 5 || dotIdx == 6)
+                && (fileName.charAt(2) == '_' || (dotIdx == 6 && fileName.charAt(3) == '_'));
+        if ("editor-data.json".equals(fileName) || "usercache.json".equals(fileName)
+                || "whitelist.json".equals(fileName) || "ops.json".equals(fileName)
+                || "banned-players.json".equals(fileName) || "banned-ips.json".equals(fileName)
+                || "version_history.json".equals(fileName)
+                || isLocaleStem
+                || (fileName.endsWith(".properties") && (fileName.startsWith("messages_") || fileName.startsWith("lang_")))) {
+            return false;
+        }
+        return fileName.endsWith(".yml")
+                || fileName.endsWith(".yaml")
+                || fileName.endsWith(".toml")
+                || fileName.endsWith(".properties")
+                || fileName.endsWith(".json")
+                || fileName.endsWith(".jsonc")
+                || fileName.endsWith(".json5")
+                || fileName.endsWith(".conf");
     }
-
     private static Map<String, String> readLiveYamlTree(Path dataDir) throws IOException {
         if (dataDir == null || !Files.isDirectory(dataDir)) {
             return Map.of();
@@ -501,7 +633,7 @@ public final class ServerConfigAtlas {
                     .toList();
             for (Path f : files) {
                 String rel = dataDir.relativize(f).toString().replace('\\', '/');
-                if (rel.startsWith("lang/")) continue;
+                if (!isSupportedConfigFile(rel)) continue;
                 out.put(rel, Files.readString(f, StandardCharsets.UTF_8));
             }
         }
@@ -509,12 +641,19 @@ public final class ServerConfigAtlas {
     }
 
     /**
-     * Parses a `.yml`/`.yaml`, `.toml`, or `.properties` configuration text into a normalized
-     * {@link RtpYamlConfig} tree with preserved block comments for unified AST schema inference.
+     * Alias for {@link #parseConfigDocumentToYaml(String, String)}.
      */
-    public static RtpYamlConfig parseConfigDocumentToYaml(String filePath, String rawText) {
+    public static YamlConfig parseAnyConfigToYaml(String filePath, String rawText) {
+        return parseConfigDocumentToYaml(filePath, rawText);
+    }
+
+    /**
+     * Parses a `.yml`/`.yaml`, `.toml`, `.properties`, `.json`, `.jsonc`, `.json5`, or `.conf` configuration text
+     * into a normalized {@link YamlConfig} tree with preserved block comments for unified AST schema inference.
+     */
+    public static YamlConfig parseConfigDocumentToYaml(String filePath, String rawText) {
         if (rawText == null || rawText.isBlank()) {
-            return RtpYamlConfig.empty(null);
+            return YamlConfig.empty(null);
         }
         String low = filePath == null ? "config.yml" : filePath.toLowerCase(Locale.ROOT);
         if (low.endsWith(".properties")) {
@@ -523,11 +662,298 @@ public final class ServerConfigAtlas {
         if (low.endsWith(".toml")) {
             return parseTomlToYaml(rawText);
         }
-        return RtpYamlConfig.parse(rawText);
+        if (low.endsWith(".json") || low.endsWith(".jsonc") || low.endsWith(".json5") || low.endsWith(".conf")) {
+            return parseJsonOrHoconToYaml(rawText);
+        }
+        return YamlConfig.parse(rawText);
     }
 
-    private static RtpYamlConfig parsePropertiesToYaml(String rawText) {
-        RtpYamlConfig cfg = RtpYamlConfig.empty(null);
+    private static YamlConfig parseJsonOrHoconToYaml(String rawText) {
+        YamlConfig cfg = YamlConfig.empty(null);
+        String[] lines = rawText.split("\r?\n", -1);
+        List<String> pathStack = new ArrayList<>();
+        List<String> pendingComments = new ArrayList<>();
+        boolean inBlockComment = false;
+        String activeArrayKey = null;
+        List<Object> activeArrayItems = new ArrayList<>();
+        List<String> activeArrayComments = new ArrayList<>();
+
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            if (inBlockComment) {
+                int endIdx = trimmed.indexOf("*/");
+                String cmtBody = endIdx >= 0 ? trimmed.substring(0, endIdx) : trimmed;
+                String cleaned = cleanJsonCommentProse(cmtBody);
+                if (!cleaned.isEmpty()) {
+                    pendingComments.add("# " + cleaned);
+                }
+                if (endIdx < 0) {
+                    continue;
+                }
+                inBlockComment = false;
+                trimmed = trimmed.substring(endIdx + 2).trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+            }
+            while (trimmed.startsWith("/*")) {
+                int endIdx = trimmed.indexOf("*/", 2);
+                String cmtBody = endIdx >= 0 ? trimmed.substring(2, endIdx) : trimmed.substring(2);
+                String cleaned = cleanJsonCommentProse(cmtBody);
+                if (!cleaned.isEmpty()) {
+                    pendingComments.add("# " + cleaned);
+                }
+                if (endIdx < 0) {
+                    inBlockComment = true;
+                    trimmed = "";
+                    break;
+                }
+                trimmed = trimmed.substring(endIdx + 2).trim();
+            }
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            if (trimmed.startsWith("#") || trimmed.startsWith("//")) {
+                String cmt = trimmed.startsWith("//") ? ("#" + trimmed.substring(2)) : trimmed;
+                pendingComments.add(cmt);
+                continue;
+            }
+            String[] codeAndComment = splitUnquotedJsonLineComment(trimmed);
+            trimmed = codeAndComment[0].trim();
+            String inlineComment = codeAndComment[1];
+            if (!inlineComment.isEmpty()) {
+                String cmt = inlineComment.startsWith("//")
+                        ? ("#" + inlineComment.substring(2))
+                        : (inlineComment.startsWith("#") ? inlineComment : ("# " + inlineComment));
+                pendingComments.add(cmt);
+            }
+            if (trimmed.isEmpty() || "{".equals(trimmed)) {
+                continue;
+            }
+
+            if (activeArrayKey != null) {
+                if (trimmed.startsWith("]")) {
+                    cfg.set(activeArrayKey, new ArrayList<>(activeArrayItems));
+                    if (!activeArrayComments.isEmpty()) {
+                        cfg.setComment(activeArrayKey, String.join("\n", activeArrayComments));
+                    }
+                    activeArrayKey = null;
+                    activeArrayItems.clear();
+                    activeArrayComments.clear();
+                    pendingComments.clear();
+                    continue;
+                }
+                String elem = trimmed.endsWith(",") ? trimmed.substring(0, trimmed.length() - 1).trim() : trimmed;
+                if (!elem.isEmpty() && !elem.startsWith("{") && !elem.startsWith("}")) {
+                    activeArrayItems.add(parseLooseScalarOrList(elem));
+                }
+                continue;
+            }
+
+            if (trimmed.equals("}") || trimmed.equals("},") || trimmed.equals("]") || trimmed.equals("],")) {
+                if (trimmed.startsWith("}") && !pathStack.isEmpty()) {
+                    pathStack.remove(pathStack.size() - 1);
+                }
+                pendingComments.clear();
+                continue;
+            }
+            String[] activeArrayKeyHolder = new String[]{null};
+            parseJsonOrHoconKeyValueSegment(
+                    trimmed,
+                    pathStack,
+                    pendingComments,
+                    cfg,
+                    activeArrayKeyHolder,
+                    activeArrayItems,
+                    activeArrayComments
+            );
+            if (activeArrayKeyHolder[0] != null) {
+                activeArrayKey = activeArrayKeyHolder[0];
+            }
+        }
+        return cfg;
+    }
+
+    private static void parseJsonOrHoconKeyValueSegment(
+            String segment,
+            List<String> pathStack,
+            List<String> pendingComments,
+            YamlConfig cfg,
+            String[] activeArrayKeyHolder,
+            List<Object> activeArrayItems,
+            List<String> activeArrayComments
+    ) {
+        int sepIdx = findUnquotedJsonSeparator(segment);
+        if (sepIdx <= 0) {
+            return;
+        }
+        String rawKey = unquoteJsonToken(segment.substring(0, sepIdx).trim());
+        String afterSep = segment.substring(sepIdx + 1).trim();
+        if (afterSep.endsWith(",")) {
+            afterSep = afterSep.substring(0, afterSep.length() - 1).trim();
+        }
+        if (rawKey.isEmpty()) {
+            return;
+        }
+        String fullKey = pathStack.isEmpty() ? rawKey : (String.join(".", pathStack) + "." + rawKey);
+        if ("{".equals(afterSep)) {
+            cfg.createSection(fullKey);
+            if (!pendingComments.isEmpty()) {
+                cfg.setComment(fullKey, String.join("\n", pendingComments));
+                pendingComments.clear();
+            }
+            pathStack.add(rawKey);
+            return;
+        }
+        if ("{}".equals(afterSep)) {
+            cfg.createSection(fullKey);
+            pendingComments.clear();
+            return;
+        }
+        if (afterSep.startsWith("{") && afterSep.endsWith("}")) {
+            cfg.createSection(fullKey);
+            if (!pendingComments.isEmpty()) {
+                cfg.setComment(fullKey, String.join("\n", pendingComments));
+                pendingComments.clear();
+            }
+            String inner = afterSep.substring(1, afterSep.length() - 1).trim();
+            if (!inner.isEmpty()) {
+                pathStack.add(rawKey);
+                for (String entryPart : splitTopLevelCommas(inner)) {
+                    String partTrimmed = entryPart.trim();
+                    if (!partTrimmed.isEmpty()) {
+                        parseJsonOrHoconKeyValueSegment(
+                                partTrimmed,
+                                pathStack,
+                                pendingComments,
+                                cfg,
+                                activeArrayKeyHolder,
+                                activeArrayItems,
+                                activeArrayComments
+                        );
+                    }
+                }
+                pathStack.remove(pathStack.size() - 1);
+            }
+            return;
+        }
+        if ("[".equals(afterSep)) {
+            if (activeArrayKeyHolder != null) {
+                activeArrayKeyHolder[0] = fullKey;
+                activeArrayItems.clear();
+                activeArrayComments.clear();
+                activeArrayComments.addAll(pendingComments);
+            }
+            pendingComments.clear();
+            return;
+        }
+        cfg.set(fullKey, parseLooseScalarOrList(afterSep));
+        if (!pendingComments.isEmpty()) {
+            cfg.setComment(fullKey, String.join("\n", pendingComments));
+            pendingComments.clear();
+        }
+    }
+
+    private static String cleanJsonCommentProse(String raw) {
+        String s = raw.trim();
+        while (s.startsWith("*") || s.startsWith("/") || s.startsWith("#")) {
+            s = s.substring(1).trim();
+        }
+        return s;
+    }
+
+    private static String unquoteJsonToken(String token) {
+        if (token.length() >= 2 && ((token.startsWith("\"") && token.endsWith("\""))
+                || (token.startsWith("'") && token.endsWith("'")))) {
+            return token.substring(1, token.length() - 1);
+        }
+        return token;
+    }
+
+    private static int findUnquotedJsonSeparator(String s) {
+        boolean inDouble = false;
+        boolean inSingle = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length()) {
+                i++;
+                continue;
+            }
+            if (c == '"' && !inSingle) {
+                inDouble = !inDouble;
+            } else if (c == '\'' && !inDouble) {
+                inSingle = !inSingle;
+            } else if (!inDouble && !inSingle && (c == ':' || c == '=')) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static String[] splitUnquotedJsonLineComment(String s) {
+        boolean inDouble = false;
+        boolean inSingle = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length()) {
+                i++;
+                continue;
+            }
+            if (c == '"' && !inSingle) {
+                inDouble = !inDouble;
+            } else if (c == '\'' && !inDouble) {
+                inSingle = !inSingle;
+            } else if (!inDouble && !inSingle) {
+                if (c == '/' && i + 1 < s.length() && s.charAt(i + 1) == '/') {
+                    return new String[]{s.substring(0, i), s.substring(i)};
+                }
+                if (c == '#') {
+                    return new String[]{s.substring(0, i), s.substring(i)};
+                }
+            }
+        }
+        return new String[]{s, ""};
+    }
+
+    private static List<String> splitTopLevelCommas(String s) {
+        List<String> parts = new ArrayList<>();
+        boolean inDouble = false;
+        boolean inSingle = false;
+        int braceDepth = 0;
+        int bracketDepth = 0;
+        int start = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length()) {
+                i++;
+                continue;
+            }
+            if (c == '"' && !inSingle) {
+                inDouble = !inDouble;
+            } else if (c == '\'' && !inDouble) {
+                inSingle = !inSingle;
+            } else if (!inDouble && !inSingle) {
+                if (c == '{') braceDepth++;
+                else if (c == '}') braceDepth = Math.max(0, braceDepth - 1);
+                else if (c == '[') bracketDepth++;
+                else if (c == ']') bracketDepth = Math.max(0, bracketDepth - 1);
+                else if (c == ',' && braceDepth == 0 && bracketDepth == 0) {
+                    parts.add(s.substring(start, i));
+                    start = i + 1;
+                }
+            }
+        }
+        if (start <= s.length()) {
+            parts.add(s.substring(start));
+        }
+        return parts;
+    }
+
+    private static YamlConfig parsePropertiesToYaml(String rawText) {
+        YamlConfig cfg = YamlConfig.empty(null);
         String[] lines = rawText.split("\r?\n", -1);
         List<String> pendingComments = new ArrayList<>();
         for (String line : lines) {
@@ -569,8 +995,8 @@ public final class ServerConfigAtlas {
         return cfg;
     }
 
-    private static RtpYamlConfig parseTomlToYaml(String rawText) {
-        RtpYamlConfig cfg = RtpYamlConfig.empty(null);
+    private static YamlConfig parseTomlToYaml(String rawText) {
+        YamlConfig cfg = YamlConfig.empty(null);
         String[] lines = rawText.split("\r?\n", -1);
         List<String> pendingComments = new ArrayList<>();
         String currentSection = "";
@@ -649,18 +1075,15 @@ public final class ServerConfigAtlas {
         if ("true".equalsIgnoreCase(t)) return Boolean.TRUE;
         if ("false".equalsIgnoreCase(t)) return Boolean.FALSE;
         String numClean = t.replace("_", "");
-        try {
-            if (numClean.matches("[-+]?\\d+")) {
-                long lv = Long.parseLong(numClean);
-                if (lv >= Integer.MIN_VALUE && lv <= Integer.MAX_VALUE) {
-                    return (int) lv;
-                }
-                return lv;
+        if (numClean.matches("[-+]?\\d{1,18}")) {
+            long lv = Long.parseLong(numClean);
+            if (lv >= Integer.MIN_VALUE && lv <= Integer.MAX_VALUE) {
+                return (int) lv;
             }
-            if (numClean.matches("[-+]?\\d*\\.\\d+([eE][-+]?\\d+)?")) {
-                return Double.parseDouble(numClean);
-            }
-        } catch (NumberFormatException ignored) {
+            return lv;
+        }
+        if (numClean.matches("[-+]?\\d{0,18}\\.\\d{1,18}([eE][-+]?\\d{1,3})?")) {
+            return Double.parseDouble(numClean);
         }
         return t;
     }
@@ -671,12 +1094,12 @@ public final class ServerConfigAtlas {
             String defaultYamlText,
             String liveYamlText
     ) {
-        RtpYamlConfig defCfg;
-        RtpYamlConfig liveCfg;
+        YamlConfig defCfg;
+        YamlConfig liveCfg;
         try {
             defCfg = defaultYamlText != null && !defaultYamlText.isBlank()
                     ? parseConfigDocumentToYaml(filePath, defaultYamlText)
-                    : RtpYamlConfig.empty(null);
+                    : YamlConfig.empty(null);
             liveCfg = parseConfigDocumentToYaml(filePath, liveYamlText);
         } catch (RuntimeException e) {
             LOG.log(java.util.logging.Level.WARNING,
@@ -709,9 +1132,11 @@ public final class ServerConfigAtlas {
                     : Arrays.asList(effectiveComment.split("\n"));
 
             Set<String> consumers = findConsumersForKey(artifact.readByClassIndex(), keyPath);
+            List<BytecodeConfigScanner.KeyCallSite> callSites = findCallSitesForKey(artifact.keyCallSiteIndex(), keyPath);
             Object effectiveValObj = liveValObj != null ? liveValObj : defValObj;
             List<String> bytecodeOptions = resolveMatchingEnumConstants(
                     artifact.discoveredEnums(),
+                    callSites,
                     keyPath,
                     effectiveValObj,
                     !consumers.isEmpty()
@@ -730,7 +1155,6 @@ public final class ServerConfigAtlas {
             String leafName = dot >= 0 ? keyPath.substring(dot + 1) : keyPath;
             String symbolId = "cfg:" + artifact.artifactId() + ":" + filePath + "#" + keyPath;
 
-            List<BytecodeConfigScanner.KeyCallSite> callSites = findCallSitesForKey(artifact.keyCallSiteIndex(), keyPath);
             SchemaInferrer.InvestigatoryDocResult cachedInv = investigatoryCache.get(symbolId);
             int initialPass = cachedInv != null ? cachedInv.investigationPass() : 1;
             SchemaInferrer.InvestigatoryDocResult invDoc = SchemaInferrer.synthesizeInvestigatoryDoc(
@@ -845,7 +1269,7 @@ public final class ServerConfigAtlas {
                 consumers.add(cs.className());
             }
             List<String> bytecodeOptions = "getString".equals(getter)
-                    ? resolveMatchingEnumConstants(artifact.discoveredEnums(), keyPath, sampleObj, !consumers.isEmpty())
+                    ? resolveMatchingEnumConstants(artifact.discoveredEnums(), callSites, keyPath, sampleObj, !consumers.isEmpty())
                     : List.of();
 
             SchemaInferrer.InferredSchema schema = SchemaInferrer.infer(
@@ -909,7 +1333,8 @@ public final class ServerConfigAtlas {
                     "getStringList", "getIntegerList", "getDoubleList", "getFloatList",
                     "getList", "getConfigValue", "getNumber", "getOrDefault",
                     "getDuration", "resolveScalar", "parseSecondsDurationMillis",
-                    "parseDurationSetting", "resolveCapacity", "resolveCapacityInt" -> true;
+                    "parseDurationSetting", "resolveCapacity", "resolveCapacityInt",
+                    "fieldOf", "optionalFieldOf" -> true;
             default -> false;
         };
     }
@@ -952,6 +1377,65 @@ public final class ServerConfigAtlas {
             Object sampleVal,
             boolean hasConsumers
     ) {
+        return resolveMatchingEnumConstants(discoveredEnums, List.of(), keyPath, sampleVal, hasConsumers);
+    }
+
+    private static List<String> resolveMatchingEnumConstants(
+            Map<String, List<String>> discoveredEnums,
+            List<BytecodeConfigScanner.KeyCallSite> callSites,
+            String keyPath,
+            Object sampleVal,
+            boolean hasConsumers
+    ) {
+        String sampleStr = sampleVal instanceof String s ? s.trim() : "";
+        if (callSites != null && !callSites.isEmpty()) {
+            Set<String> matchedLiterals = new LinkedHashSet<>();
+            for (BytecodeConfigScanner.KeyCallSite site : callSites) {
+                for (String guard : site.guardPredicates()) {
+                    if (guard.startsWith("enum: ")) {
+                        String targetEnum = guard.substring("enum: ".length()).trim();
+                        if (discoveredEnums != null && !discoveredEnums.isEmpty()) {
+                            List<String> exact = discoveredEnums.get(targetEnum);
+                            if (exact != null && !exact.isEmpty()) {
+                                return exact;
+                            }
+                            int tDot = Math.max(targetEnum.lastIndexOf('.'), targetEnum.lastIndexOf('$'));
+                            String targetSimple = (tDot >= 0 ? targetEnum.substring(tDot + 1) : targetEnum).toLowerCase(Locale.ROOT);
+                            for (var entry : discoveredEnums.entrySet()) {
+                                String k = entry.getKey();
+                                int kDot = Math.max(k.lastIndexOf('.'), k.lastIndexOf('$'));
+                                String kSimple = (kDot >= 0 ? k.substring(kDot + 1) : k).toLowerCase(Locale.ROOT);
+                                if (kSimple.equals(targetSimple) && !entry.getValue().isEmpty()) {
+                                    return entry.getValue();
+                                }
+                            }
+                        }
+                        List<String> externalEnum = SchemaInferrer.resolveKnownExternalEnumConstants(targetEnum, sampleStr);
+                        if (!externalEnum.isEmpty()) {
+                            return externalEnum;
+                        }
+                    } else if (guard.startsWith("match == ")) {
+                        String lit = guard.substring("match == ".length()).trim();
+                        if (!lit.isEmpty()) {
+                            matchedLiterals.add(lit);
+                        }
+                    }
+                }
+            }
+            if (!matchedLiterals.isEmpty()) {
+                if (!sampleStr.isEmpty()
+                        && sampleStr.matches("^[A-Za-z][A-Za-z0-9_.:-]{1,39}$")
+                        && !"true".equalsIgnoreCase(sampleStr)
+                        && !"false".equalsIgnoreCase(sampleStr)
+                        && !"null".equalsIgnoreCase(sampleStr)
+                        && matchedLiterals.stream().noneMatch(m -> m.equalsIgnoreCase(sampleStr))) {
+                    matchedLiterals.add(sampleStr);
+                }
+                if (matchedLiterals.size() >= 2) {
+                    return List.copyOf(matchedLiterals);
+                }
+            }
+        }
         if (!hasConsumers || discoveredEnums == null || discoveredEnums.isEmpty()) {
             return List.of();
         }
@@ -1591,10 +2075,17 @@ public final class ServerConfigAtlas {
             return new CoercedYamlEdit("", false, List.of());
         }
         String normFile = filePath == null ? "config.yml" : filePath.replace('\\', '/');
-        String shortFile = normFile.replaceFirst("^plugins/[^/]+/", "");
+        String shortFile = normFile.replaceFirst("^(?:plugins|mods)/[^/]+/", "");
         String lowFile = normFile.toLowerCase(Locale.ROOT);
         boolean isToml = lowFile.endsWith(".toml");
         boolean isProps = lowFile.endsWith(".properties");
+        boolean isJsonLike = lowFile.endsWith(".json")
+                || lowFile.endsWith(".jsonc")
+                || lowFile.endsWith(".json5")
+                || lowFile.endsWith(".conf");
+        if (isJsonLike) {
+            return coerceJsonLikeText(artifactId, normFile, shortFile, lowFile, rawYamlText);
+        }
         String currentTomlSection = "";
         List<String> notes = new ArrayList<>();
         String[] lines = rawYamlText.split("\r?\n", -1);
@@ -1711,6 +2202,192 @@ public final class ServerConfigAtlas {
         }
 
         return new CoercedYamlEdit(out.toString(), modified, notes);
+    }
+
+    private CoercedYamlEdit coerceJsonLikeText(
+            String artifactId,
+            String normFile,
+            String shortFile,
+            String lowFile,
+            String rawText
+    ) {
+        List<String> notes = new ArrayList<>();
+        String[] lines = rawText.split("\r?\n", -1);
+        StringBuilder out = new StringBuilder(rawText.length() + 64);
+        Deque<String> keyStack = new ArrayDeque<>();
+        boolean modified = false;
+        boolean notedTabs = false;
+        boolean inBlockComment = false;
+        boolean isHocon = lowFile.endsWith(".conf");
+
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            if (line.contains("\t")) {
+                String detabbed = detabLeadingIndent(line);
+                if (!detabbed.equals(line)) {
+                    line = detabbed;
+                    modified = true;
+                    if (!notedTabs) {
+                        notedTabs = true;
+                        notes.add("Replaced leading Tab indentation with 2 spaces per level in " + normFile + ".");
+                    }
+                }
+            }
+            String trimmed = line.trim();
+            if (inBlockComment) {
+                if (trimmed.contains("*/")) {
+                    inBlockComment = false;
+                }
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+            if (trimmed.startsWith("/*")) {
+                if (!trimmed.contains("*/")) {
+                    inBlockComment = true;
+                }
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+            if (trimmed.isEmpty() || trimmed.startsWith("//") || trimmed.startsWith("#") || "{".equals(trimmed)) {
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+            if (trimmed.startsWith("}")) {
+                if (!keyStack.isEmpty()) {
+                    keyStack.pollLast();
+                }
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+
+            int indentLen = 0;
+            while (indentLen < line.length() && (line.charAt(indentLen) == ' ' || line.charAt(indentLen) == '\t')) {
+                indentLen++;
+            }
+            String indentStr = line.substring(0, indentLen);
+            String body = line.substring(indentLen);
+            int sepIdx = findUnquotedJsonSeparator(body);
+            if (sepIdx <= 0) {
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+            String rawKeyToken = body.substring(0, sepIdx).trim();
+            String key = unquoteJsonToken(rawKeyToken);
+            if (key.isEmpty()) {
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+            String afterSepRaw = body.substring(sepIdx + 1);
+            String[] valAndComment = splitJsonValueAndInlineComment(afterSepRaw);
+            String valWithComma = valAndComment[0].trim();
+            String inlineCommentWithWs = valAndComment[1];
+
+            if ("{".equals(valWithComma)) {
+                keyStack.addLast(key);
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+            if (valWithComma.startsWith("{") || valWithComma.startsWith("[")) {
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+
+            boolean hasTrailingComma = valWithComma.endsWith(",");
+            String rawScalar = hasTrailingComma
+                    ? valWithComma.substring(0, valWithComma.length() - 1).trim()
+                    : valWithComma;
+            boolean wasDoubleQuoted = rawScalar.length() >= 2 && rawScalar.startsWith("\"") && rawScalar.endsWith("\"");
+            String unquotedInput = wasDoubleQuoted ? rawScalar.substring(1, rawScalar.length() - 1) : rawScalar;
+
+            String fullKeyPath = keyStack.isEmpty() ? key : (String.join(".", keyStack) + "." + key);
+            AstConfigNode matchedNode = findNodeForFileAndKey(artifactId, shortFile, normFile, fullKeyPath, key);
+            if (matchedNode == null) {
+                out.append(line);
+                if (i < lines.length - 1) out.append('\n');
+                continue;
+            }
+
+            String coercedScalar = null;
+            CoercedConfigInput coerced = coerceInputForNode(matchedNode, unquotedInput);
+            if (coerced.wasCoerced()) {
+                coercedScalar = coerced.coercedValue();
+                modified = true;
+                notes.addAll(coerced.notes());
+            } else if (!coerced.valid()) {
+                notes.addAll(coerced.notes());
+                String safeFallback = (matchedNode.liveDiskValue() != null && !matchedNode.liveDiskValue().isBlank())
+                        ? matchedNode.liveDiskValue()
+                        : matchedNode.jarDefaultValue();
+                if (safeFallback != null && !safeFallback.isBlank() && !safeFallback.equals(unquotedInput)) {
+                    coercedScalar = safeFallback;
+                    modified = true;
+                    notes.add("Retained safe value '" + safeFallback + "' for " + matchedNode.keyPath()
+                            + " after rejecting invalid input '" + rawScalar + "'.");
+                }
+            }
+
+            if (coercedScalar != null) {
+                String formattedKey = (!isHocon || (rawKeyToken.startsWith("\"") && rawKeyToken.endsWith("\"")))
+                        ? ("\"" + key + "\"")
+                        : rawKeyToken;
+                String formattedVal = formatCoercedJsonScalar(matchedNode, coercedScalar, wasDoubleQuoted);
+                out.append(indentStr)
+                        .append(formattedKey)
+                        .append(": ")
+                        .append(formattedVal)
+                        .append(hasTrailingComma ? "," : "")
+                        .append(inlineCommentWithWs);
+            } else {
+                out.append(line);
+            }
+            if (i < lines.length - 1) out.append('\n');
+        }
+        return new CoercedYamlEdit(out.toString(), modified, notes);
+    }
+
+    private static String formatCoercedJsonScalar(AstConfigNode node, String coercedScalar, boolean wasDoubleQuoted) {
+        String type = node.schema().inferredType();
+        if ("integer".equals(type) || "float".equals(type) || "number".equals(type) || "boolean".equals(type)) {
+            return coercedScalar;
+        }
+        if ("string".equals(type) || "enum".equals(type) || wasDoubleQuoted) {
+            return "\"" + SchemaInferrer.escapeJson(coercedScalar) + "\"";
+        }
+        return coercedScalar;
+    }
+
+    private static String[] splitJsonValueAndInlineComment(String afterSepRaw) {
+        boolean inDouble = false;
+        boolean inSingle = false;
+        for (int i = 0; i < afterSepRaw.length(); i++) {
+            char c = afterSepRaw.charAt(i);
+            if (c == '\\' && i + 1 < afterSepRaw.length()) {
+                i++;
+                continue;
+            }
+            if (c == '"' && !inSingle) {
+                inDouble = !inDouble;
+            } else if (c == '\'' && !inDouble) {
+                inSingle = !inSingle;
+            } else if (!inDouble && !inSingle) {
+                if ((c == '/' && i + 1 < afterSepRaw.length() && afterSepRaw.charAt(i + 1) == '/') || c == '#') {
+                    int wsStart = i;
+                    while (wsStart > 0 && (afterSepRaw.charAt(wsStart - 1) == ' ' || afterSepRaw.charAt(wsStart - 1) == '\t')) {
+                        wsStart--;
+                    }
+                    return new String[]{afterSepRaw.substring(0, wsStart), afterSepRaw.substring(wsStart)};
+                }
+            }
+        }
+        return new String[]{afterSepRaw, ""};
     }
 
     private AstConfigNode findNodeForFileAndKey(String artifactId, String shortFile, String normFile, String fullKeyPath, String leafKey) {
@@ -2164,9 +2841,6 @@ public final class ServerConfigAtlas {
                 + ",\"playerSummary\":\"" + SchemaInferrer.escapeJson(d.playerSummary()) + "\""
                 + ",\"whatChanges\":" + toJsonStringArray(d.whatChanges())
                 + ",\"evidenceChain\":" + toJsonStringArray(d.evidenceChain())
-                + ",\"methodCallSites\":" + toJsonStringArray(d.methodCallSites())
-                + ",\"fieldFlows\":" + toJsonStringArray(d.fieldFlows())
-                + ",\"subsystemTags\":" + toJsonStringArray(d.subsystemTags())
                 + "}";
     }
 

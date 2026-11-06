@@ -1,6 +1,6 @@
-package io.github.dailystruggle.rtp.common.bit.config.atlas;
+package io.github.dailystruggle.bytecode;
 
-import io.github.dailystruggle.rtp.common.bit.config.DirectiveSchemaParser;
+import io.github.dailystruggle.bit.config.DirectiveSchemaParser;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -285,7 +285,7 @@ public final class SchemaInferrer {
                 || "true".equalsIgnoreCase(valStr)
                 || "false".equalsIgnoreCase(valStr);
 
-        // 2. Options resolution: explicit @options > comment regex > bytecode enum constants (only for non-numeric/non-boolean values)
+        // 2. Options resolution: explicit @options > comment regex > bytecode enum constants > built-in engine enums (only for non-numeric/non-boolean values)
         Set<String> resolvedOptions = new LinkedHashSet<>(explicit.options());
         if (resolvedOptions.isEmpty() && !joinedComment.isEmpty()) {
             resolvedOptions.addAll(extractCommentOptions(joinedComment));
@@ -293,6 +293,9 @@ public final class SchemaInferrer {
         if (resolvedOptions.isEmpty() && !isNumericLiteral && !isBooleanLiteral
                 && bytecodeOptions != null && !bytecodeOptions.isEmpty()) {
             resolvedOptions.addAll(bytecodeOptions);
+        }
+        if (resolvedOptions.isEmpty() && !isNumericLiteral && !isBooleanLiteral) {
+            resolvedOptions.addAll(resolveBuiltinEngineEnumOptions(keyPath, rawValue));
         }
 
         // 3. Range resolution: explicit @range > comment regex > key-suffix non-negative floor
@@ -327,11 +330,11 @@ public final class SchemaInferrer {
             } else if (isDurationSuffix(leaf)) {
                 type = "integer";
                 if (unit == null) unit = inferDurationUnit(leaf);
-                if (rangeMin == null) rangeMin = 0.0;
+                if (rangeMin == null) rangeMin = "-1".equals(valStr) ? -1.0 : 0.0;
             } else if (isCountOrDistanceSuffix(leaf)) {
                 type = "integer";
                 if (unit == null) unit = inferDistanceUnit(leaf);
-                if (rangeMin == null && !isCoordinateAxis(leaf)) rangeMin = 0.0;
+                if (rangeMin == null && !isCoordinateAxis(leaf)) rangeMin = "-1".equals(valStr) ? -1.0 : 0.0;
             } else if (isRatioOrChanceSuffix(leaf)) {
                 type = "double";
                 if (rangeMin == null && (leaf.contains("chance") || leaf.contains("percent") || leaf.contains("probability"))) {
@@ -532,9 +535,12 @@ public final class SchemaInferrer {
                 }
             }
             for (BytecodeConfigScanner.KeyCallSite cs : safeSites) {
-                if (!cs.guardPredicates().isEmpty()) {
+                List<String> nonOptionGuards = cs.guardPredicates().stream()
+                        .filter(g -> !g.startsWith("enum: ") && !g.startsWith("match == "))
+                        .toList();
+                if (!nonOptionGuards.isEmpty()) {
                     score += 0.05;
-                    evidence.add("+5% [Pass 2] Bytecode guard/clamp predicate: `" + String.join(", ", cs.guardPredicates()) + "`");
+                    evidence.add("+5% [Pass 2] Bytecode guard/clamp predicate: `" + String.join(", ", nonOptionGuards) + "`");
                     break;
                 }
             }
@@ -1151,6 +1157,9 @@ public final class SchemaInferrer {
         if (pass >= 2 && sites != null) {
             for (BytecodeConfigScanner.KeyCallSite cs : sites) {
                 for (String g : cs.guardPredicates()) {
+                    if (g.startsWith("enum: ") || g.startsWith("match == ")) {
+                        continue;
+                    }
                     if (g.startsWith("clamp ") || g.startsWith("capacity ")) {
                         String item = "`" + g + "`";
                         if (!parts.contains(item) && parts.size() < 3) {
@@ -1557,6 +1566,7 @@ public final class SchemaInferrer {
     private static List<String> formatCallSites(List<BytecodeConfigScanner.KeyCallSite> sites) {
         List<String> out = new ArrayList<>();
         for (BytecodeConfigScanner.KeyCallSite s : sites) {
+            if (out.size() >= 16) break;
             String fb = s.codeFallbackValue() != null ? (", default=" + s.codeFallbackValue()) : "";
             String guards = !s.guardPredicates().isEmpty() ? (" [" + String.join(", ", s.guardPredicates()) + "]") : "";
             String desc = simpleClass(s.className()) + "#" + s.methodName() + " -> " + s.getterMethod() + "(key" + fb + ")" + guards;
@@ -1570,9 +1580,11 @@ public final class SchemaInferrer {
     private static List<String> formatFieldFlows(List<BytecodeConfigScanner.KeyCallSite> sites) {
         List<String> out = new ArrayList<>();
         for (BytecodeConfigScanner.KeyCallSite s : sites) {
+            if (out.size() >= 16) break;
             if (s.assignedField() != null && !s.downstreamMethods().isEmpty()) {
                 List<String> simpleDown = new ArrayList<>();
                 for (String dm : s.downstreamMethods()) {
+                    if (simpleDown.size() >= 8) break;
                     simpleDown.add(simpleClass(dm));
                 }
                 String flow = "this." + s.assignedField() + " -> " + String.join(", ", simpleDown);
@@ -1760,9 +1772,119 @@ public final class SchemaInferrer {
                 || "biome".equals(leaf) || "sound".equals(leaf) || "particle".equals(leaf)
                 || "enchantment".equals(leaf) || "entity-type".equals(leaf) || "entitytype".equals(leaf);
     }
-
     private static String normalizeRegistryName(String leaf) {
         return "entitytype".equals(leaf) ? "entity-type" : leaf;
+    }
+
+    /**
+     * Resolves well-known external Bukkit, Minecraft, or JDK enum constants when bytecode
+     * invokes {@code EnumType.valueOf(String)} on an API enum outside the plugin JAR.
+     */
+    public static List<String> resolveKnownExternalEnumConstants(String binaryOrFqnEnumName, String sampleValue) {
+        if (binaryOrFqnEnumName == null || binaryOrFqnEnumName.isBlank()) {
+            return List.of();
+        }
+        String norm = binaryOrFqnEnumName.replace('/', '.').trim();
+        int lastSep = Math.max(norm.lastIndexOf('.'), norm.lastIndexOf('$'));
+        String simple = (lastSep >= 0 ? norm.substring(lastSep + 1) : norm).toLowerCase(Locale.ROOT);
+        List<String> upper = switch (simple) {
+            case "difficulty" -> List.of("PEACEFUL", "EASY", "NORMAL", "HARD");
+            case "gamemode" -> List.of("SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR");
+            case "environment" -> List.of("NORMAL", "NETHER", "THE_END", "CUSTOM");
+            case "barcolor" -> List.of("PINK", "BLUE", "RED", "GREEN", "YELLOW", "PURPLE", "WHITE");
+            case "barstyle" -> List.of("SOLID", "SEGMENTED_6", "SEGMENTED_10", "SEGMENTED_12", "SEGMENTED_20");
+            case "eventpriority" -> List.of("LOWEST", "LOW", "NORMAL", "HIGH", "HIGHEST", "MONITOR");
+            case "timeunit" -> List.of("MILLISECONDS", "SECONDS", "MINUTES", "HOURS", "DAYS");
+            default -> List.of();
+        };
+        if (upper.isEmpty()) {
+            return List.of();
+        }
+        return adaptEnumCaseToSample(upper, sampleValue);
+    }
+
+    /**
+     * Resolves built-in vanilla / Bukkit / Paper / proxy engine enumeration options for standard
+     * configuration keys (such as {@code difficulty}, {@code gamemode}, {@code environment},
+     * {@code level-type}) while preserving lowercase vs uppercase style from {@code rawValue}.
+     */
+    public static List<String> resolveBuiltinEngineEnumOptions(String keyPath, Object rawValue) {
+        if (keyPath == null || keyPath.isBlank()) {
+            return List.of();
+        }
+        String leaf = normalizeCamelToHyphen(extractLeaf(keyPath));
+        String valStr = rawValue == null ? "" : String.valueOf(rawValue).trim();
+
+        if ("difficulty".equals(leaf) || "server-difficulty".equals(leaf) || "world-difficulty".equals(leaf)
+                || (leaf.endsWith("-difficulty") && matchesAnyIgnoreCase(valStr, List.of("PEACEFUL", "EASY", "NORMAL", "HARD")))) {
+            List<String> base = List.of("PEACEFUL", "EASY", "NORMAL", "HARD");
+            if (valStr.isEmpty() || matchesAnyIgnoreCase(valStr, base)) {
+                return adaptEnumCaseToSample(base, valStr);
+            }
+        }
+        if ("gamemode".equals(leaf) || "game-mode".equals(leaf)
+                || "default-gamemode".equals(leaf) || "default-game-mode".equals(leaf)) {
+            List<String> base = List.of("SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR");
+            if (valStr.isEmpty() || matchesAnyIgnoreCase(valStr, base)) {
+                return adaptEnumCaseToSample(base, valStr);
+            }
+        }
+        if ("environment".equals(leaf) || "world-environment".equals(leaf)
+                || ("dimension".equals(leaf) && matchesAnyIgnoreCase(valStr, List.of("NORMAL", "NETHER", "THE_END", "CUSTOM")))) {
+            List<String> base = List.of("NORMAL", "NETHER", "THE_END", "CUSTOM");
+            if (valStr.isEmpty() || matchesAnyIgnoreCase(valStr, base)) {
+                return adaptEnumCaseToSample(base, valStr);
+            }
+        }
+        if ("level-type".equals(leaf)) {
+            if (valStr.startsWith("minecraft:") || isLowerCaseSample(valStr)) {
+                return List.of(
+                        "minecraft:normal",
+                        "minecraft:flat",
+                        "minecraft:large_biomes",
+                        "minecraft:amplified",
+                        "minecraft:single_biome_surface"
+                );
+            }
+            return List.of("NORMAL", "FLAT", "LARGE_BIOMES", "AMPLIFIED", "SINGLE_BIOME_SURFACE");
+        }
+        if ("region-file-compression".equals(leaf)) {
+            return List.of("deflate", "lz4", "none");
+        }
+        if ("player-info-forwarding-mode".equals(leaf) || "forwarding-mode".equals(leaf)) {
+            return adaptEnumCaseToSample(List.of("NONE", "LEGACY", "BUNGEEGUARD", "MODERN"), valStr);
+        }
+        return List.of();
+    }
+
+    private static boolean matchesAnyIgnoreCase(String val, List<String> candidates) {
+        if (val == null || val.isEmpty()) return false;
+        for (String c : candidates) {
+            if (c.equalsIgnoreCase(val)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isLowerCaseSample(String sampleValue) {
+        if (sampleValue == null || sampleValue.isEmpty()) return false;
+        boolean hasLower = false;
+        for (int i = 0; i < sampleValue.length(); i++) {
+            char ch = sampleValue.charAt(i);
+            if (Character.isUpperCase(ch)) return false;
+            if (Character.isLowerCase(ch)) hasLower = true;
+        }
+        return hasLower;
+    }
+
+    private static List<String> adaptEnumCaseToSample(List<String> upperOptions, String sampleValue) {
+        if (isLowerCaseSample(sampleValue)) {
+            List<String> lower = new ArrayList<>(upperOptions.size());
+            for (String opt : upperOptions) {
+                lower.add(opt.toLowerCase(Locale.ROOT));
+            }
+            return List.copyOf(lower);
+        }
+        return upperOptions;
     }
 
     private static boolean isDurationSuffix(String leaf) {
