@@ -2090,4 +2090,64 @@ class LeafFuzzCrossPlatformQcTest {
                         && enrichedKernel.contains("stageCommandsYmlOverride"),
                 "LeafFuzz UML tab kernel must expose 1-click lockCommandInConfig -> stageCommandsYmlOverride handoff");
     }
+
+    @Test
+    @DisplayName("ADR-125 & leaffuzz-ADR-001: PersonaPolicyBotActor step_away_anchor and rtp_or_anchor expand multi-chunk spiral and classify mining/building skills")
+    void personaPolicyBotActorOutwardSpiralExplorationAndSkillClassification(@TempDir Path tempDir) {
+        PersonaProfile explorerProfile = PersonaPolicyBotActor.defaultPersonaCatalog().stream()
+                .filter(p -> p.taxonomyArchetype().contains("explorer"))
+                .findFirst()
+                .orElse(PersonaPolicyBotActor.defaultPersonaCatalog().get(0));
+        PersonaPolicyBotActor bot = new PersonaPolicyBotActor(explorerProfile, "default", 42);
+        bot.setLocation(0, 64, 0);
+
+        for (int i = 0; i < 16; i++) {
+            BotStepRecord step = bot.executeMicroSkillByIndex(3); // step_away_anchor
+            assertTrue(step.isExplorationSkill(), "step_away_anchor must be classified as exploration skill");
+            assertFalse(step.isWorldMutationSkill(), "step_away_anchor must not be classified as world mutation");
+        }
+        assertTrue(
+                bot.chunksExploredCount() >= 6,
+                "16 outward step_away_anchor steps must traverse >= 6 distinct chunks instead of looping in a 4x4 square, got "
+                        + bot.chunksExploredCount()
+        );
+
+        int chunksBeforeRtp = bot.chunksExploredCount();
+        BotStepRecord rtpStep = bot.executeMicroSkillByIndex(1); // rtp_or_anchor
+        assertTrue(rtpStep.isExplorationSkill());
+        assertTrue(
+                bot.chunksExploredCount() > chunksBeforeRtp,
+                "rtp_or_anchor must advance to a new spiral anchor chunk"
+        );
+
+        BotStepRecord digStep = bot.executeMicroSkillByIndex(4); // harvest_nearest
+        assertTrue(digStep.isMiningSkill());
+        assertTrue(digStep.isWorldMutationSkill());
+        assertEquals(3, digStep.targetBlockOffset().length);
+
+        BotStepRecord placeStep = bot.executeMicroSkillByIndex(8); // place_wall_ring
+        assertTrue(placeStep.isBuildingSkill());
+        assertTrue(placeStep.isWorldMutationSkill());
+        assertEquals(3, placeStep.targetBlockOffset().length);
+        FakeServerAccessor accessor = new FakeServerAccessor(
+                tempDir,
+                new ArrayList<>(),
+                new AtomicReference<>()
+        );
+        try (LeafFuzzRuntime runtime = new LeafFuzzRuntime(accessor)) {
+            runtime.load();
+            NmsEmbeddedPlayerSession.NmsSwarmRosterController swarm =
+                    new NmsEmbeddedPlayerSession.NmsSwarmRosterController(runtime, () -> null);
+            LeafFuzzRuntime.SwarmSnapshot snap = swarm.rampToPopulation(16);
+            assertEquals(16, snap.onlinePlayers());
+            for (int tick = 0; tick < 8; tick++) {
+                swarm.stepConcurrentSwarm(0);
+            }
+            assertTrue(
+                    runtime.recentBotSteps().stream().anyMatch(BotStepRecord::isWorldMutationSkill),
+                    "Stepping a 16-bot mixed explorer/builder swarm must execute mining/building micro-skills"
+            );
+            swarm.teardownAll();
+        }
+    }
 }

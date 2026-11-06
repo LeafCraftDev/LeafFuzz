@@ -280,40 +280,111 @@ public final class PersonaPolicyBotActor {
      * @param clickDelayMs    cadence interval in milliseconds derived from persona biometrics
      * @param online          whether the synthetic bot remains online after the step
      */
-    public record BotStepRecord(
-            int stepIndex,
-            String selectedSkill,
-            int skillIndex,
-            int x,
-            int y,
-            int z,
-            float yawDeg,
-            float pitchDeg,
-            int hotbarSlot,
-            int clickDelayMs,
-            boolean online
-    ) {
-    }
+      public record BotStepRecord(
+              int stepIndex,
+              String selectedSkill,
+              int skillIndex,
+              int x,
+              int y,
+              int z,
+              float yawDeg,
+              float pitchDeg,
+              int hotbarSlot,
+              int clickDelayMs,
+              boolean online
+      ) {
+          /** Returns {@code true} if the selected micro-skill is a spatial exploration action. */
+          public boolean isExplorationSkill() {
+              if (selectedSkill == null) {
+                  return false;
+              }
+              return switch (selectedSkill) {
+                  case "rtp_or_anchor", "step_toward_anchor", "step_away_anchor" -> true;
+                  default -> false;
+              };
+          }
 
-    private final PersonaProfile persona;
-    private final String permissionTier;
-    private final byte[] policyWeights;
-    private final int initialSeed;
-    private int rngState;
+          /** Returns {@code true} if the selected micro-skill breaks or mines blocks. */
+          public boolean isMiningSkill() {
+              if (selectedSkill == null) {
+                  return false;
+              }
+              return switch (selectedSkill) {
+                  case "harvest_nearest", "dig_stair_down", "dig_tunnel_fwd" -> true;
+                  default -> false;
+              };
+          }
 
-    private volatile int x;
-    private volatile int y;
-    private volatile int z;
-    private int anchorX;
-    private int anchorY;
-    private int anchorZ;
-    private volatile int yawIdx;
-    private volatile float yawDeg;
-    private volatile float pitchDeg;
-    private int hotbarCursor;
-    private volatile int currentHotbarSlot;
-    private int stepCount;
-    private int stepsSinceProgress;
+          /** Returns {@code true} if the selected micro-skill places construction or utility blocks. */
+          public boolean isBuildingSkill() {
+              if (selectedSkill == null) {
+                  return false;
+              }
+              return switch (selectedSkill) {
+                  case "place_wall_ring",
+                          "place_roof_cell",
+                          "place_pillar_or_bridge",
+                          "place_torch_if_dark",
+                          "place_utility",
+                          "place_redstone_link" -> true;
+                  default -> false;
+              };
+          }
+
+          /** Returns {@code true} if the selected micro-skill mutates world blocks (mining or building). */
+          public boolean isWorldMutationSkill() {
+              return isMiningSkill() || isBuildingSkill();
+          }
+
+          /**
+           * Returns the deterministic relative block offset {@code {dx, dy, dz}} targeted by this
+           * step's mining or building micro-skill.
+           */
+          public int[] targetBlockOffset() {
+              int ringIdx = Math.floorMod(stepIndex, RING_OFFSETS_12.length);
+              int[] ring = RING_OFFSETS_12[ringIdx];
+              if (selectedSkill == null) {
+                  return new int[]{1, 0, 0};
+              }
+              return switch (selectedSkill) {
+                  case "dig_stair_down" -> new int[]{ring[0], -1, ring[1]};
+                  case "dig_tunnel_fwd", "harvest_nearest" -> new int[]{ring[0], 0, ring[1]};
+                  case "place_roof_cell" -> new int[]{ring[0], 2, ring[1]};
+                  case "place_pillar_or_bridge" -> new int[]{0, -1, 0};
+                  default -> new int[]{ring[0], 0, ring[1]};
+              };
+          }
+      }
+
+      private static final int[][] RING_OFFSETS_12 = {
+              {-2, -1}, {-2, 0}, {-2, 1},
+              {2, -1}, {2, 0}, {2, 1},
+              {-1, -2}, {0, -2}, {1, -2},
+              {-1, 2}, {0, 2}, {1, 2}
+      };
+
+      private final PersonaProfile persona;
+      private final String permissionTier;
+      private final byte[] policyWeights;
+      private final int initialSeed;
+      private int rngState;
+
+      private volatile int x;
+      private volatile int y;
+      private volatile int z;
+      private int anchorX;
+      private int anchorY;
+      private int anchorZ;
+      private volatile int yawIdx;
+      private volatile float yawDeg;
+      private volatile float pitchDeg;
+      private int hotbarCursor;
+      private volatile int currentHotbarSlot;
+      private int stepCount;
+      private int awayLegStep;
+      private int awayLegLength = 2;
+      private int awayTurnCount;
+      private int stepsSinceProgress;
     private int rtpCount;
     private int logsCount;
     private int planksCount;
@@ -477,41 +548,51 @@ public final class PersonaPolicyBotActor {
      * @param skillIdx index into {@link #POLICY_MICRO_SKILLS}
      * @return record of the executed micro-skill and updated bot kinematics
      */
-    public synchronized BotStepRecord executeMicroSkillByIndex(int skillIdx) {
-        int clampedIdx = Math.floorMod(skillIdx, POLICY_MICRO_SKILLS.size());
-        String skill = POLICY_MICRO_SKILLS.get(clampedIdx);
-        int[] dir = CARDINAL_DIRS[yawIdx & 3];
-        boolean progressed = false;
+      public synchronized BotStepRecord executeMicroSkillByIndex(int skillIdx) {
+          int clampedIdx = Math.floorMod(skillIdx, POLICY_MICRO_SKILLS.size());
+          String skill = POLICY_MICRO_SKILLS.get(clampedIdx);
+          int[] dir = CARDINAL_DIRS[yawIdx & 3];
+          boolean progressed = false;
 
-        switch (skill) {
-            case "rtp_or_anchor" -> {
-                rtpCount++;
-                anchorX = x;
-                anchorY = y;
-                anchorZ = z;
-                progressed = true;
-            }
-            case "step_toward_anchor" -> {
-                int dx = Integer.compare(anchorX, x) * 2;
-                int dz = Integer.compare(anchorZ, z) * 2;
-                x += dx;
-                z += dz;
-                chunksExplored.add((x >> 4) + "," + (z >> 4));
-                progressed = (dx != 0 || dz != 0);
-            }
-            case "step_away_anchor" -> {
-                x += dir[0] * 4;
-                z += dir[1] * 4;
-                yawIdx = (yawIdx + 1) & 3;
-                progressed = chunksExplored.add((x >> 4) + "," + (z >> 4));
-            }
-            case "harvest_nearest" -> {
-                logsCount += 2;
-                cobbleCount += 2;
-                progressed = true;
-            }
-            case "dig_stair_down", "dig_tunnel_fwd" -> {
-                y = Math.max(-56, y - 2);
+          switch (skill) {
+              case "rtp_or_anchor" -> {
+                  rtpCount++;
+                  double radius = 32.0 * Math.sqrt(rtpCount);
+                  double theta = (rtpCount + (initialSeed & 15)) * 2.39996322972865332;
+                  x += (int) Math.round(radius * Math.cos(theta));
+                  z += (int) Math.round(radius * Math.sin(theta));
+                  anchorX = x;
+                  anchorY = y;
+                  anchorZ = z;
+                  awayLegStep = 0;
+                  awayLegLength = 2;
+                  awayTurnCount = 0;
+                  chunksExplored.add((x >> 4) + "," + (z >> 4));
+                  progressed = true;
+              }
+              case "step_toward_anchor" -> {
+                  int dx = Integer.compare(anchorX, x) * 4;
+                  int dz = Integer.compare(anchorZ, z) * 4;
+                  x += dx;
+                  z += dz;
+                  chunksExplored.add((x >> 4) + "," + (z >> 4));
+                  progressed = (dx != 0 || dz != 0);
+              }
+              case "step_away_anchor" -> {
+                  x += dir[0] * 8;
+                  z += dir[1] * 8;
+                  awayLegStep++;
+                  if (awayLegStep >= awayLegLength) {
+                      awayLegStep = 0;
+                      yawIdx = (yawIdx + 1) & 3;
+                      awayTurnCount++;
+                      if ((awayTurnCount & 1) == 0) {
+                          awayLegLength = Math.min(32, awayLegLength + 1);
+                      }
+                  }
+                  progressed = chunksExplored.add((x >> 4) + "," + (z >> 4));
+              }
+              case "harvest_nearest" -> {
                 x += dir[0];
                 z += dir[1];
                 cobbleCount += 3;
@@ -1007,22 +1088,25 @@ public final class PersonaPolicyBotActor {
     public boolean isContainerOpen() {
         return containerOpen;
     }
+      public synchronized Set<String> chunksExplored() {
+          return Set.copyOf(chunksExplored);
+      }
 
-    public Set<String> chunksExplored() {
-        return Collections.unmodifiableSet(chunksExplored);
-    }
+      public synchronized int chunksExploredCount() {
+          return chunksExplored.size();
+      }
 
-    public List<BotStepRecord> stepHistory() {
-        return Collections.unmodifiableList(stepHistory);
-    }
+      public synchronized List<BotStepRecord> stepHistory() {
+          return List.copyOf(stepHistory);
+      }
 
-    public List<String> executedCommands() {
-        return Collections.unmodifiableList(executedCommands);
-    }
+      public synchronized List<String> executedCommands() {
+          return List.copyOf(executedCommands);
+      }
 
-    private static final List<PersonaProfile> DEFAULT_CATALOG = buildDefaultCatalog();
+      private static final List<PersonaProfile> DEFAULT_CATALOG = buildDefaultCatalog();
 
-    private static List<PersonaProfile> buildDefaultCatalog() {
+      private static List<PersonaProfile> buildDefaultCatalog() {
         return List.of(
                 createBuiltinPersona(
                         0, "LF_Explr", 0.065, 1.2, 85.0, 0.85, 0.70, 0.35,
