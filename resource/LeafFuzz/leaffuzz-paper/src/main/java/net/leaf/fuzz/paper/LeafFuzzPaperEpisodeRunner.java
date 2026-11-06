@@ -160,27 +160,41 @@ public final class LeafFuzzPaperEpisodeRunner
         int toChurn = Math.max(0, Math.min(activeSwarmActors.size(), churnCount));
         final int[] bgActions = {0};
 
-        Runnable stepBatch = () -> {
-            LogAndStallSignatureOracle oracle = runtime.faultOracle();
-            for (int i = 0; i < activeSwarmActors.size(); i++) {
-                PersonaPolicyBotActor bot = activeSwarmActors.get(i);
-                BotStepRecord step = bot.stepAutonomousPolicy();
-                runtime.recordPlatformBotStep(step);
-                markVirtualChunkNeighborhood(bot.x() >> 4, bot.z() >> 4);
-                bgActions[0]++;
-                LiveServerPlayerSession live = i < activeSwarmSessions.size() ? activeSwarmSessions.get(i) : null;
-                if (live != null) {
-                    live.sendMovePacket(
-                            step.x() + 0.5,
-                            step.y(),
-                            step.z() + 0.5,
-                            step.yawDeg(),
-                            step.pitchDeg(),
-                            oracle
-                    );
-                }
-            }
-            for (int c = 0; c < toChurn; c++) {
+          Runnable stepBatch = () -> {
+              LogAndStallSignatureOracle oracle = runtime.faultOracle();
+              for (int i = 0; i < activeSwarmActors.size(); i++) {
+                  PersonaPolicyBotActor bot = activeSwarmActors.get(i);
+                  BotStepRecord step = bot.stepAutonomousPolicy();
+                  runtime.recordPlatformBotStep(step);
+                  markVirtualChunkNeighborhood(bot.x() >> 4, bot.z() >> 4);
+                  bgActions[0]++;
+                  LiveServerPlayerSession live = i < activeSwarmSessions.size() ? activeSwarmSessions.get(i) : null;
+                  if (live != null) {
+                      live.sendMovePacket(
+                              step.x() + 0.5,
+                              step.y(),
+                              step.z() + 0.5,
+                              step.yawDeg(),
+                              step.pitchDeg(),
+                              oracle
+                      );
+                      if (step.isWorldMutationSkill() && live.craftPlayer() != null) {
+                          dispatchReversibleWorldMicroSkill(
+                                  targetServer,
+                                  live.craftPlayer(),
+                                  step.selectedSkill(),
+                                  runtime,
+                                  oracle,
+                                  new ArrayList<>()
+                          );
+                      } else if (step.isWorldMutationSkill()) {
+                          runtime.recordBlockSkillExecution();
+                      }
+                  } else if (step.isWorldMutationSkill()) {
+                      runtime.recordBlockSkillExecution();
+                  }
+              }
+              for (int c = 0; c < toChurn; c++) {
                 int idx = Math.floorMod(swarmChurnCursor++, activeSwarmActors.size());
                 LiveServerPlayerSession oldLive = idx < activeSwarmSessions.size() ? activeSwarmSessions.get(idx) : null;
                 if (oldLive != null) {
@@ -279,38 +293,38 @@ public final class LeafFuzzPaperEpisodeRunner
         this.cachedMainThreadEntities = worldEntities;
     }
 
-    private LeafFuzzRuntime.SwarmSnapshot buildPaperSwarmSnapshot(
-            Server targetServer,
-            int bgActions,
-            int churned
-    ) {
-        int online = activeSwarmActors.size();
-        int loadedChunks = Math.max(virtualSwarmChunks.size(), this.cachedMainThreadChunks);
-        int entities = Math.max(online * 2, this.cachedMainThreadEntities);
-        if (targetServer != null) {
-            try {
-                Collection<? extends Player> onlinePlayers = targetServer.getOnlinePlayers();
-                if (onlinePlayers != null) {
-                    online = Math.max(online, onlinePlayers.size());
-                }
-                if (isPrimaryThread(targetServer)) {
-                    refreshMainThreadWorldCensus(targetServer);
-                    loadedChunks = Math.max(loadedChunks, this.cachedMainThreadChunks);
-                    entities = Math.max(entities, this.cachedMainThreadEntities);
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        return new LeafFuzzRuntime.SwarmSnapshot(online, loadedChunks, entities, bgActions, churned);
-    }
+      private synchronized LeafFuzzRuntime.SwarmSnapshot buildPaperSwarmSnapshot(
+              Server targetServer,
+              int bgActions,
+              int churned
+      ) {
+          int online = activeSwarmActors.size();
+          int loadedChunks = Math.max(virtualSwarmChunks.size(), this.cachedMainThreadChunks);
+          int entities = Math.max(online * 2, this.cachedMainThreadEntities);
+          if (targetServer != null) {
+              try {
+                  Collection<? extends Player> onlinePlayers = targetServer.getOnlinePlayers();
+                  if (onlinePlayers != null) {
+                      online = Math.max(online, onlinePlayers.size());
+                  }
+                  if (isPrimaryThread(targetServer)) {
+                      refreshMainThreadWorldCensus(targetServer);
+                      loadedChunks = Math.max(loadedChunks, this.cachedMainThreadChunks);
+                      entities = Math.max(entities, this.cachedMainThreadEntities);
+                  }
+              } catch (Throwable ignored) {
+              }
+          }
+          return new LeafFuzzRuntime.SwarmSnapshot(online, loadedChunks, entities, bgActions, churned);
+      }
 
-    private void markVirtualChunkNeighborhood(int cx, int cz) {
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                virtualSwarmChunks.add((cx + dx) + "," + (cz + dz));
-            }
-        }
-    }
+      private synchronized void markVirtualChunkNeighborhood(int cx, int cz) {
+          for (int dx = -1; dx <= 1; dx++) {
+              for (int dz = -1; dz <= 1; dz++) {
+                  virtualSwarmChunks.add((cx + dx) + "," + (cz + dz));
+              }
+          }
+      }
 
     /**
      * Salient ("shiny / distinct") item slot discovered inside an open container menu.
@@ -2277,44 +2291,42 @@ public final class LeafFuzzPaperEpisodeRunner
                 return null;
             }
         }
-
-        void sendMovePacket(
-                double x,
-                double y,
-                double z,
-                float yaw,
-                float pitch,
-                LogAndStallSignatureOracle oracle
-        ) {
-            if (disconnected) {
-                return;
-            }
-            try {
-                if (craftPlayer != null && craftPlayer.getWorld() != null) {
-                    org.bukkit.World w = craftPlayer.getWorld();
-                    Location cur = craftPlayer.getLocation();
-                    if (cur != null) {
-                        double dx = Math.max(-3.5, Math.min(3.5, x - cur.getX()));
-                        double dz = Math.max(-3.5, Math.min(3.5, z - cur.getZ()));
-                        double candX = cur.getX() + dx;
-                        double candZ = cur.getZ() + dz;
-                        int cx = ((int) Math.floor(candX)) >> 4;
-                        int cz = ((int) Math.floor(candZ)) >> 4;
-                        if (w.isChunkLoaded(cx, cz)) {
-                            x = candX;
-                            y = cur.getY();
-                            z = candZ;
-                        } else {
-                            x = cur.getX();
-                            y = cur.getY();
-                            z = cur.getZ();
+          void sendMovePacket(
+                  double x,
+                  double y,
+                  double z,
+                  float yaw,
+                  float pitch,
+                  LogAndStallSignatureOracle oracle
+          ) {
+              if (disconnected) {
+                  return;
+              }
+              try {
+                  if (craftPlayer != null && craftPlayer.getWorld() != null) {
+                      org.bukkit.World w = craftPlayer.getWorld();
+                      Location cur = craftPlayer.getLocation();
+                      if (cur != null) {
+                          double dx = Math.max(-8.0, Math.min(8.0, x - cur.getX()));
+                          double dz = Math.max(-8.0, Math.min(8.0, z - cur.getZ()));
+                          double candX = cur.getX() + dx;
+                          double candZ = cur.getZ() + dz;
+                          int cx = ((int) Math.floor(candX)) >> 4;
+                          int cz = ((int) Math.floor(candZ)) >> 4;
+                          if (w.isChunkLoaded(cx, cz)) {
+                              x = candX;
+                              y = cur.getY();
+                              z = candZ;
+                          } else {
+                              x = cur.getX();
+                              y = cur.getY();
+                              z = cur.getZ();
+                          }
                         }
                     }
-                }
-                ClassLoader cl = serverPlayer.getClass().getClassLoader();
-                Object listener = resolvePacketListener();
-                if (listener == null) {
-                    return;
+                  ClassLoader cl = serverPlayer.getClass().getClassLoader();
+                  Object listener = resolvePacketListener();
+                  if (listener == null) {
                 }
                 Class<?> posRotCls = Class.forName(
                         "net.minecraft.network.protocol.game.ServerboundMovePlayerPacket$PosRot",

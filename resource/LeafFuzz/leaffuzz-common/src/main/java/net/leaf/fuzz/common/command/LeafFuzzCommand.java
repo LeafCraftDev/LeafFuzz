@@ -1,12 +1,12 @@
 package net.leaf.fuzz.common.command;
 
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalFinding;
 import io.github.dailystruggle.commandsapi.common.CommandParameter;
 import io.github.dailystruggle.commandsapi.common.CommandsAPI;
 import io.github.dailystruggle.commandsapi.common.CommandsAPICommand;
 import io.github.dailystruggle.commandsapi.common.localCommands.TreeCommand;
 import io.github.dailystruggle.menu.api.MenuBindingSupport;
 import io.github.dailystruggle.menu.api.MenuDescriptor;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.ClaimDeliveryFinding;
 import io.github.dailystruggle.server.api.BookMenuSpec;
 import io.github.dailystruggle.server.api.ServerAccessor;
 import net.leaf.fuzz.common.BrigadierDispatcherInspector;
@@ -67,7 +67,7 @@ import java.util.logging.Level;
 public final class LeafFuzzCommand implements TreeCommand {
 
     private static final Set<String> VALID_STAGES = Set.of(
-            "all", "commands", "fuzz", "faults", "leaks", "claims", "snapshot"
+            "all", "commands", "fuzz", "faults", "leaks", "causal", "snapshot"
     );
     private static final Set<String> VALID_RESET_SCOPES = Set.of(
             "all", "faults", "leaks", "campaign"
@@ -81,6 +81,8 @@ public final class LeafFuzzCommand implements TreeCommand {
     private final ReportSub reportSub;
     private final Map<String, CommandParameter> parameterLookup = new ConcurrentHashMap<>();
     private final Map<String, CommandsAPICommand> commandLookup = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicBoolean badParameterInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public LeafFuzzCommand(String name, ServerAccessor accessor, LeafFuzzRuntime runtime) {
         this.name = (name == null || name.isBlank()) ? "fuzz" : name.trim();
@@ -165,46 +167,14 @@ public final class LeafFuzzCommand implements TreeCommand {
     }
 
     @Override
-    public java.util.concurrent.CompletableFuture<Boolean> onCommand(
-            UUID callerId,
-            java.util.function.Predicate<String> permissionCheckMethod,
-            Consumer<String> messageMethod,
-            String[] args
-    ) {
-        return TreeCommand.super.onCommand(
-                callerId,
-                permissionCheckMethod,
-                messageMethod,
-                normalizePositionalCheckArgs(args),
-                0,
-                null
-        );
-    }
-
-    private static String[] normalizePositionalCheckArgs(String[] args) {
-        if (args == null || args.length < 2 || !"check".equalsIgnoreCase(args[0])) {
-            return args;
-        }
-        String[] copy = args.clone();
-        if (!copy[1].contains("=") && !"help".equalsIgnoreCase(copy[1])) {
-            copy[1] = "target=" + copy[1];
-            if (copy.length >= 3 && !copy[2].contains("=")) {
-                try {
-                    Integer.parseInt(copy[2].trim());
-                    copy[2] = "episodes=" + copy[2].trim();
-                } catch (NumberFormatException ignored) {
-                }
-            }
-        }
-        return copy;
-    }
-
-    @Override
     public boolean onCommand(
             UUID callerId,
             Map<String, List<String>> parameterValues,
             CommandsAPICommand nextCommand
     ) {
+        if (badParameterInFlight.compareAndSet(true, false)) {
+            return false;
+        }
         if (nextCommand != null) {
             return true;
         }
@@ -241,8 +211,13 @@ public final class LeafFuzzCommand implements TreeCommand {
                 (u, v) -> {
                     try {
                         int n = Integer.parseInt(v.trim());
-                        return n >= 1 && n <= 100_000;
+                        boolean ok = n >= 1 && n <= 100_000;
+                        if (!ok) {
+                            badParameterInFlight.set(true);
+                        }
+                        return ok;
                     } catch (Exception e) {
+                        badParameterInFlight.set(true);
                         return false;
                     }
                 }
@@ -260,6 +235,7 @@ public final class LeafFuzzCommand implements TreeCommand {
                 "Concurrent player roster size (1..500 or 'auto'/'ramp' to ramp until unstable)",
                 (u, v) -> {
                     if (v == null || v.isBlank()) {
+                        badParameterInFlight.set(true);
                         return false;
                     }
                     String trimmed = v.trim().toLowerCase(Locale.ROOT);
@@ -268,8 +244,13 @@ public final class LeafFuzzCommand implements TreeCommand {
                     }
                     try {
                         int n = Integer.parseInt(trimmed);
-                        return n >= 1 && n <= 500;
+                        boolean ok = n >= 1 && n <= 500;
+                        if (!ok) {
+                            badParameterInFlight.set(true);
+                        }
+                        return ok;
                     } catch (Exception e) {
+                        badParameterInFlight.set(true);
                         return false;
                     }
                 }
@@ -284,8 +265,14 @@ public final class LeafFuzzCommand implements TreeCommand {
     private CommandParameter createStageParameter() {
         return new CommandParameter(
                 "leaffuzz.admin",
-                "QC stage: all, commands, fuzz, faults, leaks, claims, or snapshot",
-                (u, v) -> v != null && VALID_STAGES.contains(v.trim().toLowerCase(Locale.ROOT))
+                "QC stage: all, commands, fuzz, faults, leaks, causal, or snapshot",
+                (u, v) -> {
+                    boolean ok = v != null && VALID_STAGES.contains(v.trim().toLowerCase(Locale.ROOT));
+                    if (!ok) {
+                        badParameterInFlight.set(true);
+                    }
+                    return ok;
+                }
         ) {
             @Override
             public Set<String> values() {
@@ -390,6 +377,9 @@ public final class LeafFuzzCommand implements TreeCommand {
                 Map<String, List<String>> parameterValues,
                 CommandsAPICommand nextCommand
         ) {
+            if (badParameterInFlight.compareAndSet(true, false)) {
+                return false;
+            }
             if (nextCommand != null) {
                 return true;
             }
@@ -402,7 +392,7 @@ public final class LeafFuzzCommand implements TreeCommand {
                 case "commands" -> executeCommandsStage(callerId, target);
                 case "faults" -> executeFaultsStage(callerId, target);
                 case "leaks" -> executeLeaksScreenStage(callerId, target);
-                case "claims" -> executeClaimsStage(callerId, target);
+                case "causal" -> executeCausalStage(callerId, target);
                 case "snapshot" -> executeLeaksSnapshotStage(callerId);
                 default -> executeFullQcPass(callerId, target, episodes, players);
             };
@@ -570,22 +560,22 @@ public final class LeafFuzzCommand implements TreeCommand {
             return true;
         }
 
-        private boolean executeClaimsStage(UUID callerId, String target) {
-            List<ClaimDeliveryFinding> findings = runtime.auditClaimDelivery(target);
+        private boolean executeCausalStage(UUID callerId, String target) {
+            List<CausalFinding> findings = runtime.auditCausalDelivery(target);
             sendReply(
                     callerId,
-                    "&fFirst-Order & Second-Order Claim Delivery Audit [&a" + target + "&f]: &e"
+                    "&fFirst-Order & Second-Order Bytecode & Causal Audit [&a" + target + "&f]: &e"
                             + findings.size() + " &7finding(s)",
                     false
             );
             for (int i = 0; i < Math.min(8, findings.size()); i++) {
-                ClaimDeliveryFinding f = findings.get(i);
+                CausalFinding f = findings.get(i);
                 sendReply(
                         callerId,
                         "  &e[" + f.confidenceTier().name() + " " + f.confidencePercent()
                                 + "%] &7(Order " + f.order() + " - " + f.kind().name()
-                                + ") &fClaims: &7" + f.claims()
-                                + " &f-> Does Not Deliver: &c" + f.doesNotDeliver(),
+                                + ") &fDeclared: &7" + f.declaredSurface()
+                                + " &f-> Finding: &c" + f.causalDefect(),
                         false
                 );
                 if (!f.llmExplanation().isEmpty()) {
@@ -683,7 +673,13 @@ public final class LeafFuzzCommand implements TreeCommand {
                     new CommandParameter(
                             "leaffuzz.admin",
                             "Scope to reset: all, faults, leaks, or campaign",
-                            (u, v) -> v != null && VALID_RESET_SCOPES.contains(v.trim().toLowerCase(Locale.ROOT))
+                            (u, v) -> {
+                                boolean ok = v != null && VALID_RESET_SCOPES.contains(v.trim().toLowerCase(Locale.ROOT));
+                                if (!ok) {
+                                    badParameterInFlight.set(true);
+                                }
+                                return ok;
+                            }
                     ) {
                         @Override
                         public Set<String> values() {
@@ -699,6 +695,9 @@ public final class LeafFuzzCommand implements TreeCommand {
                 Map<String, List<String>> parameterValues,
                 CommandsAPICommand nextCommand
         ) {
+            if (badParameterInFlight.compareAndSet(true, false)) {
+                return false;
+            }
             if (nextCommand != null) {
                 return true;
             }
@@ -717,29 +716,33 @@ public final class LeafFuzzCommand implements TreeCommand {
             if (resetLeaks) {
                 runtime.retentionScreener().reset();
             }
-            int restoredJars = 0;
-            if (resetCampaign) {
-                FuzzCampaignStateStore store = runtime.campaignStateStore();
-                Optional<CampaignState> cur = store.load();
-                if (cur.isPresent()) {
-                    try {
-                        store.save(cur.get().withStatus(CampaignStatus.ABORTED, System.currentTimeMillis()));
-                    } catch (Exception e) {
-                        accessor.log(Level.WARNING, "[LeafFuzz] Failed to reset campaign state", e);
+            Runnable resetTask = () -> {
+                int restoredJars = 0;
+                if (resetCampaign) {
+                    FuzzCampaignStateStore store = runtime.campaignStateStore();
+                    Optional<CampaignState> cur = store.load();
+                    if (cur.isPresent()) {
+                        try {
+                            store.save(cur.get().withStatus(CampaignStatus.ABORTED, System.currentTimeMillis()));
+                        } catch (Exception e) {
+                            accessor.log(Level.WARNING, "[LeafFuzz] Failed to reset campaign state", e);
+                        }
+                    }
+                    for (Path dir : LeafFuzzRuntime.resolveArchiveDirectories(accessor.getRootFolder())) {
+                        try {
+                            restoredJars += store.abortAndRestore(dir).size();
+                        } catch (Exception e) {
+                            accessor.log(Level.FINE, "[LeafFuzz] Failed to restore disabled archives in " + dir, e);
+                        }
                     }
                 }
-                for (Path dir : LeafFuzzRuntime.resolveArchiveDirectories(accessor.getRootFolder())) {
-                    try {
-                        restoredJars += store.abortAndRestore(dir).size();
-                    } catch (Exception ignored) {
-                    }
-                }
-            }
-            sendReply(
-                    callerId,
-                    "&aReset complete &7(scope=&f" + scope + "&7, restored archives=&f" + restoredJars + "&7).",
-                    false
-            );
+                sendReply(
+                        callerId,
+                        "&aReset complete &7(scope=&f" + scope + "&7, restored archives=&f" + restoredJars + "&7).",
+                        false
+                );
+            };
+            accessor.scheduler().ifPresentOrElse(s -> s.runAsync(resetTask), resetTask);
             return true;
         }
     }
@@ -790,20 +793,22 @@ public final class LeafFuzzCommand implements TreeCommand {
                 Map<String, List<String>> parameterValues,
                 CommandsAPICommand nextCommand
         ) {
-            List<String> errors = runtime.reloadAndValidate();
-            if (errors.isEmpty()) {
-                sendReply(callerId, runtime.config().messages().reloadSuccess(), false);
-            } else {
-                sendReply(
-                        callerId,
-                        runtime.config().messages().reloadFailed().replace("[errors]", String.join("; ", errors)),
-                        true
-                );
-            }
+            Runnable reloadTask = () -> {
+                List<String> errors = runtime.reloadAndValidate();
+                if (errors.isEmpty()) {
+                    sendReply(callerId, runtime.config().messages().reloadSuccess(), false);
+                } else {
+                    sendReply(
+                            callerId,
+                            runtime.config().messages().reloadFailed().replace("[errors]", String.join("; ", errors)),
+                            true
+                    );
+                }
+            };
+            accessor.scheduler().ifPresentOrElse(s -> s.runAsync(reloadTask), reloadTask);
             return true;
         }
     }
-
     private static String joinedParam(Map<String, List<String>> params, String key, String fallback) {
         if (params == null) {
             return fallback;

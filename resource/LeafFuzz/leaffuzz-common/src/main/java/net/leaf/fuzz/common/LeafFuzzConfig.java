@@ -1,7 +1,7 @@
 package net.leaf.fuzz.common;
 
-import io.github.dailystruggle.rtp.common.bit.config.atlas.LlmConfigDocSynthesizer.LlmHookConfig;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.LlmConfigDocSynthesizer.Provider;
+import io.github.dailystruggle.bytecode.LlmConfigDocSynthesizer.LlmHookConfig;
+import io.github.dailystruggle.bytecode.LlmConfigDocSynthesizer.Provider;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -24,7 +24,7 @@ import java.util.Objects;
  * @param maxRestartRetries          maximum multi-boot campaign restart retries (default {@code 3})
  * @param extraDenylist              extra command patterns excluded from fuzzing
  * @param messages                   configurable operator feedback messages ({@code S-007})
- * @param llmAudit                   optional AST-grounded LLM fault explainer and causal claim audit config
+ * @param llmAudit                   optional AST-grounded LLM fault explainer and causal chain audit config
  * @governedBy ADR-115
  * @governedBy ADR-125
  * @governedBy leaffuzz-ADR-001
@@ -44,9 +44,9 @@ public record LeafFuzzConfig(
 ) {
     /**
      * Optional subscribed LLM configuration for AST-grounded fault explanations and advisory
-     * second-order causal claim auditing ({@code corpus-atlas-ADR-001}, {@code corpus-atlas-ADR-002}).
+     * second-order causal chain auditing ({@code corpus-atlas-ADR-001}, {@code corpus-atlas-ADR-002}).
      *
-     * @param enabled            whether LLM fault explanation / semantic claim audit is enabled
+     * @param enabled            whether LLM fault explanation / semantic causal audit is enabled
      * @param provider           provider identifier ({@code "OFF"}, {@code "GEMINI"}, {@code "OPENAI_COMPATIBLE"}, {@code "ANTHROPIC"}, {@code "OLLAMA"})
      * @param model              model identifier (e.g. {@code "gemini-2.5-flash"})
      * @param endpoint           custom HTTP endpoint, or empty for provider default

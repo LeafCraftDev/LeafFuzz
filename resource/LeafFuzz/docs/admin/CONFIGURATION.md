@@ -11,8 +11,8 @@ Configuration files are generated on first server startup under `plugins/LeafFuz
 | `config.yml` | Default episode budget, concurrent player roster, slow-tick MSPT threshold, disposable-server guard, extra command denylist, multi-boot campaign settings, and optional AST-grounded LLM audit | `check`, `campaign`, `llmAudit` |
 | `messages.yml` | All operator-facing chat/console prefix, permission, parameter, busy, and reload strings | `prefix`, `noPermission`, `badParameter`, `invalidCommand`, `busy`, `reloadSuccess`, `reloadFailed` |
 | `personas.jsonl` *(optional)* | Custom `sleuth_persona_v1` JSONL behavioral profiles (`Int8[16x16]` policy genome + biometric cadence) loaded alongside the 8 built-in archetypes | One JSON object per line (`schema: "sleuth_persona_v1"`) |
-| `reports/<target>-qc-report.md` | Self-contained 5-stage Markdown QC scorecard written automatically after every `/fuzz check` run | Stage 1..5 verdicts, LuckPerms / `commands.yml` fixes, `ddmin` reproducers, `exc:`/`stall:`/`hazard:` stacks, Bonferroni OLS retention slopes, and Order-1/Order-2 claim delivery findings |
-| `reports/<target>-qc-data.yml` & `.json` | Machine-readable quality and safety moderation evidence leading on line 1 with `status: <PASS\|WARN\|FAIL>` | `status`, `moderation_ready`, `stage_verdicts`, `quality_metrics`, `shrunk_reproducers`, `fault_signatures`, `retention_findings`, `claim_findings` |
+| `reports/<target>-qc-report.md` | Self-contained 5-stage Markdown QC scorecard written automatically after every `/fuzz check` run | Stage 1..5 verdicts, LuckPerms / `commands.yml` fixes, `ddmin` reproducers, `exc:`/`stall:`/`hazard:` stacks, Bonferroni OLS retention slopes, and Order-1/Order-2 bytecode causal findings |
+| `reports/<target>-qc-data.yml` & `.json` | Machine-readable quality and safety moderation evidence leading on line 1 with `status: <PASS\|WARN\|FAIL>` | `status`, `moderation_ready`, `stage_verdicts`, `quality_metrics`, `shrunk_reproducers`, `fault_signatures`, `retention_findings`, `causal_findings` |
 
 ---
 
@@ -27,7 +27,7 @@ Configuration files are generated on first server startup under `plugins/LeafFuz
 | `check.extraDenylist` | List\<String\> | `[]` | Additional command prefixes excluded from Stage 2 fuzzing alongside the built-in `DEFAULT_DENYLIST` (`stop`, `restart`, `op`, `deop`, `ban`, `kick`, `reload`, `whitelist`, `save-all`). |
 | `campaign.restartStrategy` | String | `"AUTO"` | Multi-boot campaign restart strategy (`"AUTO"`, `"NONE"`, `"SPIGOT_RESTART"`, `"SUPERVISOR_STOP"`). |
 | `campaign.maxRestartRetries` | Integer | `3` | Maximum crash/restart retries (`1..20`) before `FuzzCampaignStateStore` halts or isolates a crashing archive. |
-| `llmAudit.llmAuditEnabled` | Boolean | `false` | Enables optional AST-grounded root-cause explanations and advisory `Jminor` causal claim auditing via `LlmCausalChainAuditor`. Makes zero network calls when `false`. |
+| `llmAudit.llmAuditEnabled` | Boolean | `false` | Enables optional AST-grounded root-cause explanations and advisory `Jminor` causal chain auditing via `LlmCausalChainAuditor`. Makes zero network calls when `false`. |
 | `llmAudit.llmProvider` | String | `"OFF"` | LLM provider identifier (`"OFF"`, `"GEMINI"`, `"OPENAI_COMPATIBLE"`, `"ANTHROPIC"`, or `"OLLAMA"`). |
 | `llmAudit.llmModel` | String | `"gemini-2.5-flash"` | Model identifier sent to the configured provider. |
 | `llmAudit.llmEndpoint` | String | `""` | Custom HTTP endpoint URL, or empty to use the provider's default endpoint (`http://127.0.0.1:11434/v1/chat/completions` for `OLLAMA`). |

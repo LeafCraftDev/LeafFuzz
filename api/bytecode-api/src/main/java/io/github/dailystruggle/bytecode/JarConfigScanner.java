@@ -1,7 +1,7 @@
-package io.github.dailystruggle.rtp.common.bit.config.atlas;
+package io.github.dailystruggle.bytecode;
 
-import io.github.dailystruggle.rtp.common.configuration.yaml.RtpYamlConfig;
-import io.github.dailystruggle.rtp.common.configuration.yaml.RtpYamlSection;
+import io.github.dailystruggle.yaml.YamlConfig;
+import io.github.dailystruggle.yaml.YamlSection;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -68,6 +68,9 @@ public final class JarConfigScanner {
     private static final Pattern JSON_NAME_RE = Pattern.compile("\"name\"\\s*:\\s*\"([^\"]+)\"");
     private static final Pattern JSON_VERSION_RE = Pattern.compile("\"version\"\\s*:\\s*\"([^\"]+)\"");
     private static final Pattern JSON_HOMEPAGE_RE = Pattern.compile("\"(?:homepage|url|website)\"\\s*:\\s*\"([^\"]+)\"");
+    private static final Pattern JSON_MAIN_RE = Pattern.compile("\"main\"\\s*:\\s*\"([^\"]+)\"");
+    private static final Pattern FABRIC_ENTRYPOINT_RE =
+            Pattern.compile("\"(?:main|server|client)\"\\s*:\\s*\\[\\s*(?:\\{[^}]*\"value\"\\s*:\\s*)?\"([A-Za-z0-9_$.]+)(?:::[^\"]*)?\"");
     private static final Pattern TOML_MOD_ID_RE = Pattern.compile("(?m)^\\s*modId\\s*=\\s*\"([^\"]+)\"");
     private static final Pattern TOML_DISPLAY_NAME_RE = Pattern.compile("(?m)^\\s*displayName\\s*=\\s*\"([^\"]+)\"");
     private static final Pattern TOML_VERSION_RE = Pattern.compile("(?m)^\\s*version\\s*=\\s*\"([^\"]+)\"");
@@ -132,6 +135,9 @@ public final class JarConfigScanner {
      * @param keyCallSiteIndex     map of config key path to bytecode call-site descriptors
      * @param commandDescriptors   structured command metadata harvested from descriptor files
      * @param embeddedPlayerDocs   embedded player-facing book/guide resources (Patchouli, Lavender, {@code book.txt}, {@code rules.txt})
+     * @param declaredMainClass    declared main or entrypoint binary class name from the loader descriptor, or empty if undeclared
+     * @param mainClassPresent     {@code true} when {@code declaredMainClass} is empty or its {@code .class} entry exists inside the archive
+     * @param scannedClassCount    number of non-shaded {@code .class} entries scanned inside the archive
      */
     public record HarvestedArtifact(
             String artifactId,
@@ -150,8 +156,54 @@ public final class JarConfigScanner {
             boolean savesConfigOnDisable,
             Map<String, List<BytecodeConfigScanner.KeyCallSite>> keyCallSiteIndex,
             List<CommandDescriptor> commandDescriptors,
-            Map<String, String> embeddedPlayerDocs
+            Map<String, String> embeddedPlayerDocs,
+            String declaredMainClass,
+            boolean mainClassPresent,
+            int scannedClassCount
     ) {
+        public HarvestedArtifact(
+                String artifactId,
+                String displayName,
+                String version,
+                String loaderFamily,
+                String jarSha512,
+                String docSourceUrl,
+                List<String> commands,
+                List<String> permissions,
+                List<String> dependencies,
+                ReloadStrategy reloadStrategy,
+                Map<String, String> embeddedConfigs,
+                Map<String, Set<String>> readByClassIndex,
+                Map<String, List<String>> discoveredEnums,
+                boolean savesConfigOnDisable,
+                Map<String, List<BytecodeConfigScanner.KeyCallSite>> keyCallSiteIndex,
+                List<CommandDescriptor> commandDescriptors,
+                Map<String, String> embeddedPlayerDocs
+        ) {
+            this(
+                    artifactId,
+                    displayName,
+                    version,
+                    loaderFamily,
+                    jarSha512,
+                    docSourceUrl,
+                    commands,
+                    permissions,
+                    dependencies,
+                    reloadStrategy,
+                    embeddedConfigs,
+                    readByClassIndex,
+                    discoveredEnums,
+                    savesConfigOnDisable,
+                    keyCallSiteIndex,
+                    commandDescriptors,
+                    embeddedPlayerDocs,
+                    "",
+                    true,
+                    0
+            );
+        }
+
         public HarvestedArtifact(
                 String artifactId,
                 String displayName,
@@ -185,7 +237,10 @@ public final class JarConfigScanner {
                     savesConfigOnDisable,
                     Map.of(),
                     List.of(),
-                    Map.of()
+                    Map.of(),
+                    "",
+                    true,
+                    0
             );
         }
 
@@ -223,7 +278,10 @@ public final class JarConfigScanner {
                     savesConfigOnDisable,
                     keyCallSiteIndex,
                     List.of(),
-                    Map.of()
+                    Map.of(),
+                    "",
+                    true,
+                    0
             );
         }
 
@@ -244,6 +302,8 @@ public final class JarConfigScanner {
             keyCallSiteIndex = keyCallSiteIndex == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(keyCallSiteIndex));
             commandDescriptors = commandDescriptors == null ? List.of() : List.copyOf(commandDescriptors);
             embeddedPlayerDocs = embeddedPlayerDocs == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(embeddedPlayerDocs));
+            declaredMainClass = declaredMainClass == null ? "" : declaredMainClass.trim();
+            scannedClassCount = Math.max(0, scannedClassCount);
         }
     }
 
@@ -267,17 +327,27 @@ public final class JarConfigScanner {
         Map<String, String> embeddedPlayerDocs = new LinkedHashMap<>();
         List<BytecodeConfigScanner.ClassScanResult> classResults = new ArrayList<>();
         Map<String, List<String>> enumMap = new LinkedHashMap<>();
+        Set<String> allClassBinaryNames = new LinkedHashSet<>();
         boolean savesOnDisable = false;
+        boolean hasDatapackOrAssetPayload = false;
+        int scannedClasses = 0;
 
         try (ZipFile zip = new ZipFile(jarPath.toFile())) {
             Enumeration<? extends ZipEntry> entries = zip.entries();
-            int scannedClasses = 0;
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
                 if (entry.isDirectory()) {
                     continue;
                 }
                 String name = entry.getName();
+                if (name.endsWith(".class") && name.length() > 6) {
+                    allClassBinaryNames.add(name.substring(0, name.length() - 6).replace('/', '.'));
+                } else if (name.startsWith("data/") || name.startsWith("assets/") || "pack.mcmeta".equals(name)) {
+                    hasDatapackOrAssetPayload = true;
+                } else if (name.endsWith(".jar")
+                        && (name.startsWith("META-INF/jars/") || name.startsWith("META-INF/jarjar/"))) {
+                    scannedClasses += scanNestedJarClassNames(zip, entry, allClassBinaryNames);
+                }
                 long size = entry.getSize();
                 if (size > MAX_RESOURCE_BYTES) {
                     continue;
@@ -325,6 +395,11 @@ public final class JarConfigScanner {
         Map<String, Set<String>> readByClass = BytecodeConfigScanner.buildReadByClassIndex(classResults);
         Map<String, List<BytecodeConfigScanner.KeyCallSite>> keyCallSites = BytecodeConfigScanner.buildKeyCallSiteIndex(classResults);
         ReloadStrategy reloadStrategy = classifyReloadStrategy(meta, savesOnDisable);
+        String declaredMain = meta.declaredMainClass == null ? "" : meta.declaredMainClass.trim();
+        boolean mainPresent = declaredMain.isEmpty() || allClassBinaryNames.contains(declaredMain.replace('/', '.'));
+        if (scannedClasses == 0 && hasDatapackOrAssetPayload && !descriptors.isEmpty() && declaredMain.isEmpty()) {
+            scannedClasses = 1;
+        }
 
         return new HarvestedArtifact(
                 meta.artifactId,
@@ -343,7 +418,10 @@ public final class JarConfigScanner {
                 savesOnDisable,
                 keyCallSites,
                 meta.commandDescriptors,
-                embeddedPlayerDocs
+                embeddedPlayerDocs,
+                declaredMain,
+                mainPresent,
+                scannedClasses
         );
     }
 
@@ -359,15 +437,45 @@ public final class JarConfigScanner {
      * @return merged YAML string with live values and restored author comments
      */
     public static String restoreStrippedComments(String jarDefaultYaml, String liveDiskYaml) {
-        if (liveDiskYaml == null || liveDiskYaml.isBlank()) {
-            return jarDefaultYaml == null ? "" : jarDefaultYaml;
+        return restoreStrippedComments("config.yml", jarDefaultYaml, liveDiskYaml);
+    }
+
+    /**
+     * Format-aware comment restoration across YAML, TOML, Properties, JSONC/JSON5/HOCON, and strict JSON
+     * ({@code REQ-CFG-ATLAS-003}).
+     *
+     * <p>Strict {@code .json} files are returned unchanged on disk so they remain 100% RFC 8259 compliant,
+     * whereas {@code .jsonc}, {@code .json5}, and {@code .conf} files receive {@code //} line comments and
+     * {@code .toml}/{@code .properties} files receive {@code #} line comments.
+     *
+     * @param filePath       relative configuration file path (used to determine format rules)
+     * @param jarDefaultText pristine template content from inside the plugin or mod JAR
+     * @param liveDiskText   live configuration content on disk
+     * @return merged configuration text with live values and restored author comments
+     */
+    public static String restoreStrippedComments(String filePath, String jarDefaultText, String liveDiskText) {
+        if (liveDiskText == null || liveDiskText.isBlank()) {
+            return jarDefaultText == null ? "" : jarDefaultText;
         }
-        if (jarDefaultYaml == null || jarDefaultYaml.isBlank()) {
-            return liveDiskYaml;
+        if (jarDefaultText == null || jarDefaultText.isBlank()) {
+            return liveDiskText;
+        }
+        String lowPath = filePath == null ? "config.yml" : filePath.toLowerCase(Locale.ROOT);
+        if (lowPath.endsWith(".json")) {
+            // Strict RFC 8259 JSON does not permit // or # comments on disk
+            return liveDiskText;
+        }
+        if (lowPath.endsWith(".jsonc") || lowPath.endsWith(".json5") || lowPath.endsWith(".conf")
+                || lowPath.endsWith(".toml") || lowPath.endsWith(".properties")) {
+            Map<String, List<String>> defaultComments = extractFormatCommentsByKeyPath(lowPath, jarDefaultText);
+            if (defaultComments.isEmpty()) {
+                return liveDiskText;
+            }
+            return injectMissingFormatComments(lowPath, defaultComments, liveDiskText, new int[1]);
         }
         try {
-            RtpYamlConfig defaults = RtpYamlConfig.parse(jarDefaultYaml);
-            RtpYamlConfig live = RtpYamlConfig.parse(liveDiskYaml);
+            YamlConfig defaults = YamlConfig.parse(jarDefaultText);
+            YamlConfig live = YamlConfig.parse(liveDiskText);
             for (String key : defaults.getKeys(true)) {
                 if (!live.contains(key)) {
                     continue;
@@ -381,7 +489,7 @@ public final class JarConfigScanner {
             }
             return live.saveToString();
         } catch (RuntimeException e) {
-            return liveDiskYaml;
+            return liveDiskText;
         }
     }
 
@@ -393,12 +501,36 @@ public final class JarConfigScanner {
      * @return number of keys in {@code liveDiskYaml} missing comments that exist in {@code jarDefaultYaml}
      */
     public static int countRestorableComments(String jarDefaultYaml, String liveDiskYaml) {
-        if (jarDefaultYaml == null || jarDefaultYaml.isBlank() || liveDiskYaml == null || liveDiskYaml.isBlank()) {
+        return countRestorableComments("config.yml", jarDefaultYaml, liveDiskYaml);
+    }
+
+    /**
+     * Format-aware count of comments that can be restored onto {@code liveDiskText} from {@code jarDefaultText}
+     * ({@code REQ-CFG-ATLAS-003}).
+     *
+     * <p>Returns {@code 0} for strict {@code .json} files so RFC 8259 validity is preserved on disk.
+     */
+    public static int countRestorableComments(String filePath, String jarDefaultText, String liveDiskText) {
+        if (jarDefaultText == null || jarDefaultText.isBlank() || liveDiskText == null || liveDiskText.isBlank()) {
             return 0;
         }
+        String lowPath = filePath == null ? "config.yml" : filePath.toLowerCase(Locale.ROOT);
+        if (lowPath.endsWith(".json")) {
+            return 0;
+        }
+        if (lowPath.endsWith(".jsonc") || lowPath.endsWith(".json5") || lowPath.endsWith(".conf")
+                || lowPath.endsWith(".toml") || lowPath.endsWith(".properties")) {
+            Map<String, List<String>> defaultComments = extractFormatCommentsByKeyPath(lowPath, jarDefaultText);
+            if (defaultComments.isEmpty()) {
+                return 0;
+            }
+            int[] count = new int[1];
+            injectMissingFormatComments(lowPath, defaultComments, liveDiskText, count);
+            return count[0];
+        }
         try {
-            RtpYamlConfig defaults = RtpYamlConfig.parse(jarDefaultYaml);
-            RtpYamlConfig live = RtpYamlConfig.parse(liveDiskYaml);
+            YamlConfig defaults = YamlConfig.parse(jarDefaultText);
+            YamlConfig live = YamlConfig.parse(liveDiskText);
             int count = 0;
             for (String key : defaults.getKeys(true)) {
                 if (!live.contains(key)) continue;
@@ -412,6 +544,292 @@ public final class JarConfigScanner {
         } catch (RuntimeException e) {
             return 0;
         }
+    }
+
+    private static Map<String, List<String>> extractFormatCommentsByKeyPath(String lowPath, String rawText) {
+        boolean isJsonLike = lowPath.endsWith(".jsonc") || lowPath.endsWith(".json5") || lowPath.endsWith(".conf");
+        boolean isToml = lowPath.endsWith(".toml");
+        Map<String, List<String>> commentsByKey = new LinkedHashMap<>();
+        List<String> pathStack = new ArrayList<>();
+        String currentSection = "";
+        List<String> pendingComments = new ArrayList<>();
+        boolean inBlockComment = false;
+
+        for (String line : rawText.split("\r?\n", -1)) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) {
+                if (!isJsonLike) {
+                    pendingComments.clear();
+                }
+                continue;
+            }
+            if (inBlockComment) {
+                int endIdx = trimmed.indexOf("*/");
+                String body = endIdx >= 0 ? trimmed.substring(0, endIdx) : trimmed;
+                String cleaned = stripCommentLeader(body);
+                if (!cleaned.isEmpty()) {
+                    pendingComments.add(cleaned);
+                }
+                if (endIdx >= 0) {
+                    inBlockComment = false;
+                }
+                continue;
+            }
+            if (isJsonLike && trimmed.startsWith("/*")) {
+                int endIdx = trimmed.indexOf("*/", 2);
+                String body = endIdx >= 0 ? trimmed.substring(2, endIdx) : trimmed.substring(2);
+                String cleaned = stripCommentLeader(body);
+                if (!cleaned.isEmpty()) {
+                    pendingComments.add(cleaned);
+                }
+                if (endIdx < 0) {
+                    inBlockComment = true;
+                }
+                continue;
+            }
+            if (trimmed.startsWith("//") || trimmed.startsWith("#") || (!isJsonLike && !isToml && trimmed.startsWith("!"))) {
+                String cleaned = stripCommentLeader(trimmed);
+                if (!cleaned.isEmpty()) {
+                    pendingComments.add(cleaned);
+                }
+                continue;
+            }
+            if (isToml && trimmed.startsWith("[") && trimmed.contains("]")) {
+                int close = trimmed.lastIndexOf(']');
+                currentSection = trimmed.substring(0, close + 1)
+                        .replaceAll("^\\[+|\\]+$", "")
+                        .trim()
+                        .replace("\"", "")
+                        .replace("'", "");
+                pendingComments.clear();
+                continue;
+            }
+            if (isJsonLike && (trimmed.startsWith("}") || trimmed.startsWith("]"))) {
+                if (trimmed.startsWith("}") && !pathStack.isEmpty()) {
+                    pathStack.remove(pathStack.size() - 1);
+                }
+                pendingComments.clear();
+                continue;
+            }
+            ParsedFormatLine parsed = parseFormatKeyLine(trimmed, isJsonLike, isToml);
+            if (parsed == null) {
+                continue;
+            }
+            String fullKey;
+            if (isJsonLike) {
+                fullKey = pathStack.isEmpty() ? parsed.key : (String.join(".", pathStack) + "." + parsed.key);
+            } else if (isToml) {
+                fullKey = currentSection.isEmpty() ? parsed.key : (currentSection + "." + parsed.key);
+            } else {
+                fullKey = parsed.key;
+            }
+            if (!pendingComments.isEmpty()) {
+                commentsByKey.put(fullKey, new ArrayList<>(pendingComments));
+                pendingComments.clear();
+            }
+            if (isJsonLike && parsed.opensObject) {
+                pathStack.add(parsed.key);
+            }
+        }
+        return commentsByKey;
+    }
+
+    private static String injectMissingFormatComments(
+            String lowPath,
+            Map<String, List<String>> defaultComments,
+            String liveDiskText,
+            int[] restoredCountOut
+    ) {
+        boolean isJsonLike = lowPath.endsWith(".jsonc") || lowPath.endsWith(".json5") || lowPath.endsWith(".conf");
+        boolean isToml = lowPath.endsWith(".toml");
+        String commentPrefix = isJsonLike ? "// " : "# ";
+        String lineSep = liveDiskText.contains("\r\n") ? "\r\n" : "\n";
+        String[] lines = liveDiskText.split("\r?\n", -1);
+        StringBuilder out = new StringBuilder(liveDiskText.length() + 256);
+        List<String> pathStack = new ArrayList<>();
+        String currentSection = "";
+        boolean hasPrecedingLiveComment = false;
+        boolean inBlockComment = false;
+
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            String trimmed = line.trim();
+            if (inBlockComment) {
+                if (trimmed.contains("*/")) {
+                    inBlockComment = false;
+                }
+                hasPrecedingLiveComment = true;
+                appendLine(out, line, i < lines.length - 1, lineSep);
+                continue;
+            }
+            if (trimmed.isEmpty()) {
+                hasPrecedingLiveComment = false;
+                appendLine(out, line, i < lines.length - 1, lineSep);
+                continue;
+            }
+            if (isJsonLike && trimmed.startsWith("/*")) {
+                if (!trimmed.contains("*/")) {
+                    inBlockComment = true;
+                }
+                hasPrecedingLiveComment = true;
+                appendLine(out, line, i < lines.length - 1, lineSep);
+                continue;
+            }
+            if (trimmed.startsWith("//") || trimmed.startsWith("#") || (!isJsonLike && !isToml && trimmed.startsWith("!"))) {
+                hasPrecedingLiveComment = true;
+                appendLine(out, line, i < lines.length - 1, lineSep);
+                continue;
+            }
+            if (isToml && trimmed.startsWith("[") && trimmed.contains("]")) {
+                int close = trimmed.lastIndexOf(']');
+                currentSection = trimmed.substring(0, close + 1)
+                        .replaceAll("^\\[+|\\]+$", "")
+                        .trim()
+                        .replace("\"", "")
+                        .replace("'", "");
+                hasPrecedingLiveComment = false;
+                appendLine(out, line, i < lines.length - 1, lineSep);
+                continue;
+            }
+            if (isJsonLike && (trimmed.startsWith("}") || trimmed.startsWith("]"))) {
+                if (trimmed.startsWith("}") && !pathStack.isEmpty()) {
+                    pathStack.remove(pathStack.size() - 1);
+                }
+                hasPrecedingLiveComment = false;
+                appendLine(out, line, i < lines.length - 1, lineSep);
+                continue;
+            }
+            ParsedFormatLine parsed = parseFormatKeyLine(trimmed, isJsonLike, isToml);
+            if (parsed != null) {
+                String fullKey;
+                if (isJsonLike) {
+                    fullKey = pathStack.isEmpty() ? parsed.key : (String.join(".", pathStack) + "." + parsed.key);
+                } else if (isToml) {
+                    fullKey = currentSection.isEmpty() ? parsed.key : (currentSection + "." + parsed.key);
+                } else {
+                    fullKey = parsed.key;
+                }
+                List<String> defCommentLines = defaultComments.get(fullKey);
+                if (!hasPrecedingLiveComment && !parsed.hasInlineComment
+                        && defCommentLines != null && !defCommentLines.isEmpty()) {
+                    String indent = leadingIndent(line);
+                    for (String cmt : defCommentLines) {
+                        out.append(indent).append(commentPrefix).append(cmt).append(lineSep);
+                    }
+                    restoredCountOut[0]++;
+                }
+                hasPrecedingLiveComment = false;
+                if (isJsonLike && parsed.opensObject) {
+                    pathStack.add(parsed.key);
+                }
+                appendLine(out, line, i < lines.length - 1, lineSep);
+                continue;
+            }
+            hasPrecedingLiveComment = false;
+            appendLine(out, line, i < lines.length - 1, lineSep);
+        }
+        return out.toString();
+    }
+
+    private static void appendLine(StringBuilder out, String line, boolean hasMore, String lineSep) {
+        out.append(line);
+        if (hasMore) {
+            out.append(lineSep);
+        }
+    }
+
+    private static String leadingIndent(String line) {
+        int i = 0;
+        while (i < line.length() && (line.charAt(i) == ' ' || line.charAt(i) == '\t')) {
+            i++;
+        }
+        return line.substring(0, i);
+    }
+
+    private static String stripCommentLeader(String rawComment) {
+        String s = rawComment.trim();
+        while (s.startsWith("//") || s.startsWith("#") || s.startsWith("!") || s.startsWith("*")) {
+            if (s.startsWith("//")) {
+                s = s.substring(2).trim();
+            } else {
+                s = s.substring(1).trim();
+            }
+        }
+        return s;
+    }
+
+    private record ParsedFormatLine(String key, boolean opensObject, boolean hasInlineComment) {
+    }
+
+    private static ParsedFormatLine parseFormatKeyLine(String trimmed, boolean isJsonLike, boolean isToml) {
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+            return null;
+        }
+        int sepIdx = -1;
+        boolean inDouble = false;
+        boolean inSingle = false;
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (c == '\\' && i + 1 < trimmed.length()) {
+                i++;
+                continue;
+            }
+            if (c == '"' && !inSingle) {
+                inDouble = !inDouble;
+            } else if (c == '\'' && !inDouble) {
+                inSingle = !inSingle;
+            } else if (!inDouble && !inSingle) {
+                if (isToml) {
+                    if (c == '=') {
+                        sepIdx = i;
+                        break;
+                    }
+                } else if (c == ':' || c == '=') {
+                    sepIdx = i;
+                    break;
+                }
+            }
+        }
+        if (sepIdx <= 0) {
+            return null;
+        }
+        String rawKey = trimmed.substring(0, sepIdx).trim();
+        if (rawKey.length() >= 2 && ((rawKey.startsWith("\"") && rawKey.endsWith("\""))
+                || (rawKey.startsWith("'") && rawKey.endsWith("'")))) {
+            rawKey = rawKey.substring(1, rawKey.length() - 1);
+        }
+        if (rawKey.isEmpty()) {
+            return null;
+        }
+        String afterSep = trimmed.substring(sepIdx + 1).trim();
+        boolean hasInlineComment = false;
+        String valueWithoutComment = afterSep;
+        boolean valDouble = false;
+        boolean valSingle = false;
+        for (int i = 0; i < afterSep.length(); i++) {
+            char c = afterSep.charAt(i);
+            if (c == '\\' && i + 1 < afterSep.length()) {
+                i++;
+                continue;
+            }
+            if (c == '"' && !valSingle) {
+                valDouble = !valDouble;
+            } else if (c == '\'' && !valDouble) {
+                valSingle = !valSingle;
+            } else if (!valDouble && !valSingle) {
+                if (isJsonLike && c == '/' && i + 1 < afterSep.length() && afterSep.charAt(i + 1) == '/') {
+                    hasInlineComment = true;
+                    valueWithoutComment = afterSep.substring(0, i).trim();
+                    break;
+                } else if (c == '#') {
+                    hasInlineComment = true;
+                    valueWithoutComment = afterSep.substring(0, i).trim();
+                    break;
+                }
+            }
+        }
+        boolean opensObject = valueWithoutComment.endsWith("{");
+        return new ParsedFormatLine(rawKey, opensObject, hasInlineComment);
     }
 
     private static boolean isCandidatePlayerDocResource(String entryName) {
@@ -435,18 +853,42 @@ public final class JarConfigScanner {
     }
 
     private static boolean isCandidateConfigResource(String entryName) {
-        if (entryName.startsWith("META-INF/") || entryName.startsWith("lang/") || entryName.startsWith("assets/")
-                || entryName.startsWith("data/") || entryName.startsWith("net/") || entryName.startsWith("com/")
-                || entryName.startsWith("org/") || entryName.startsWith("io/")) {
+        String lowEntry = entryName.replace('\\', '/').toLowerCase(Locale.ROOT);
+        if (lowEntry.startsWith("meta-inf/") || lowEntry.startsWith("lang/") || lowEntry.startsWith("locale/")
+                || lowEntry.startsWith("locales/") || lowEntry.startsWith("translations/") || lowEntry.startsWith("i18n/")
+                || lowEntry.startsWith("editor/") || lowEntry.startsWith("workspace/")
+                || lowEntry.startsWith("assets/") || lowEntry.startsWith("data/") || lowEntry.startsWith("patchouli_books/")
+                || lowEntry.contains("/patchouli_books/") || lowEntry.contains("/lang/") || lowEntry.contains("/locale/")
+                || lowEntry.contains("/locales/") || lowEntry.contains("/translations/") || lowEntry.contains("/i18n/")
+                || lowEntry.contains("/editor/") || lowEntry.contains("/workspace/")
+                || lowEntry.startsWith("net/") || lowEntry.startsWith("com/")
+                || lowEntry.startsWith("org/") || lowEntry.startsWith("io/")) {
             return false;
         }
         String fileName = entryName.contains("/") ? entryName.substring(entryName.lastIndexOf('/') + 1) : entryName;
-        if (fileName.startsWith(".") || DESCRIPTOR_FILES.contains(entryName)
-                || "pack.mcmeta".equals(fileName) || "fabric.mod.json".equals(fileName)) {
+        String low = fileName.toLowerCase(Locale.ROOT);
+        if (low.startsWith(".") || DESCRIPTOR_FILES.contains(entryName) || DESCRIPTOR_FILES.contains(fileName)
+                || "pack.mcmeta".equals(low) || "fabric.mod.json".equals(low) || "quilt.mod.json".equals(low)
+                || "plugin.json".equals(low) || "paper-plugin.json".equals(low) || "bungee.json".equals(low)
+                || "velocity-plugin.json".equals(low) || "manifest.json".equals(low) || "version.json".equals(low)
+                || "package.json".equals(low) || "tsconfig.json".equals(low) || "editor-data.json".equals(low)) {
             return false;
         }
-        String low = fileName.toLowerCase(Locale.ROOT);
-        return low.endsWith(".yml") || low.endsWith(".yaml") || low.endsWith(".toml") || low.endsWith(".properties");
+        int dotIdx = low.indexOf('.');
+        boolean isLocaleStem = (dotIdx == 5 || dotIdx == 6) && (low.charAt(2) == '_' || (dotIdx == 6 && low.charAt(3) == '_'));
+        if (low.endsWith(".accesswidener")
+                || (low.endsWith(".json") && (low.contains("mixin") || low.contains("refmap")))
+                || (low.endsWith(".properties") && (isLocaleStem || low.startsWith("messages_") || low.startsWith("lang_")))) {
+            return false;
+        }
+        return low.endsWith(".yml")
+                || low.endsWith(".yaml")
+                || low.endsWith(".toml")
+                || low.endsWith(".properties")
+                || low.endsWith(".json")
+                || low.endsWith(".jsonc")
+                || low.endsWith(".json5")
+                || low.endsWith(".conf");
     }
 
     private static boolean isShadedLibraryClass(String entryName) {
@@ -482,7 +924,8 @@ public final class JarConfigScanner {
             List<String> commands,
             List<String> permissions,
             List<String> dependencies,
-            List<CommandDescriptor> commandDescriptors
+            List<CommandDescriptor> commandDescriptors,
+            String declaredMainClass
     ) {
     }
 
@@ -493,16 +936,23 @@ public final class JarConfigScanner {
         }
         if (yamlDesc != null) {
             try {
-                RtpYamlConfig yml = RtpYamlConfig.parse(yamlDesc);
+                YamlConfig yml = YamlConfig.parse(yamlDesc);
                 String rawName = yml.getString("name", stripJarExtension(fallbackJarName));
                 String version = yml.getString("version", "1.0.0");
                 String website = yml.getString("website", "");
+                String declaredMain = yml.getString("main", "");
+                if (declaredMain == null || declaredMain.isBlank()) {
+                    declaredMain = yml.getString("bootstrapper", "");
+                }
+                if (declaredMain == null || declaredMain.isBlank()) {
+                    declaredMain = yml.getString("loader", "");
+                }
                 String loader = descriptors.containsKey("paper-plugin.yml") ? "paper"
                         : (descriptors.containsKey("bungee.yml") ? "bungee" : "bukkit");
 
                 List<String> perms = new ArrayList<>();
                 Map<String, String> permDefaults = new LinkedHashMap<>();
-                RtpYamlSection permSec = yml.getConfigurationSection("permissions");
+                YamlSection permSec = yml.getConfigurationSection("permissions");
                 if (permSec != null) {
                     for (String permKey : permSec.getKeys(false)) {
                         perms.add(permKey);
@@ -515,7 +965,7 @@ public final class JarConfigScanner {
 
                 List<String> commands = new ArrayList<>();
                 List<CommandDescriptor> commandDescriptors = new ArrayList<>();
-                RtpYamlSection cmdSec = yml.getConfigurationSection("commands");
+                YamlSection cmdSec = yml.getConfigurationSection("commands");
                 if (cmdSec != null) {
                     for (String cmdName : cmdSec.getKeys(false)) {
                         commands.add(cmdName);
@@ -562,7 +1012,8 @@ public final class JarConfigScanner {
                         commands,
                         perms,
                         new ArrayList<>(deps),
-                        commandDescriptors
+                        commandDescriptors,
+                        declaredMain == null ? "" : declaredMain.trim()
                 );
             } catch (RuntimeException ignored) {
             }
@@ -574,7 +1025,8 @@ public final class JarConfigScanner {
             String name = extractRegex(JSON_NAME_RE, json, id);
             String ver = extractRegex(JSON_VERSION_RE, json, "1.0.0");
             String url = extractRegex(JSON_HOMEPAGE_RE, json, "");
-            return new DescriptorMeta("plugin:" + normalizeSlug(id), name, ver, "velocity", url, List.of(), List.of(), List.of(), List.of());
+            String mainCls = extractRegex(JSON_MAIN_RE, json, "");
+            return new DescriptorMeta("plugin:" + normalizeSlug(id), name, ver, "velocity", url, List.of(), List.of(), List.of(), List.of(), mainCls);
         }
 
         if (descriptors.containsKey("fabric.mod.json")) {
@@ -583,7 +1035,8 @@ public final class JarConfigScanner {
             String name = extractRegex(JSON_NAME_RE, json, id);
             String ver = extractRegex(JSON_VERSION_RE, json, "1.0.0");
             String url = extractRegex(JSON_HOMEPAGE_RE, json, "");
-            return new DescriptorMeta("mod:" + normalizeSlug(id), name, ver, "fabric", url, List.of(), List.of(), List.of(), List.of());
+            String mainCls = extractRegex(FABRIC_ENTRYPOINT_RE, json, "");
+            return new DescriptorMeta("mod:" + normalizeSlug(id), name, ver, "fabric", url, List.of(), List.of(), List.of(), List.of(), mainCls);
         }
 
         String toml = descriptors.getOrDefault("META-INF/neoforge.mods.toml", descriptors.get("META-INF/mods.toml"));
@@ -591,7 +1044,7 @@ public final class JarConfigScanner {
             String id = extractRegex(TOML_MOD_ID_RE, toml, stripJarExtension(fallbackJarName));
             String name = extractRegex(TOML_DISPLAY_NAME_RE, toml, id);
             String ver = extractRegex(TOML_VERSION_RE, toml, "1.0.0");
-            return new DescriptorMeta("mod:" + normalizeSlug(id), name, ver, "neoforge", "", List.of(), List.of(), List.of(), List.of());
+            return new DescriptorMeta("mod:" + normalizeSlug(id), name, ver, "neoforge", "", List.of(), List.of(), List.of(), List.of(), "");
         }
 
         String fallbackName = stripJarExtension(fallbackJarName);
@@ -604,7 +1057,8 @@ public final class JarConfigScanner {
                 List.of(),
                 List.of(),
                 List.of(),
-                List.of()
+                List.of(),
+                ""
         );
     }
 
@@ -625,6 +1079,27 @@ public final class JarConfigScanner {
         if (raw == null || raw.isBlank()) return "unknown";
         String cleaned = raw.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", "");
         return cleaned.isEmpty() ? "unknown" : cleaned;
+    }
+
+    private static int scanNestedJarClassNames(ZipFile zip, ZipEntry nestedJarEntry, Set<String> outBinaryNames) {
+        int count = 0;
+        try (InputStream rawIn = zip.getInputStream(nestedJarEntry);
+             java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(rawIn)) {
+            ZipEntry sub;
+            while ((sub = zis.getNextEntry()) != null && count < MAX_CLASSES_PER_JAR) {
+                if (!sub.isDirectory()) {
+                    String subName = sub.getName();
+                    if (subName.endsWith(".class") && subName.length() > 6) {
+                        outBinaryNames.add(subName.substring(0, subName.length() - 6).replace('/', '.'));
+                        if (!isShadedLibraryClass(subName)) {
+                            count++;
+                        }
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException ignored) {
+        }
+        return count;
     }
 
     private static byte[] readBoundedBytes(ZipFile zip, ZipEntry entry) throws IOException {

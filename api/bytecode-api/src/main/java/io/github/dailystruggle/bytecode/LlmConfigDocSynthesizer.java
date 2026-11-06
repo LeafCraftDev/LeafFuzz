@@ -1,6 +1,6 @@
-package io.github.dailystruggle.rtp.common.bit.config.atlas;
+package io.github.dailystruggle.bytecode;
 
-import io.github.dailystruggle.rtp.common.configuration.yaml.RtpYamlConfig;
+import io.github.dailystruggle.yaml.YamlConfig;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -196,7 +196,7 @@ public final class LlmConfigDocSynthesizer implements AutoCloseable {
             );
         }
 
-        public static LlmHookConfig fromYaml(RtpYamlConfig yaml) {
+        public static LlmHookConfig fromYaml(YamlConfig yaml) {
             if (yaml == null) {
                 return disabled();
             }

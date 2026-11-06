@@ -1,11 +1,11 @@
 package net.leaf.fuzz.common.ui;
 
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalFinding;
 import io.github.dailystruggle.menu.api.MenuAction;
 import io.github.dailystruggle.menu.api.MenuDescriptor;
 import io.github.dailystruggle.menu.api.MenuDescriptor.Fragment;
 import io.github.dailystruggle.menu.api.MenuDescriptor.Line;
 import io.github.dailystruggle.menu.api.MenuDescriptor.Page;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.ClaimDeliveryFinding;
 import net.leaf.fuzz.common.LeafFuzzRuntime;
 import net.leaf.fuzz.common.LeafFuzzScorecardReport;
 import net.leaf.fuzz.common.LeafFuzzScorecardReport.Verdict;
@@ -86,8 +86,8 @@ public final class LeafFuzzMenuBuilder {
         if (!card.faultSignatures().isEmpty() || !card.retentionFindings().isEmpty()) {
             pages.add(buildFaultsAndRetentionPage(card));
         }
-        if (!card.claimFindings().isEmpty()) {
-            pages.add(buildClaimsDeliveryPage(card));
+        if (!card.causalFindings().isEmpty()) {
+            pages.add(buildCausalAuditPage(card));
         }
 
         return new MenuDescriptor(
@@ -239,13 +239,13 @@ public final class LeafFuzzMenuBuilder {
 
         // Stage 5
         lines.add(Line.of(new Fragment(
-                formatParchmentVerdictBadge(card.stage5ClaimDeliveryVerdict())
-                        + " &05.Claims: &5" + card.claimFindings().size() + " &8(1st/2nd ord)",
-                "&eStage 5: Functional & Causal Claim Audit\n"
-                        + "&7First-Order & Second-Order Findings: &f" + card.claimFindings().size() + "\n"
-                        + "&7Format: &bClaims X -> Does Not Deliver Y\n"
-                        + "&a▶ Click to inspect claim delivery audit",
-                new MenuAction.RunCommand("fuzz", "check", "stage=claims", "target=" + card.targetName())
+                formatParchmentVerdictBadge(card.stage5CausalAuditVerdict())
+                        + " &05.Causal: &5" + card.causalFindings().size() + " &8(1st/2nd ord)",
+                "&eStage 5: Bytecode & Causal Audit\n"
+                        + "&7First-Order & Second-Order Findings: &f" + card.causalFindings().size() + "\n"
+                        + "&7Format: &bDeclared -> Causal Defect\n"
+                        + "&a▶ Click to inspect bytecode causal audit",
+                new MenuAction.RunCommand("fuzz", "check", "stage=causal", "target=" + card.targetName())
         )));
 
         lines.add(Line.of(Fragment.plain("&8------------------")));
@@ -451,13 +451,13 @@ public final class LeafFuzzMenuBuilder {
         return new Page(lines);
     }
 
-    private Page buildClaimsDeliveryPage(LeafFuzzScorecardReport card) {
+    private Page buildCausalAuditPage(LeafFuzzScorecardReport card) {
         List<Line> lines = new ArrayList<>();
-        lines.add(Line.of(Fragment.plain("&0&l🧭 Claim Delivery Audit")));
-        lines.add(Line.of(Fragment.plain("&8Claims X -> Does Not Deliver")));
+        lines.add(Line.of(Fragment.plain("&0&l🧭 Bytecode Causal Audit")));
+        lines.add(Line.of(Fragment.plain("&8Declared -> Causal Defect")));
 
         int shown = 0;
-        for (ClaimDeliveryFinding cf : card.claimFindings()) {
+        for (CausalFinding cf : card.causalFindings()) {
             if (shown >= 8) {
                 break;
             }
@@ -466,14 +466,14 @@ public final class LeafFuzzMenuBuilder {
             String hover = "&e[" + cf.confidenceTier().name() + " " + cf.confidencePercent() + "%] Order "
                     + cf.order() + " — " + cf.kind().name() + "\n"
                     + "&7Artifact: &f" + cf.artifactName() + "\n"
-                    + "&7Claims: &a" + cf.claims() + "\n"
-                    + "&7Does Not Deliver: &c" + cf.doesNotDeliver() + "\n"
+                    + "&7Declared: &a" + cf.declaredSurface() + "\n"
+                    + "&7Finding: &c" + cf.causalDefect() + "\n"
                     + "&7Clears When: &b" + cf.clearsWhen()
                     + (cf.llmExplanation().isEmpty() ? "" : "\n&7AST Explanation: &e" + cf.llmExplanation());
             lines.add(Line.of(new Fragment(
                     text,
                     hover,
-                    new MenuAction.RunCommand("fuzz", "check", "stage=claims", "target=" + card.targetName())
+                    new MenuAction.RunCommand("fuzz", "check", "stage=causal", "target=" + card.targetName())
             )));
             shown++;
         }

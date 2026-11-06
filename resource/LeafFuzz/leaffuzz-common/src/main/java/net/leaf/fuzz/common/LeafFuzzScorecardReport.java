@@ -1,7 +1,7 @@
 package net.leaf.fuzz.common;
 
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.ClaimDeliveryFinding;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.ConfidenceTier;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalFinding;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.ConfidenceTier;
 import net.leaf.sleuth.common.fuzz.CommandSurfaceAuditor.LeastPrivilegeFinding;
 import net.leaf.sleuth.common.fuzz.DualAudienceMitigationReport;
 import net.leaf.sleuth.common.fuzz.LogAndStallSignatureOracle.FaultSignature;
@@ -68,7 +68,7 @@ public record LeafFuzzScorecardReport(
         List<ClassRetentionFinding> retentionFindings,
         long elapsedMillis,
         ExecutionTelemetry telemetry,
-        List<ClaimDeliveryFinding> claimFindings
+        List<CausalFinding> causalFindings
 ) {
     /**
      * Verdict level for an individual QC stage or overall scorecard.
@@ -338,7 +338,7 @@ public record LeafFuzzScorecardReport(
         retentionFindings = retentionFindings == null ? List.of() : List.copyOf(retentionFindings);
         elapsedMillis = Math.max(0L, elapsedMillis);
         telemetry = telemetry == null ? ExecutionTelemetry.empty() : telemetry;
-        claimFindings = claimFindings == null ? List.of() : List.copyOf(claimFindings);
+        causalFindings = causalFindings == null ? List.of() : List.copyOf(causalFindings);
     }
 
     public Verdict stage1CommandSurfaceVerdict() {
@@ -394,14 +394,14 @@ public record LeafFuzzScorecardReport(
     }
 
     /**
-     * Evaluates Stage 5 (First-Order &amp; Second-Order Causal Claim Delivery).
+     * Evaluates Stage 5 (First-Order &amp; Second-Order Bytecode &amp; Causal Audit).
      *
      * <p>Deterministic {@link ConfidenceTier#CONFIRMED} or {@link ConfidenceTier#HIGH} wiring/causal
      * findings yield {@link Verdict#WARN}; {@link ConfidenceTier#ADVISORY} LLM hypotheses never
      * downgrade the stage or overall scorecard verdict.
      */
-    public Verdict stage5ClaimDeliveryVerdict() {
-        for (ClaimDeliveryFinding f : claimFindings) {
+    public Verdict stage5CausalAuditVerdict() {
+        for (CausalFinding f : causalFindings) {
             if (f.confidenceTier() == ConfidenceTier.CONFIRMED
                     || f.confidenceTier() == ConfidenceTier.HIGH) {
                 return Verdict.WARN;
@@ -419,7 +419,7 @@ public record LeafFuzzScorecardReport(
         if (stage1CommandSurfaceVerdict() == Verdict.WARN
                 || stage2BoundaryFuzzVerdict() == Verdict.WARN
                 || stage3StallAndExceptionVerdict() == Verdict.WARN
-                || stage5ClaimDeliveryVerdict() == Verdict.WARN) {
+                || stage5CausalAuditVerdict() == Verdict.WARN) {
             return Verdict.WARN;
         }
         return Verdict.PASS;
@@ -484,19 +484,19 @@ public record LeafFuzzScorecardReport(
                 telemetry.totalClassesScanned(),
                 retentionFindings.size()
         ));
-        long confirmedClaims = claimFindings.stream()
+        long confirmedCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.CONFIRMED)
                 .count();
-        long highClaims = claimFindings.stream()
+        long highCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.HIGH)
                 .count();
-        lines.add(p + formatStageBadge("5. Claim & Causal Delivery Audit", stage5ClaimDeliveryVerdict())
+        lines.add(p + formatStageBadge("5. Bytecode & Causal Audit", stage5CausalAuditVerdict())
                 + String.format(
                 Locale.ROOT,
-                " &7(%d claim findings: &f%d&7 confirmed 100%%, &f%d&7 high confidence)",
-                claimFindings.size(),
-                confirmedClaims,
-                highClaims
+                " &7(%d causal findings: &f%d&7 confirmed 100%%, &f%d&7 high confidence)",
+                causalFindings.size(),
+                confirmedCausal,
+                highCausal
         ));
 
         List<String> topClicked = headItems(telemetry.clickedMenuItems(), 4);
@@ -531,11 +531,11 @@ public record LeafFuzzScorecardReport(
             ClassRetentionFinding rf = retentionFindings.get(i);
             lines.add(p + "  &c[Leak] &f" + rf.formatSummaryLine());
         }
-        for (int i = 0; i < Math.min(2, claimFindings.size()); i++) {
-            ClaimDeliveryFinding cf = claimFindings.get(i);
-            lines.add(p + "  &e[Claim] &f[" + cf.confidenceTier().name() + " " + cf.confidencePercent()
-                    + "%] (Order " + cf.order() + ") &7Claims: &f" + cf.claims()
-                    + " &7-> Does Not Deliver: &c" + cf.doesNotDeliver());
+        for (int i = 0; i < Math.min(2, causalFindings.size()); i++) {
+            CausalFinding cf = causalFindings.get(i);
+            lines.add(p + "  &e[Causal] &f[" + cf.confidenceTier().name() + " " + cf.confidencePercent()
+                    + "%] (Order " + cf.order() + ") &7Declared: &f" + cf.declaredSurface()
+                    + " &7-> Finding: &c" + cf.causalDefect());
         }
         if (savedReportPath != null) {
             lines.add(p + "&7Saved Markdown QC report: &f" + savedReportPath);
@@ -570,22 +570,22 @@ public record LeafFuzzScorecardReport(
         if (stage4MemoryRetentionVerdict() == Verdict.PASS) {
             passedStages++;
         }
-        if (stage5ClaimDeliveryVerdict() == Verdict.PASS) {
+        if (stage5CausalAuditVerdict() == Verdict.PASS) {
             passedStages++;
         }
-        long confirmedOrHighClaims = claimFindings.stream()
+        long confirmedOrHighCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.CONFIRMED
                         || f.confidenceTier() == ConfidenceTier.HIGH)
                 .count();
         return String.format(
                 Locale.ROOT,
-                "%s (%d/5 stages passed; %d reproducers, %d faults, %d memory leaks, %d confirmed/high claim defects)",
+                "%s (%d/5 stages passed; %d reproducers, %d faults, %d memory leaks, %d confirmed/high causal defects)",
                 overallVerdict().name(),
                 passedStages,
                 shrunkReproducers.size(),
                 faultSignatures.size(),
                 retentionFindings.size(),
-                confirmedOrHighClaims
+                confirmedOrHighCausal
         );
     }
 
@@ -632,7 +632,7 @@ public record LeafFuzzScorecardReport(
                 .append(" 2:").append(stage2BoundaryFuzzVerdict())
                 .append(" 3:").append(stage3StallAndExceptionVerdict())
                 .append(" 4:").append(stage4MemoryRetentionVerdict())
-                .append(" 5:").append(stage5ClaimDeliveryVerdict()).append("`\n");
+                .append(" 5:").append(stage5CausalAuditVerdict()).append("`\n");
         sb.append("Moderation Evidence Summary: `").append(verdictSummary()).append("`\n\n");
         sb.append("### LeafFuzz Automated QC Scorecard: `").append(targetName).append("` — **")
                 .append(overallVerdict().name()).append("**\n\n");
@@ -688,19 +688,19 @@ public record LeafFuzzScorecardReport(
                         telemetry.totalInstancesScanned(),
                         retentionFindings.size()
                 ));
-        long confirmedClaims = claimFindings.stream()
+        long confirmedCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.CONFIRMED)
                 .count();
-        long highClaims = claimFindings.stream()
+        long highCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.HIGH)
                 .count();
-        sb.append("| **5. Claim & Causal Delivery Audit** | `").append(stage5ClaimDeliveryVerdict())
+        sb.append("| **5. Bytecode & Causal Audit** | `").append(stage5CausalAuditVerdict())
                 .append(String.format(
                         Locale.ROOT,
-                        "` | `%d` claim findings (`%d` Order-1/2 `CONFIRMED 100%%`, `%d` `HIGH`) |\n\n",
-                        claimFindings.size(),
-                        confirmedClaims,
-                        highClaims
+                        "` | `%d` causal findings (`%d` Order-1/2 `CONFIRMED 100%%`, `%d` `HIGH`) |\n\n",
+                        causalFindings.size(),
+                        confirmedCausal,
+                        highCausal
                 ));
 
         if (!telemetry.clickedMenuItems().isEmpty()) {
@@ -769,14 +769,14 @@ public record LeafFuzzScorecardReport(
             sb.append('\n');
         }
 
-        if (!claimFindings.isEmpty()) {
-            sb.append("#### Stage 5 Findings: First-Order & Second-Order Claim Delivery (`Claims X -> Does Not Deliver Y`)\n\n");
-            for (ClaimDeliveryFinding cf : claimFindings) {
+        if (!causalFindings.isEmpty()) {
+            sb.append("#### Stage 5 Findings: First-Order & Second-Order Bytecode & Causal Audit\n\n");
+            for (CausalFinding cf : causalFindings) {
                 sb.append("- **[").append(cf.confidenceTier().name()).append(' ').append(cf.confidencePercent())
                         .append("%]** *(Order ").append(cf.order()).append(" — `").append(cf.kind().name())
                         .append("`, `").append(cf.artifactName()).append("`)*\n");
-                sb.append("  - **Claims:** ").append(cf.claims()).append('\n');
-                sb.append("  - **Does Not Deliver:** ").append(cf.doesNotDeliver()).append('\n');
+                sb.append("  - **Declared:** ").append(cf.declaredSurface()).append('\n');
+                sb.append("  - **Finding:** ").append(cf.causalDefect()).append('\n');
                 sb.append("  - **Clears When:** ").append(cf.clearsWhen()).append('\n');
                 if (!cf.llmExplanation().isEmpty()) {
                     sb.append("  - **AST-Grounded Explanation:** ").append(cf.llmExplanation()).append('\n');
@@ -797,10 +797,10 @@ public record LeafFuzzScorecardReport(
      */
     public String toPublishableDataYaml() {
         String nowIso = Instant.now().toString();
-        long confirmedClaims = claimFindings.stream()
+        long confirmedCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.CONFIRMED)
                 .count();
-        long highClaims = claimFindings.stream()
+        long highCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.HIGH)
                 .count();
         StringBuilder sb = new StringBuilder();
@@ -819,7 +819,7 @@ public record LeafFuzzScorecardReport(
         sb.append("  stage_2_boundary_lifecycle_fuzz: ").append(stage2BoundaryFuzzVerdict().name()).append('\n');
         sb.append("  stage_3_stall_exception_guard: ").append(stage3StallAndExceptionVerdict().name()).append('\n');
         sb.append("  stage_4_post_gc_retention: ").append(stage4MemoryRetentionVerdict().name()).append('\n');
-        sb.append("  stage_5_claim_causal_delivery: ").append(stage5ClaimDeliveryVerdict().name()).append('\n');
+        sb.append("  stage_5_causal_audit: ").append(stage5CausalAuditVerdict().name()).append('\n');
 
         sb.append("quality_metrics:\n");
         sb.append("  indexed_jars: ").append(indexedJars).append('\n');
@@ -867,9 +867,9 @@ public record LeafFuzzScorecardReport(
         sb.append("  classes_scanned: ").append(telemetry.totalClassesScanned()).append('\n');
         sb.append("  instances_scanned: ").append(telemetry.totalInstancesScanned()).append('\n');
         sb.append("  retention_leaks: ").append(retentionFindings.size()).append('\n');
-        sb.append("  claim_findings_total: ").append(claimFindings.size()).append('\n');
-        sb.append("  claim_findings_confirmed: ").append(confirmedClaims).append('\n');
-        sb.append("  claim_findings_high: ").append(highClaims).append('\n');
+        sb.append("  causal_findings_total: ").append(causalFindings.size()).append('\n');
+        sb.append("  causal_findings_confirmed: ").append(confirmedCausal).append('\n');
+        sb.append("  causal_findings_high: ").append(highCausal).append('\n');
 
         appendYamlStringList(sb, "clicked_menu_items", telemetry.clickedMenuItems());
         appendYamlStringList(sb, "command_execution_telemetry", telemetry.commandSummaries());
@@ -899,12 +899,12 @@ public record LeafFuzzScorecardReport(
         }
         appendYamlStringList(sb, "retention_findings", leakLines);
 
-        List<String> claimLines = new ArrayList<>(claimFindings.size());
-        for (ClaimDeliveryFinding cf : claimFindings) {
-            claimLines.add("[" + cf.confidenceTier().name() + " " + cf.confidencePercent() + "% Order "
-                    + cf.order() + "] Claims: " + cf.claims() + " -> Does Not Deliver: " + cf.doesNotDeliver());
+        List<String> causalLines = new ArrayList<>(causalFindings.size());
+        for (CausalFinding cf : causalFindings) {
+            causalLines.add("[" + cf.confidenceTier().name() + " " + cf.confidencePercent() + "% Order "
+                    + cf.order() + "] Declared: " + cf.declaredSurface() + " -> Finding: " + cf.causalDefect());
         }
-        appendYamlStringList(sb, "claim_findings", claimLines);
+        appendYamlStringList(sb, "causal_findings", causalLines);
         return sb.toString();
     }
 
@@ -917,10 +917,10 @@ public record LeafFuzzScorecardReport(
      */
     public String toPublishableDataJson() {
         String nowIso = Instant.now().toString();
-        long confirmedClaims = claimFindings.stream()
+        long confirmedCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.CONFIRMED)
                 .count();
-        long highClaims = claimFindings.stream()
+        long highCausal = causalFindings.stream()
                 .filter(f -> f.confidenceTier() == ConfidenceTier.HIGH)
                 .count();
         StringBuilder sb = new StringBuilder();
@@ -940,7 +940,7 @@ public record LeafFuzzScorecardReport(
         sb.append("    \"stage2BoundaryLifecycleFuzz\": ").append(jsonQuote(stage2BoundaryFuzzVerdict().name())).append(",\n");
         sb.append("    \"stage3StallExceptionGuard\": ").append(jsonQuote(stage3StallAndExceptionVerdict().name())).append(",\n");
         sb.append("    \"stage4PostGcRetention\": ").append(jsonQuote(stage4MemoryRetentionVerdict().name())).append(",\n");
-        sb.append("    \"stage5ClaimCausalDelivery\": ").append(jsonQuote(stage5ClaimDeliveryVerdict().name())).append("\n");
+        sb.append("    \"stage5CausalAudit\": ").append(jsonQuote(stage5CausalAuditVerdict().name())).append("\n");
         sb.append("  },\n");
 
         sb.append("  \"qualityMetrics\": {\n");
@@ -989,9 +989,9 @@ public record LeafFuzzScorecardReport(
         sb.append("    \"classesScanned\": ").append(telemetry.totalClassesScanned()).append(",\n");
         sb.append("    \"instancesScanned\": ").append(telemetry.totalInstancesScanned()).append(",\n");
         sb.append("    \"retentionLeaks\": ").append(retentionFindings.size()).append(",\n");
-        sb.append("    \"claimFindingsTotal\": ").append(claimFindings.size()).append(",\n");
-        sb.append("    \"claimFindingsConfirmed\": ").append(confirmedClaims).append(",\n");
-        sb.append("    \"claimFindingsHigh\": ").append(highClaims).append("\n");
+        sb.append("    \"causalFindingsTotal\": ").append(causalFindings.size()).append(",\n");
+        sb.append("    \"causalFindingsConfirmed\": ").append(confirmedCausal).append(",\n");
+        sb.append("    \"causalFindingsHigh\": ").append(highCausal).append("\n");
         sb.append("  },\n");
 
         appendJsonStringList(sb, "clickedMenuItems", telemetry.clickedMenuItems(), true);
@@ -1022,12 +1022,12 @@ public record LeafFuzzScorecardReport(
         }
         appendJsonStringList(sb, "retentionFindings", leakLines, true);
 
-        List<String> claimLines = new ArrayList<>(claimFindings.size());
-        for (ClaimDeliveryFinding cf : claimFindings) {
-            claimLines.add("[" + cf.confidenceTier().name() + " " + cf.confidencePercent() + "% Order "
-                    + cf.order() + "] Claims: " + cf.claims() + " -> Does Not Deliver: " + cf.doesNotDeliver());
+        List<String> causalLines = new ArrayList<>(causalFindings.size());
+        for (CausalFinding cf : causalFindings) {
+            causalLines.add("[" + cf.confidenceTier().name() + " " + cf.confidencePercent() + "% Order "
+                    + cf.order() + "] Declared: " + cf.declaredSurface() + " -> Finding: " + cf.causalDefect());
         }
-        appendJsonStringList(sb, "claimFindings", claimLines, false);
+        appendJsonStringList(sb, "causalFindings", causalLines, false);
         sb.append("}\n");
         return sb.toString();
     }

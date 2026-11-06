@@ -1,13 +1,13 @@
 package net.leaf.fuzz.common;
 
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalFinding;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.CausalGraphReport;
+import io.github.dailystruggle.bytecode.BytecodeCausalGraphScanner.FindingKind;
+import io.github.dailystruggle.bytecode.LlmCausalChainAuditor;
+import io.github.dailystruggle.bytecode.LlmConfigDocSynthesizer.HttpTransport;
+import io.github.dailystruggle.bytecode.LlmConfigDocSynthesizer.Provider;
 import io.github.dailystruggle.commandsapi.common.CommandsAPI;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.CausalGraphReport;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.ClaimDeliveryFinding;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.BytecodeCausalGraphScanner.FindingKind;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.LlmCausalChainAuditor;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.LlmConfigDocSynthesizer.HttpTransport;
-import io.github.dailystruggle.rtp.common.bit.config.atlas.LlmConfigDocSynthesizer.Provider;
 import io.github.dailystruggle.server.api.ServerAccessor;
 import io.github.dailystruggle.server.api.TaskHandle;
 import net.leaf.fuzz.common.command.LeafFuzzCommand;
@@ -33,7 +33,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -926,14 +928,14 @@ public final class LeafFuzzRuntime implements AutoCloseable {
     }
 
     /**
-     * Executes Stage 5 (First-Order &amp; Second-Order Causal Claim Delivery Audit) across matching
-     * target plugin/mod archives, corroborating static {@code CLAIM_HOLLOW_COMMAND} findings with
+     * Executes Stage 5 (First-Order &amp; Second-Order Bytecode &amp; Causal Audit) across matching
+     * target plugin/mod archives, corroborating static {@code CAUSAL_HOLLOW_COMMAND} findings with
      * live Stage 2 execution telemetry and optionally enriching with {@link LlmCausalChainAuditor}.
      *
      * @param targetFilter plugin/mod name, comma-separated list, or {@code "all"}
-     * @return immutable list of {@link ClaimDeliveryFinding}s
+     * @return immutable list of {@link CausalFinding}s
      */
-    public List<ClaimDeliveryFinding> auditClaimDelivery(String targetFilter) {
+    public List<CausalFinding> auditCausalDelivery(String targetFilter) {
         if (this.ownershipIndex.indexedJarCount() == 0) {
             refreshJarOwnershipIndexNow();
         }
@@ -957,13 +959,13 @@ public final class LeafFuzzRuntime implements AutoCloseable {
                 ? new LlmCausalChainAuditor(llmHookCfg, this.customLlmHttpTransport)
                 : null;
 
-        List<ClaimDeliveryFinding> out = new ArrayList<>();
+        List<CausalFinding> out = new ArrayList<>();
         for (CausalGraphReport report : matchedReports) {
-            List<ClaimDeliveryFinding> baseFindings = llmAuditor != null
+            List<CausalFinding> baseFindings = llmAuditor != null
                     ? llmAuditor.enrichFindingsWithExplanations(report, this.config.llmAudit().maxChainsPerTarget())
                     : report.findings();
-            for (ClaimDeliveryFinding f : baseFindings) {
-                if (f.kind() == FindingKind.CLAIM_HOLLOW_COMMAND
+            for (CausalFinding f : baseFindings) {
+                if (f.kind() == FindingKind.CAUSAL_HOLLOW_COMMAND
                         && liveCmdDispatches > 0
                         && liveTeleports == 0
                         && liveMenus == 0) {
@@ -979,6 +981,918 @@ public final class LeafFuzzRuntime implements AutoCloseable {
         return List.copyOf(out);
     }
 
+    /**
+     * Executes per-slice Built-In Test ({@code PBIT} / {@code CBIT} / {@code IBIT}) harnesses across
+     * all discovered {@link BytecodeCausalGraphScanner.CausalChainSlice}s for {@code targetFilter}
+     * strictly in memory, restoring all temporary probe state after each slice audit.
+     *
+     * @param targetFilter plugin/mod name, comma-separated list, or {@code "all"}
+     * @return immutable list of {@link SliceBitHarness.SliceBitReport}s
+     */
+    public List<SliceBitHarness.SliceBitReport> auditSliceBit(String targetFilter) {
+        if (this.ownershipIndex.indexedJarCount() == 0) {
+            refreshJarOwnershipIndexNow();
+        }
+        String effTarget = (targetFilter == null || targetFilter.isBlank()) ? "all" : targetFilter.trim();
+        List<CausalGraphReport> matchedReports = resolveCausalReportsForTarget(effTarget);
+        if (matchedReports.isEmpty()) {
+            return List.of();
+        }
+
+        int liveCmdDispatches;
+        int liveEffects;
+        synchronized (telemetryLock) {
+            liveCmdDispatches = this.obsCommandsDispatched;
+            liveEffects = this.obsTeleports + this.obsMenusOpened;
+        }
+        List<FaultSignature> targetFaults = filterFaultsForTarget(
+                faultOracle.rankedSignatures(),
+                effTarget,
+                this.ownershipIndex
+        );
+        List<ClassRetentionFinding> targetLeaks = filterRetentionForTarget(
+                retentionScreener.checkpointCount() >= ClassRetentionScreener.MIN_CHECKPOINTS
+                        ? retentionScreener.screenClassGrowth()
+                        : retentionScreener.latestFindings(),
+                effTarget,
+                this.ownershipIndex
+        );
+
+        List<SliceBitHarness.SliceBitReport> reports = new ArrayList<>();
+        for (CausalGraphReport report : matchedReports) {
+            reports.addAll(SliceBitHarness.auditReportSlices(
+                    report,
+                    Map.of(),
+                    targetFaults,
+                    targetLeaks,
+                    liveCmdDispatches,
+                    liveEffects
+            ));
+        }
+        return List.copyOf(reports);
+    }
+
+    /**
+     * Returns all scanned {@link CausalGraphReport}s across indexed plugin/mod archives so
+     * sibling workspaces (such as {@code LeafConfig}) can ingest {@code LeafFuzz}'s reverse-engineering
+     * causal chains, dead-key findings, and clickable UML component models when {@code LeafFuzz} is installed.
+     *
+     * @return immutable list of {@link CausalGraphReport}s
+     */
+    public List<CausalGraphReport> currentCausalGraphReports() {
+        if (this.ownershipIndex.indexedJarCount() == 0) {
+            refreshJarOwnershipIndexNow();
+        }
+        return List.copyOf(resolveCausalReportsForTarget("all"));
+    }
+
+    /**
+     * Builds the open-ended {@code LeafConfig} workspace extension bundle (`workspaceTabs` and
+     * `configKeyBadges`) owned and supplied by {@code LeafFuzz}.
+     *
+     * @return extension bundle map ready for registration in {@code LeafConfig}
+     */
+    public Map<String, Object> buildLeafConfigWorkspaceExtension() {
+        LeafFuzzScorecardReport sc = this.latestScorecard;
+        return buildLeafConfigWorkspaceExtensionForReports(
+                currentCausalGraphReports(),
+                sc == null ? List.of() : List.of(sc)
+        );
+    }
+
+    /**
+     * Converts a collection of {@link CausalGraphReport}s into {@code LeafFuzz}'s self-contained
+     * {@code LeafConfig} workspace extension bundle (`workspaceTabs` with the {@code plugin-uml}
+     * tab + {@code LeafFuzzUmlTabKernel} client script, and `configKeyBadges`).
+     *
+     * @param reports causal graph reports scanned by {@code LeafFuzz}
+     * @return extension bundle map
+     */
+    public static Map<String, Object> buildLeafConfigWorkspaceExtensionForReports(
+            Collection<CausalGraphReport> reports
+    ) {
+        return buildLeafConfigWorkspaceExtensionForReports(reports, List.of());
+    }
+
+    /**
+     * Converts {@link CausalGraphReport}s and optional 5-stage {@link LeafFuzzScorecardReport}s
+     * into {@code LeafFuzz}'s self-contained {@code LeafConfig} workspace extension bundle.
+     *
+     * @param reports    causal graph reports scanned by {@code LeafFuzz}
+     * @param scorecards optional live 5-stage QC scorecards
+     * @return extension bundle map
+     */
+    public static Map<String, Object> buildLeafConfigWorkspaceExtensionForReports(
+            Collection<CausalGraphReport> reports,
+            Collection<LeafFuzzScorecardReport> scorecards
+    ) {
+        List<CausalGraphReport> safeReports = reports == null ? List.of() : reports.stream()
+                .filter(Objects::nonNull)
+                .toList();
+        List<LeafFuzzScorecardReport> safeScorecards = scorecards == null ? List.of() : scorecards.stream()
+                .filter(Objects::nonNull)
+                .toList();
+        List<Map<String, Object>> badgeMaps = new ArrayList<>();
+        StringBuilder modelsJson = new StringBuilder("{\"models\":[");
+        Set<String> seenArtifacts = new LinkedHashSet<>();
+        int modelIdx = 0;
+        for (CausalGraphReport report : safeReports) {
+            String artId = report.artifactId() == null || report.artifactId().isBlank()
+                    ? ("plugin:" + report.displayName().toLowerCase(Locale.ROOT))
+                    : report.artifactId();
+            if (!seenArtifacts.add(artId.toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            if (modelIdx++ > 0) {
+                modelsJson.append(',');
+            }
+            LeafFuzzScorecardReport matchedScorecard = matchScorecardForArtifact(
+                    artId,
+                    report.displayName(),
+                    safeScorecards
+            );
+            appendPluginUmlModelJsonAndCollectBadges(report, matchedScorecard, modelsJson, badgeMaps);
+        }
+        modelsJson.append("]}");
+
+        Map<String, Object> umlTab = new LinkedHashMap<>();
+        umlTab.put("tabId", "plugin-uml");
+        umlTab.put("title", "Plugin UML");
+        umlTab.put("icon", "🔬");
+        umlTab.put("description", "Clickable per-plugin component UML & bytecode causal model supplied by LeafFuzz");
+        umlTab.put("initialPayloadJson", modelsJson.toString());
+        umlTab.put("clientRendererFn", "LeafFuzzUmlTabKernel.render");
+        umlTab.put("clientScriptKernel", leafConfigUmlTabClientKernelJs());
+
+        Map<String, Object> bundle = new LinkedHashMap<>();
+        bundle.put("providerId", "leaffuzz");
+        bundle.put("displayName", "LeafFuzz");
+        bundle.put("workspaceTabs", List.of(Collections.unmodifiableMap(umlTab)));
+        bundle.put("configKeyBadges", Collections.unmodifiableList(badgeMaps));
+        return Collections.unmodifiableMap(bundle);
+    }
+
+    private static LeafFuzzScorecardReport matchScorecardForArtifact(
+            String artifactId,
+            String displayName,
+            List<LeafFuzzScorecardReport> scorecards
+    ) {
+        if (scorecards == null || scorecards.isEmpty()) {
+            return null;
+        }
+        String stem = (artifactId == null ? "" : artifactId.toLowerCase(Locale.ROOT)).replace("plugin:", "").trim();
+        String disp = displayName == null ? "" : displayName.toLowerCase(Locale.ROOT).trim();
+        for (LeafFuzzScorecardReport sc : scorecards) {
+            String t = sc.targetName() == null ? "" : sc.targetName().toLowerCase(Locale.ROOT).trim();
+            if (t.equals(disp) || t.equals(stem) || "all".equals(t)
+                    || (!disp.isEmpty() && t.contains(disp))
+                    || (!stem.isEmpty() && t.contains(stem))) {
+                return sc;
+            }
+        }
+        return scorecards.size() == 1 ? scorecards.get(0) : null;
+    }
+
+    private static String formatFindingKindTitle(BytecodeCausalGraphScanner.FindingKind kind) {
+        if (kind == null) {
+            return "Plugin Warning";
+        }
+        return switch (kind) {
+            case CAUSAL_UNREGISTERED_LISTENER -> "Inactive Event Listener";
+            case CAUSAL_UNWIRED_COMMAND -> "Unregistered Command";
+            case CAUSAL_DEAD_CONFIG_KEY -> "Unused Config Setting";
+            case CAUSAL_UNREAD_CONFIG_FIELD -> "Ignored Config Field";
+            case CAUSAL_ORPHANED_SUPPLIER -> "Dropped Async Result";
+            case CAUSAL_SWALLOWED_FAILURE -> "Silently Ignored Error";
+            case CAUSAL_ASYNC_MAIN_THREAD_SINK -> "Unsafe Off-Thread World Call";
+            case CAUSAL_UNIT_MISMATCH -> "Time Unit Mismatch (s vs ms)";
+            case CAUSAL_HOLLOW_COMMAND -> "Chat-Only Command (No Action)";
+            case CAUSAL_SHARED_STATE_RACE -> "Concurrent State Race";
+            case CAUSAL_SYNC_MAIN_THREAD_IO -> "Main-Thread Blocking I/O";
+            case CAUSAL_UNCLOSED_RESOURCE_LEAK -> "Unreleased Memory / Resource";
+            case CAUSAL_LLM_SEMANTIC_MISMATCH -> "Config Condition Mismatch";
+        };
+    }
+    private static String formatProofRuleTitle(String ruleId) {
+        if (ruleId == null) {
+            return "Runtime Safety Warning";
+        }
+        return switch (ruleId.trim().toUpperCase(Locale.ROOT)) {
+            case "S-001" -> "Unsafe Teleport Destination";
+            case "S-002" -> "Unreleased Memory / Resource";
+            case "S-003" -> "Protected Claim Bypass";
+            case "S-004" -> "Silently Ignored Error";
+            case "S-005" -> "Main-Thread Blocking I/O";
+            case "S-006" -> "Premature Startup API Call";
+            case "S-007" -> "Missing Command Failure Feedback";
+            default -> "Runtime Safety Warning";
+        };
+    }
+
+    private static String formatRawFindingTokenDescription(String token) {
+        if (token == null || token.isBlank()) {
+            return "Potential server lag or reliability issue detected in plugin execution path.";
+        }
+        return switch (token.trim().toUpperCase(Locale.ROOT)) {
+            case "CAUSAL_SYNC_MAIN_THREAD_IO" ->
+                    "Runs synchronous file, database, or chunk I/O on the main server thread (can cause tick lag spikes).";
+            case "CAUSAL_ASYNC_MAIN_THREAD_SINK" ->
+                    "Calls main-thread-only world or entity APIs from a background thread.";
+            case "CAUSAL_SWALLOWED_FAILURE" ->
+                    "Catches and ignores an operational exception without logging or notifying the player.";
+            case "CAUSAL_UNCLOSED_RESOURCE_LEAK" ->
+                    "Opens a file stream, chunk ticket, or player session entry without closing or cleaning it up.";
+            case "CAUSAL_SHARED_STATE_RACE" ->
+                    "Reads and modifies shared plugin state across threads without consistent synchronization.";
+            case "CAUSAL_ORPHANED_SUPPLIER" ->
+                    "Starts an asynchronous task but discards its return value before completing the action.";
+            case "CAUSAL_HOLLOW_COMMAND" ->
+                    "Sends a chat message without performing the expected teleport, menu, or world action.";
+            default -> token.replace('_', ' ').toLowerCase(Locale.ROOT);
+        };
+    }
+
+    private static String sanitizeOperatorHazardText(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        return text
+                .replace("(violates S-005 / CAUSAL-MAIN-IO)", "(blocks the main server thread and causes tick lag spikes)")
+                .replace("(violates S-005 / regional threading)", "(unsafe off-thread world access)")
+                .replace("(violates F-001..F-003 / S-005)", "(incompatible with Folia regional threading and causes main-thread lag)")
+                .replace("(violates S-005)", "(blocks the main server thread)")
+                .replace("(violates S-004)", "(silently hides errors from operators and players)")
+                .replace("(violates S-002)", "(risks memory or chunk-ticket leaks)")
+                .replace("(violating S-002)", "(retaining memory after players disconnect)")
+                .replace(" (S-002)", "")
+                .replace(" (S-003)", "")
+                .replace(" (S-004)", "")
+                .replace(" (S-005)", "")
+                .trim();
+    }
+
+    private static String formatEffectSinkLabel(String sink) {
+        if (sink == null || sink.isBlank()) {
+            return "Server Action";
+        }
+        return switch (sink.trim().toUpperCase(Locale.ROOT)) {
+            case "STATE_MUTATION" -> "Updates Plugin State";
+            case "MESSAGE_ONLY", "MESSAGE_SEND" -> "Sends Chat Message";
+            case "TELEPORT" -> "Teleports Player";
+            case "STORAGE_IO" -> "Disk / Database I/O";
+            case "CHUNK_IO" -> "Loads World Chunks";
+            case "WORLD_MUTATION" -> "Modifies World Blocks";
+            case "INVENTORY_MENU" -> "Opens GUI Menu";
+            case "ECONOMY_TX" -> "Economy Transaction";
+            case "SCHEDULER_TASK" -> "Schedules Server Task";
+            case "ASYNC_SCHEDULER" -> "Runs Background Task";
+            case "NETWORK_IO" -> "Network Request";
+            case "PERMISSION_CHECK" -> "Checks Permission";
+            default -> sink.replace('_', ' ');
+        };
+    }
+
+    private static String formatReloadTierLabel(String provenTier) {
+        if (provenTier == null || provenTier.isBlank()) {
+            return "Plugin reload";
+        }
+        return switch (provenTier.trim().toUpperCase(Locale.ROOT)) {
+            case "HOT_RELOAD" -> "Updates immediately";
+            case "PLUGIN_RELOAD" -> "Requires plugin reload";
+            case "SERVER_RESTART" -> "Requires server restart";
+            default -> provenTier;
+        };
+    }
+
+    private static void appendPluginUmlModelJsonAndCollectBadges(
+            CausalGraphReport report,
+            LeafFuzzScorecardReport scorecard,
+            StringBuilder sb,
+            List<Map<String, Object>> badgeMapsOut
+    ) {
+        String artId = (report.artifactId() == null || report.artifactId().isBlank())
+                ? "plugin:unknown"
+                : report.artifactId();
+        String displayName = (report.displayName() == null || report.displayName().isBlank())
+                ? artId
+                : report.displayName();
+        String reloadCmd = "/" + displayName.toLowerCase(Locale.ROOT) + " reload";
+        Map<String, List<String>> findingsBySymbolOrKey = new LinkedHashMap<>();
+        Map<String, String> findingTextById = new LinkedHashMap<>();
+        Set<String> deadKeys = new LinkedHashSet<>();
+        Set<String> unreadFieldKeys = new LinkedHashSet<>();
+        for (BytecodeCausalGraphScanner.CausalFinding f : report.findings()) {
+            String badgeText = formatFindingKindTitle(f.kind()) + ": " + sanitizeOperatorHazardText(f.causalDefect());
+            if (f.findingId() != null && !f.findingId().isBlank()) {
+                findingTextById.put(f.findingId().trim(), badgeText);
+            }
+            String sym = f.entryPointSymbol();
+            findingsBySymbolOrKey.computeIfAbsent(sym, k -> new ArrayList<>()).add(badgeText);
+            if (f.kind() == BytecodeCausalGraphScanner.FindingKind.CAUSAL_DEAD_CONFIG_KEY) {
+                deadKeys.add(sym.toLowerCase(Locale.ROOT));
+                findingsBySymbolOrKey.computeIfAbsent(sym.toLowerCase(Locale.ROOT), k -> new ArrayList<>()).add(badgeText);
+            } else if (f.kind() == BytecodeCausalGraphScanner.FindingKind.CAUSAL_UNREAD_CONFIG_FIELD) {
+                unreadFieldKeys.add(sym.toLowerCase(Locale.ROOT));
+                findingsBySymbolOrKey.computeIfAbsent(sym.toLowerCase(Locale.ROOT), k -> new ArrayList<>()).add(badgeText);
+            }
+        }
+
+        Map<String, Set<String>> keyToGatedComponents = new LinkedHashMap<>();
+        Map<String, Set<String>> keyToHazards = new LinkedHashMap<>();
+        Map<String, Set<String>> keyToReaders = new LinkedHashMap<>();
+        Set<String> hotReloadKeys = new LinkedHashSet<>();
+        Set<String> addedCompIds = new LinkedHashSet<>();
+
+        List<Map<String, Object>> components = new ArrayList<>();
+        List<Map<String, String>> edges = new ArrayList<>();
+
+        int idx = 0;
+        for (BytecodeCausalGraphScanner.CausalChainSlice slice : report.entryChains()) {
+            if (slice == null) continue;
+            idx++;
+            String compId = "comp-" + idx;
+            String stereotype = switch (slice.kind()) {
+                case COMMAND -> "COMMAND";
+                case EVENT -> "EVENT_LISTENER";
+                case SUPPLIER -> "ASYNC_WORKER";
+            };
+            String rawSym = slice.entrySymbol();
+            int hashIdx = rawSym.indexOf('#');
+            String className = (hashIdx > 0 ? rawSym.substring(0, hashIdx) : rawSym).replace('/', '.');
+            String simpleClass = className.contains(".") ? className.substring(className.lastIndexOf('.') + 1) : className;
+            String methodPart = hashIdx > 0 ? rawSym.substring(hashIdx + 1) : "";
+            int parenIdx = methodPart.indexOf('(');
+            if (parenIdx > 0) {
+                methodPart = methodPart.substring(0, parenIdx);
+            }
+            String label = methodPart.isBlank() ? simpleClass : (simpleClass + "#" + methodPart);
+            String regMode = slice.registrationMode().name();
+            String gateKey = slice.gatingConfigKey();
+
+            Set<String> hazardSet = new LinkedHashSet<>(findingsBySymbolOrKey.getOrDefault(rawSym, List.of()));
+            for (BytecodeCausalGraphScanner.ProofObligation po : slice.proofObligations()) {
+                if (po.status() == BytecodeCausalGraphScanner.ProofStatus.VIOLATED) {
+                    String ev = po.evidence() == null ? "" : po.evidence().trim();
+                    int colon = ev.indexOf(':');
+                    String maybeFindingId = colon > 0 ? ev.substring(0, colon).trim() : "";
+                    String mappedFinding = findingTextById.get(maybeFindingId);
+                    if (mappedFinding != null) {
+                        hazardSet.add(mappedFinding);
+                    } else if (ev.matches("^CAUSAL-\\d+:[A-Z0-9_]+$")) {
+                        if (hazardSet.isEmpty()) {
+                            String kindToken = ev.substring(colon + 1).trim();
+                            hazardSet.add(formatProofRuleTitle(po.ruleId()) + ": " + formatRawFindingTokenDescription(kindToken));
+                        }
+                    } else {
+                        String title = formatProofRuleTitle(po.ruleId());
+                        String cleanEv = sanitizeOperatorHazardText(ev);
+                        hazardSet.add(cleanEv.isEmpty() ? title : (title + ": " + cleanEv));
+                    }
+                }
+            }
+            List<String> hazards = new ArrayList<>(hazardSet);
+
+            boolean isLiveEntry = (slice.kind() == BytecodeCausalGraphScanner.EntryPointKind.EVENT
+                    || slice.kind() == BytecodeCausalGraphScanner.EntryPointKind.COMMAND)
+                    && !methodPart.toLowerCase(Locale.ROOT).contains("onenable")
+                    && !methodPart.toLowerCase(Locale.ROOT).contains("init");
+
+            List<String> friendlySinks = slice.reachableEffectSinks().stream()
+                    .map(LeafFuzzRuntime::formatEffectSinkLabel)
+                    .toList();
+            String friendlyType = switch (slice.kind()) {
+                case COMMAND -> "Command handler";
+                case EVENT -> "Event listener";
+                case SUPPLIER -> "Background worker";
+            };
+            String summary = !slice.declaredBehavior().isBlank()
+                    ? sanitizeOperatorHazardText(slice.declaredBehavior())
+                    : (friendlyType + " in " + simpleClass
+                            + (slice.hopTrace().isEmpty() ? "" : (" (" + slice.hopTrace().size() + " method call(s))"))
+                            + (friendlySinks.isEmpty() ? "" : (" -> " + String.join(", ", friendlySinks))));
+
+            if (addedCompIds.add(compId)) {
+                Map<String, Object> compNode = new LinkedHashMap<>();
+                compNode.put("componentId", compId);
+                compNode.put("label", label);
+                compNode.put("stereotype", stereotype);
+                compNode.put("className", className);
+                compNode.put("entrySymbol", rawSym);
+                compNode.put("registrationMode", regMode);
+                compNode.put("gatingConfigKey", gateKey);
+                compNode.put("readConfigKeys", slice.readConfigKeys());
+                compNode.put("hopTrace", slice.hopTrace());
+                compNode.put("effectSinks", new ArrayList<>(slice.reachableEffectSinks()));
+                compNode.put("hazards", hazards);
+                compNode.put("summary", summary);
+                components.add(compNode);
+            }
+
+            if (!gateKey.isBlank()) {
+                String gLow = gateKey.toLowerCase(Locale.ROOT);
+                keyToGatedComponents.computeIfAbsent(gLow, k -> new LinkedHashSet<>()).add(label);
+                if (!hazards.isEmpty()) {
+                    keyToHazards.computeIfAbsent(gLow, k -> new LinkedHashSet<>()).addAll(hazards);
+                }
+                String cfgCompId = "cfg-" + gLow.replaceAll("[^a-z0-9_.-]", "_");
+                if (addedCompIds.add(cfgCompId)) {
+                    Map<String, Object> cfgNode = new LinkedHashMap<>();
+                    cfgNode.put("componentId", cfgCompId);
+                    cfgNode.put("label", gateKey);
+                    cfgNode.put("stereotype", "CONFIG_GUARD");
+                    cfgNode.put("className", "config.yml");
+                    cfgNode.put("entrySymbol", gateKey);
+                    cfgNode.put("registrationMode", "CONFIG_GATE");
+                    cfgNode.put("gatingConfigKey", gateKey);
+                    cfgNode.put("readConfigKeys", List.of(gateKey));
+                    cfgNode.put("hopTrace", List.of());
+                    cfgNode.put("effectSinks", List.of());
+                    cfgNode.put("hazards", List.of());
+                    cfgNode.put("summary", "Feature toggle in config.yml controlling " + label);
+                    components.add(cfgNode);
+                }
+                edges.add(Map.of("fromId", cfgCompId, "toId", compId, "relation", "GATED_BY", "label", "enables " + label));
+            }
+
+            for (String rk : slice.readConfigKeys()) {
+                String rkLow = rk.toLowerCase(Locale.ROOT);
+                keyToReaders.computeIfAbsent(rkLow, k -> new LinkedHashSet<>()).add(label);
+                if (isLiveEntry) {
+                    hotReloadKeys.add(rkLow);
+                }
+                if (!hazards.isEmpty()) {
+                    keyToHazards.computeIfAbsent(rkLow, k -> new LinkedHashSet<>()).addAll(hazards);
+                }
+                String cfgCompId = "cfg-" + rkLow.replaceAll("[^a-z0-9_.-]", "_");
+                if (addedCompIds.add(cfgCompId)) {
+                    Map<String, Object> cfgNode = new LinkedHashMap<>();
+                    cfgNode.put("componentId", cfgCompId);
+                    cfgNode.put("label", rk);
+                    cfgNode.put("stereotype", "CONFIG_GUARD");
+                    cfgNode.put("className", "config.yml");
+                    cfgNode.put("entrySymbol", rk);
+                    cfgNode.put("registrationMode", "CONFIG_KEY");
+                    cfgNode.put("gatingConfigKey", "");
+                    cfgNode.put("readConfigKeys", List.of(rk));
+                    cfgNode.put("hopTrace", List.of());
+                    cfgNode.put("effectSinks", List.of());
+                    cfgNode.put("hazards", List.of());
+                    cfgNode.put("summary", "Configuration setting read by " + label);
+                    components.add(cfgNode);
+                }
+                edges.add(Map.of("fromId", cfgCompId, "toId", compId, "relation", "READS_KEY", "label", "read by " + label));
+            }
+
+            for (String sink : slice.reachableEffectSinks()) {
+                String sinkId = "sink-" + sink.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_.-]", "_");
+                String friendlySink = formatEffectSinkLabel(sink);
+                if (addedCompIds.add(sinkId)) {
+                    Map<String, Object> sinkNode = new LinkedHashMap<>();
+                    sinkNode.put("componentId", sinkId);
+                    sinkNode.put("label", friendlySink);
+                    sinkNode.put("stereotype", "EFFECT_SINK");
+                    sinkNode.put("className", "Server Action");
+                    sinkNode.put("entrySymbol", sink);
+                    sinkNode.put("registrationMode", "ACTIVE");
+                    sinkNode.put("gatingConfigKey", "");
+                    sinkNode.put("readConfigKeys", List.of());
+                    sinkNode.put("hopTrace", List.of());
+                    sinkNode.put("effectSinks", List.of(sink));
+                    sinkNode.put("hazards", List.of());
+                    sinkNode.put("summary", "Server runtime action: " + friendlySink);
+                    components.add(sinkNode);
+                }
+                edges.add(Map.of("fromId", compId, "toId", sinkId, "relation", "TRIGGERS_SINK", "label", friendlySink));
+            }
+        }
+
+        for (Map.Entry<String, String> gatedEntry : report.configGatedListeners().entrySet()) {
+            String listenerCls = gatedEntry.getKey().replace('/', '.');
+            String simpleCls = listenerCls.contains(".") ? listenerCls.substring(listenerCls.lastIndexOf('.') + 1) : listenerCls;
+            String gk = gatedEntry.getValue();
+            String gkLow = gk.toLowerCase(Locale.ROOT);
+            keyToGatedComponents.computeIfAbsent(gkLow, k -> new LinkedHashSet<>()).add(simpleCls);
+        }
+
+        Set<String> allCandidateKeys = new LinkedHashSet<>();
+        allCandidateKeys.addAll(deadKeys);
+        allCandidateKeys.addAll(unreadFieldKeys);
+        for (BytecodeCausalGraphScanner.CausalChainSlice s : report.entryChains()) {
+            if (!s.gatingConfigKey().isBlank()) allCandidateKeys.add(s.gatingConfigKey());
+            allCandidateKeys.addAll(s.readConfigKeys());
+        }
+        allCandidateKeys.addAll(report.configGatedListeners().values());
+
+        List<Map<String, Object>> modelBadges = new ArrayList<>();
+        for (String keyPath : allCandidateKeys) {
+            if (keyPath == null || keyPath.isBlank()) continue;
+            String kLow = keyPath.toLowerCase(Locale.ROOT);
+            String leafLow = kLow.contains(".") ? kLow.substring(kLow.lastIndexOf('.') + 1) : kLow;
+            boolean isDead = deadKeys.contains(kLow) || deadKeys.contains(leafLow);
+            boolean isUnread = !isDead && (unreadFieldKeys.contains(kLow) || unreadFieldKeys.contains(leafLow));
+
+            List<String> gated = new ArrayList<>(keyToGatedComponents.getOrDefault(kLow, Set.of()));
+            if (gated.isEmpty() && !leafLow.equals(kLow)) {
+                gated.addAll(keyToGatedComponents.getOrDefault(leafLow, Set.of()));
+            }
+            List<String> hazards = new ArrayList<>(keyToHazards.getOrDefault(kLow, Set.of()));
+            if (hazards.isEmpty() && !leafLow.equals(kLow)) {
+                hazards.addAll(keyToHazards.getOrDefault(leafLow, Set.of()));
+            }
+            List<String> readers = new ArrayList<>(keyToReaders.getOrDefault(kLow, Set.of()));
+            if (readers.isEmpty() && !leafLow.equals(kLow)) {
+                readers.addAll(keyToReaders.getOrDefault(leafLow, Set.of()));
+            }
+
+            String status;
+            if (isDead) {
+                status = "DEAD_KEY";
+            } else if (isUnread) {
+                status = "UNREAD_FIELD";
+            } else if (!hazards.isEmpty()) {
+                status = "HAZARD_GATE";
+            } else {
+                status = "WIRED";
+            }
+
+            String provenTier;
+            if (hotReloadKeys.contains(kLow) || hotReloadKeys.contains(leafLow)) {
+                provenTier = "HOT_RELOAD";
+            } else if (!gated.isEmpty()) {
+                provenTier = "SERVER_RESTART";
+            } else {
+                provenTier = "PLUGIN_RELOAD";
+            }
+
+            String tierLabel = formatReloadTierLabel(provenTier);
+            String summary;
+            if (isDead) {
+                summary = "Unused in plugin code (0 references in JAR — changing this setting has no effect).";
+            } else if (isUnread) {
+                summary = "Loaded into a plugin field that is never used during execution.";
+            } else if (!gated.isEmpty()) {
+                summary = "Enables or disables " + String.join(", ", gated) + " (" + tierLabel + ").";
+            } else if (!readers.isEmpty()) {
+                summary = "Used by " + String.join(", ", readers) + " (" + tierLabel + ").";
+            } else {
+                summary = "Active plugin configuration setting (" + tierLabel + ").";
+            }
+
+            Map<String, Object> badge = new LinkedHashMap<>();
+            badge.put("artifactId", artId);
+            badge.put("displayName", displayName);
+            badge.put("keyPath", keyPath);
+            badge.put("status", status);
+            badge.put("provenReloadTier", provenTier);
+            badge.put("reloadCommand", reloadCmd);
+            badge.put("gatedComponents", List.copyOf(gated));
+            badge.put("hazards", List.copyOf(hazards));
+            badge.put("summary", summary);
+            badge.put("targetTabId", "leaffuzz:plugin-uml");
+            badge.put("targetFocusId", artId + "::" + keyPath);
+            Map<String, Object> immutableBadge = Collections.unmodifiableMap(badge);
+            modelBadges.add(immutableBadge);
+            badgeMapsOut.add(immutableBadge);
+        }
+
+        sb.append("{\"artifactId\":\"").append(escapeJson(artId)).append("\"")
+                .append(",\"displayName\":\"").append(escapeJson(displayName)).append("\"")
+                .append(",\"version\":\"latest\"")
+                .append(",\"components\":[");
+        for (int i = 0; i < components.size(); i++) {
+            if (i > 0) sb.append(',');
+            Map<String, Object> c = components.get(i);
+            sb.append("{\"componentId\":\"").append(escapeJson(String.valueOf(c.get("componentId")))).append("\"")
+                    .append(",\"label\":\"").append(escapeJson(String.valueOf(c.get("label")))).append("\"")
+                    .append(",\"stereotype\":\"").append(escapeJson(String.valueOf(c.get("stereotype")))).append("\"")
+                    .append(",\"className\":\"").append(escapeJson(String.valueOf(c.get("className")))).append("\"")
+                    .append(",\"entrySymbol\":\"").append(escapeJson(String.valueOf(c.get("entrySymbol")))).append("\"")
+                    .append(",\"registrationMode\":\"").append(escapeJson(String.valueOf(c.get("registrationMode")))).append("\"")
+                    .append(",\"gatingConfigKey\":\"").append(escapeJson(String.valueOf(c.get("gatingConfigKey")))).append("\"")
+                    .append(",\"readConfigKeys\":");
+            appendJsonStringList(sb, (List<?>) c.get("readConfigKeys"));
+            sb.append(",\"hopTrace\":");
+            appendJsonStringList(sb, (List<?>) c.get("hopTrace"));
+            sb.append(",\"effectSinks\":");
+            appendJsonStringList(sb, (List<?>) c.get("effectSinks"));
+            sb.append(",\"hazards\":");
+            appendJsonStringList(sb, (List<?>) c.get("hazards"));
+            sb.append(",\"summary\":\"").append(escapeJson(String.valueOf(c.get("summary")))).append("\"}");
+        }
+        sb.append("],\"edges\":[");
+        for (int i = 0; i < edges.size(); i++) {
+            if (i > 0) sb.append(',');
+            Map<String, String> e = edges.get(i);
+            sb.append("{\"fromId\":\"").append(escapeJson(e.getOrDefault("fromId", ""))).append("\"")
+                    .append(",\"toId\":\"").append(escapeJson(e.getOrDefault("toId", ""))).append("\"")
+                    .append(",\"relation\":\"").append(escapeJson(e.getOrDefault("relation", ""))).append("\"")
+                    .append(",\"label\":\"").append(escapeJson(e.getOrDefault("label", ""))).append("\"}");
+        }
+        sb.append("],\"keyBadges\":[");
+        for (int i = 0; i < modelBadges.size(); i++) {
+            if (i > 0) sb.append(',');
+            Map<String, Object> b = modelBadges.get(i);
+            sb.append("{\"keyPath\":\"").append(escapeJson(String.valueOf(b.get("keyPath")))).append("\"")
+                    .append(",\"status\":\"").append(escapeJson(String.valueOf(b.get("status")))).append("\"")
+                    .append(",\"provenReloadTier\":\"").append(escapeJson(String.valueOf(b.get("provenReloadTier")))).append("\"")
+                    .append(",\"reloadCommand\":\"").append(escapeJson(String.valueOf(b.get("reloadCommand")))).append("\"")
+                    .append(",\"gatedComponents\":");
+            appendJsonStringList(sb, (List<?>) b.get("gatedComponents"));
+            sb.append(",\"hazards\":");
+            appendJsonStringList(sb, (List<?>) b.get("hazards"));
+            sb.append(",\"summary\":\"").append(escapeJson(String.valueOf(b.get("summary")))).append("\"}");
+        }
+        sb.append(']');
+        if (scorecard != null) {
+            sb.append(",\"scorecard\":{")
+                    .append("\"overallVerdict\":\"").append(scorecard.overallVerdict().name()).append("\",")
+                    .append("\"stage1Verdict\":\"").append(scorecard.stage1CommandSurfaceVerdict().name()).append("\",")
+                    .append("\"stage2Verdict\":\"").append(scorecard.stage2BoundaryFuzzVerdict().name()).append("\",")
+                    .append("\"stage3Verdict\":\"").append(scorecard.stage3StallAndExceptionVerdict().name()).append("\",")
+                    .append("\"stage4Verdict\":\"").append(scorecard.stage4MemoryRetentionVerdict().name()).append("\",")
+                    .append("\"stage5Verdict\":\"").append(scorecard.stage5CausalAuditVerdict().name()).append("\",")
+                    .append("\"openCommands\":[");
+            var lpfList = scorecard.leastPrivilegeFindings();
+            for (int i = 0; i < lpfList.size(); i++) {
+                var lpf = lpfList.get(i);
+                String rawCmd = lpf.nodeId() == null ? "" : lpf.nodeId().trim();
+                String rootLit = rawCmd.startsWith("/") ? rawCmd.substring(1) : rawCmd;
+                int sp = rootLit.indexOf(' ');
+                String alias = sp > 0 ? rootLit.substring(0, sp) : rootLit;
+                String snippet = "aliases:\n  " + alias + ": []";
+                if (i > 0) sb.append(',');
+                sb.append("{\"commandPath\":\"").append(escapeJson(rawCmd)).append("\"")
+                        .append(",\"alias\":\"").append(escapeJson(alias)).append("\"")
+                        .append(",\"reason\":\"").append(escapeJson(lpf.rationale())).append("\"")
+                        .append(",\"commandsYmlSnippet\":\"").append(escapeJson(snippet)).append("\"}");
+            }
+            sb.append("],\"reproducers\":[");
+            var repList = scorecard.shrunkReproducers();
+            for (int i = 0; i < repList.size(); i++) {
+                var rep = repList.get(i);
+                if (i > 0) sb.append(',');
+                sb.append("{\"signatureId\":\"").append(escapeJson(rep.signatureId())).append("\"")
+                        .append(",\"summary\":\"").append(escapeJson(rep.authorReproducerSummary())).append("\"")
+                        .append(",\"commandsYmlSnippet\":\"").append(escapeJson(rep.commandsYmlOverrideSnippet())).append("\"}");
+            }
+            sb.append("]}");
+        }
+        sb.append('}');
+    }
+
+    private static void appendJsonStringList(StringBuilder sb, List<?> items) {
+        sb.append('[');
+        if (items != null) {
+            for (int i = 0; i < items.size(); i++) {
+                if (i > 0) sb.append(',');
+                sb.append('"').append(escapeJson(String.valueOf(items.get(i)))).append('"');
+            }
+        }
+        sb.append(']');
+    }
+
+    private static String escapeJson(String s) {
+        if (s == null || s.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Self-contained client rendering kernel supplied by {@code LeafFuzz} to mount and render
+     * its {@code 🔬 Plugin UML} top-level workspace tab inside {@code LeafConfig}.
+     */
+    public static String leafConfigUmlTabClientKernelJs() {
+        return "window.LeafFuzzUmlTabKernel=(function(){"
+                + "var state={models:[],activeArtifactId:'',activeComponentId:'',viewMode:'flowchart',container:null,api:null};"
+                + "function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;');}"
+                + "function trunc(s,n){var t=String(s==null?'':s);return t.length>n?t.substring(0,n-1)+'…':t;}"
+                + "var SINK_LABELS={STATE_MUTATION:'Updates Plugin State',MESSAGE_ONLY:'Sends Chat Message',MESSAGE_SEND:'Sends Chat Message',TELEPORT:'Teleports Player',STORAGE_IO:'Disk / Database I/O',CHUNK_IO:'Loads World Chunks',WORLD_MUTATION:'Modifies World Blocks',INVENTORY_MENU:'Opens GUI Menu',ECONOMY_TX:'Economy Transaction',SCHEDULER_TASK:'Schedules Server Task',ASYNC_SCHEDULER:'Runs Background Task',NETWORK_IO:'Network Request',PERMISSION_CHECK:'Checks Permission',CLEAN_EXECUTION:'No Lag Risks Found'};"
+                + "var SINK_SUBS={STATE_MUTATION:'Modifies in-memory plugin data',MESSAGE_ONLY:'Sends chat feedback to player',MESSAGE_SEND:'Sends chat feedback to player',TELEPORT:'Moves player in the world',STORAGE_IO:'Reads or writes disk/database',CHUNK_IO:'Loads or generates world chunks',WORLD_MUTATION:'Changes world blocks or entities',INVENTORY_MENU:'Opens inventory menu screen',ECONOMY_TX:'Updates player economy balance',SCHEDULER_TASK:'Queues task on server scheduler',ASYNC_SCHEDULER:'Runs task on background thread',NETWORK_IO:'Opens external network connection',PERMISSION_CHECK:'Verifies player permission'};"
+                + "var HZ_TITLES={CAUSAL_SYNC_MAIN_THREAD_IO:'Main-Thread Blocking I/O',CAUSAL_ASYNC_MAIN_THREAD_SINK:'Unsafe Off-Thread World Call',CAUSAL_SWALLOWED_FAILURE:'Silently Ignored Error',CAUSAL_UNCLOSED_RESOURCE_LEAK:'Unreleased Memory / Resource',CAUSAL_SHARED_STATE_RACE:'Concurrent State Race',CAUSAL_ORPHANED_SUPPLIER:'Dropped Async Result',CAUSAL_HOLLOW_COMMAND:'Chat-Only Command (No Action)',CAUSAL_DEAD_CONFIG_KEY:'Unused Config Setting',CAUSAL_UNREAD_CONFIG_FIELD:'Ignored Config Field',CAUSAL_UNIT_MISMATCH:'Time Unit Mismatch (s vs ms)',CAUSAL_UNREGISTERED_LISTENER:'Inactive Event Listener',CAUSAL_UNWIRED_COMMAND:'Unregistered Command','S-001':'Unsafe Teleport Destination','S-002':'Unreleased Memory / Resource','S-003':'Protected Claim Bypass','S-004':'Silently Ignored Error','S-005':'Main-Thread Blocking I/O','S-006':'Premature Startup API Call','S-007':'Missing Command Failure Feedback'};"
+                + "function humanizeStereotype(st){var m={COMMAND:'Command',EVENT_LISTENER:'Event Listener',ASYNC_WORKER:'Background Task',CONFIG_GUARD:'Config Setting',EFFECT_SINK:'Server Action',COMPONENT:'Plugin Component'};return m[st]||st||'Component';}"
+                + "function humanizeRegMode(rm,st,longForm){if(st==='COMMAND'&&(!rm||rm==='NOT_APPLICABLE'||rm==='ACTIVE'))return longForm?'Registered Command (Always Active)':'Always Active';var m={REGISTERED_UNCONDITIONAL:'Always Active',ACTIVE:'Always Active',REGISTERED_CONFIG_GATED:'Config-Gated',CONFIG_GATE:'Feature Toggle',CONFIG_KEY:'Read by Plugin',UNREGISTERED:'Inactive (Not Registered)',NOT_APPLICABLE:'Always Active'};return m[rm]||rm||'Always Active';}"
+                + "function humanizeCfgSub(sub){var s=String(sub||'');if(s==='CONFIG_GATE'||s==='GATES ENTRY')return 'Feature Toggle';if(s==='CONFIG_KEY'||s==='READ BY SLICE')return 'Read by Plugin';return s.replace(/DEAD_KEY/g,'Unused Setting').replace(/UNREAD_FIELD/g,'Ignored Field').replace(/HAZARD_GATE/g,'Controls Warning Path').replace(/WIRED/g,'Active Setting').replace(/HOT_RELOAD/g,'Live Reload').replace(/PLUGIN_RELOAD/g,'Plugin Reload').replace(/SERVER_RESTART/g,'Server Restart');}"
+                + "function humanizeSinkLabel(sk){var k=String(sk||'').trim();return SINK_LABELS[k]||k.replace(/_/g,' ');}"
+                + "function humanizeSinkSub(sk){var k=String(sk||'').trim();return SINK_SUBS[k]||'Server Runtime Action';}"
+                + "function humanizeHazard(hz){var raw=String(hz||'').trim();var idx=raw.indexOf(':');var head=idx>0?raw.substring(0,idx).trim():raw;var tail=idx>0?raw.substring(idx+1).trim():'';var title=HZ_TITLES[head]||head;if(/^CAUSAL-\\d+:[A-Z0-9_]+$/i.test(tail)){var tok=tail.split(':')[1]||'';title=HZ_TITLES[tok]||title;tail='Runs synchronous blocking work or unsafe state access on this path.';}tail=tail.replace(/\\(violates S-005[^)]*\\)/gi,'(blocks the main server thread and causes lag spikes)').replace(/\\(violates F-001[^)]*\\)/gi,'(incompatible with regional threading)').replace(/\\(violates S-004[^)]*\\)/gi,'(silently hides errors from operators)').replace(/\\(violates S-002[^)]*\\)/gi,'(risks memory or chunk-ticket leaks)').replace(/\\bS-005\\b/g,'Main-Thread Blocking I/O').replace(/\\bS-004\\b/g,'Silently Ignored Error').replace(/\\bS-002\\b/g,'Unreleased Memory / Resource');return {title:title,detail:tail||title,full:tail?(title+': '+tail):title};}"
+                + "function humanizeHopNodeLabel(sym){var s=String(sym||'').replace(/^Hop\\s+\\d+:\\s*/i,'');var arrowIdx=s.indexOf('->');if(arrowIdx>0)s=s.substring(0,arrowIdx).trim();return s;}"
+                + "function humanizeHopLine(h){var s=String(h||'').replace(/^Hop\\s+(\\d+):/i,function(_,n){return 'Step '+(Number(n)+1)+':';});s=s.replace(/->\\s*sinks=\\[([^\\]]*)\\]/gi,function(_,list){var items=list.split(',').map(function(x){return humanizeSinkLabel(x.trim());}).filter(Boolean);return items.length?(' → Actions: '+items.join(', ')):'';});return humanizeHazard(s).full;}"
+                + "function render(container,tabDesc,api){"
+                + "if(!container)return;state.container=container;state.api=api||state.api;"
+                + "if(tabDesc&&tabDesc.initialPayload&&Array.isArray(tabDesc.initialPayload.models)){state.models=tabDesc.initialPayload.models;}"
+                + "if(state.models.length>0&&!state.activeArtifactId){state.activeArtifactId=state.models[0].artifactId||'';}"
+                + "draw();"
+                + "}"
+                + "function focus(container,tabDesc,focusId,api){"
+                + "if(container)state.container=container;if(api)state.api=api;"
+                + "if(tabDesc&&tabDesc.initialPayload&&Array.isArray(tabDesc.initialPayload.models)){state.models=tabDesc.initialPayload.models;}"
+                + "var raw=String(focusId||'');var parts=raw.split('::');"
+                + "var artHint=(parts[0]||'').toLowerCase();var keyHint=(parts[1]||raw).toLowerCase();"
+                + "var m=state.models.find(function(x){return String(x.artifactId||'').toLowerCase()===artHint||String(x.displayName||'').toLowerCase()===artHint;})||state.models[0];"
+                + "if(m){state.activeArtifactId=m.artifactId;"
+                + "var c=(m.components||[]).find(function(n){return String(n.gatingConfigKey||'').toLowerCase()===keyHint||(Array.isArray(n.readConfigKeys)&&n.readConfigKeys.some(function(rk){return String(rk).toLowerCase()===keyHint;}));});"
+                + "state.activeComponentId=c?c.componentId:'';}"
+                + "draw();"
+                + "}"
+                + "function selectPlugin(artId){state.activeArtifactId=String(artId||'');state.activeComponentId='';draw();}"
+                + "function setViewMode(mode){state.viewMode=(mode==='cards'?'cards':'flowchart');draw();}"
+                + "function zoomIntoUmlComponent(compId){state.activeComponentId=String(compId||'');draw();}"
+                + "function zoomOutUmlComponent(){state.activeComponentId='';draw();}"
+                + "function jumpKey(file,key){if(state.api&&typeof state.api.openConfigKey==='function'){state.api.openConfigKey(file,key);}}"
+                + "function lockCommandInConfig(alias,snippet){if(state.api&&typeof state.api.stageCommandsYmlOverride==='function'){state.api.stageCommandsYmlOverride(alias,snippet);}else if(typeof window.stageCommandsYmlMitigation==='function'){window.stageCommandsYmlMitigation(alias,snippet);}}"
+                + "function hopKeyFromTrace(trace){if(!Array.isArray(trace)||!trace.length)return '';for(var i=1;i<trace.length;i++){var s=String(trace[i]||'');if(/^Hop\\s+1:/i.test(s)&&s.indexOf('lambda$')<0&&s.indexOf('ServerAccessor#')<0&&s.indexOf('$CommandOutcome')<0)return s;}return trace.length>1?trace[1]:trace[0];}"
+                + "function buildFlowchartSvgAndMermaid(active,vis,allComps,allEdges,focused,cfgPath){"
+                + "var entryPool=vis.filter(function(c){return c.stereotype==='COMMAND'||c.stereotype==='EVENT_LISTENER'||c.stereotype==='ASYNC_WORKER'||c.stereotype==='COMPONENT';});"
+                + "entryPool.sort(function(a,b){"
+                + "var af=(focused&&a.componentId===focused.componentId)?100:0;"
+                + "var bf=(focused&&b.componentId===focused.componentId)?100:0;"
+                + "var ah=(Array.isArray(a.hazards)?a.hazards.length:0)*10+(Array.isArray(a.readConfigKeys)?a.readConfigKeys.length:0)*3+(a.gatingConfigKey?5:0)+(Array.isArray(a.hopTrace)?a.hopTrace.length:0);"
+                + "var bh=(Array.isArray(b.hazards)?b.hazards.length:0)*10+(Array.isArray(b.readConfigKeys)?b.readConfigKeys.length:0)*3+(b.gatingConfigKey?5:0)+(Array.isArray(b.hopTrace)?b.hopTrace.length:0);"
+                + "return (bf+bh)-(af+ah);"
+                + "});"
+                + "var entries=entryPool.slice(0,6);"
+                + "var cfgNodes=[];var cfgSeen=new Set();"
+                + "vis.filter(function(c){return c.stereotype==='CONFIG_GUARD';}).forEach(function(c){if(cfgNodes.length<6&&!cfgSeen.has(c.label)){cfgSeen.add(c.label);cfgNodes.push({id:c.componentId,label:c.label,sub:humanizeCfgSub(c.registrationMode||'CONFIG_GATE'),status:'GATE',compId:c.componentId,keyPath:c.gatingConfigKey||c.label});}});"
+                + "entries.forEach(function(e){"
+                + "if(e.gatingConfigKey&&!cfgSeen.has(e.gatingConfigKey)&&cfgNodes.length<6){cfgSeen.add(e.gatingConfigKey);cfgNodes.push({id:'cfg-'+e.gatingConfigKey,label:e.gatingConfigKey,sub:'Feature Toggle',status:'GATE',compId:e.componentId,keyPath:e.gatingConfigKey});}"
+                + "(e.readConfigKeys||[]).forEach(function(rk){if(!cfgSeen.has(rk)&&cfgNodes.length<6){cfgSeen.add(rk);cfgNodes.push({id:'cfg-'+rk,label:rk,sub:'Read by Plugin',status:'WIRED',compId:e.componentId,keyPath:rk});}});"
+                + "});"
+                + "(active.keyBadges||[]).forEach(function(b){if(!cfgSeen.has(b.keyPath)&&cfgNodes.length<6){cfgSeen.add(b.keyPath);cfgNodes.push({id:'badge-'+b.keyPath,label:b.keyPath,sub:humanizeCfgSub((b.status||'WIRED')+' · '+(b.provenReloadTier||'RELOAD')),status:b.status||'WIRED',compId:'',keyPath:b.keyPath});}});"
+                + "if(!cfgNodes.length){cfgNodes.push({id:'cfg-default',label:'plugin.yml / config.yml',sub:'Plugin Startup',status:'WIRED',compId:entries[0]?entries[0].componentId:'',keyPath:''});}"
+                + "var hopNodes=[];var hopSeen=new Map();"
+                + "var svgEdges=[];var mermaidLines=['stateDiagram-v2','  direction LR'];"
+                + "entries.forEach(function(e){"
+                + "var gk=e.gatingConfigKey||'';"
+                + "if(gk){var cn=cfgNodes.find(function(x){return x.label===gk;});if(cn){svgEdges.push({fromCol:0,fromId:cn.id,toCol:1,toId:e.componentId,label:'enables',color:'#f9e2af',dashed:false});mermaidLines.push('  '+cn.label.replace(/[^a-zA-Z0-9_]/g,'_')+' --> '+e.componentId.replace(/[^a-zA-Z0-9_]/g,'_')+' : enables');}}"
+                + "(e.readConfigKeys||[]).slice(0,2).forEach(function(rk){var cn=cfgNodes.find(function(x){return x.label===rk;});if(cn&&rk!==gk){svgEdges.push({fromCol:0,fromId:cn.id,toCol:1,toId:e.componentId,label:'reads',color:'#89b4fa',dashed:true});mermaidLines.push('  '+cn.label.replace(/[^a-zA-Z0-9_]/g,'_')+' --> '+e.componentId.replace(/[^a-zA-Z0-9_]/g,'_')+' : reads');}});"
+                + "var trace=Array.isArray(e.hopTrace)&&e.hopTrace.length>0?e.hopTrace:[e.label+'#dispatch'];"
+                + "var hopSym=hopKeyFromTrace(trace);"
+                + "var hopKey=hopSym;"
+                + "if(!hopSeen.has(hopKey)&&hopNodes.length<6){"
+                + "var hid='hop-'+hopNodes.length;"
+                + "hopSeen.set(hopKey,hid);"
+                + "hopNodes.push({id:hid,label:humanizeHopNodeLabel(hopSym),sub:trace.length+(trace.length===1?' method call':' method calls'),compId:e.componentId,stepCount:trace.length});"
+                + "}"
+                + "var targetHopId=hopSeen.get(hopKey)||(hopNodes[0]&&hopNodes[0].id);"
+                + "if(targetHopId){svgEdges.push({fromCol:1,fromId:e.componentId,toCol:2,toId:targetHopId,label:trace.length>1?(trace.length+' calls'):'calls',color:'#cba6f7',dashed:false});mermaidLines.push('  '+e.componentId.replace(/[^a-zA-Z0-9_]/g,'_')+' --> '+targetHopId.replace(/[^a-zA-Z0-9_]/g,'_')+' : calls ('+trace.length+' steps)');}"
+                + "});"
+                + "var sinkNodes=[];var sinkSeen=new Map();"
+                + "entries.forEach(function(e){"
+                + "var trace=Array.isArray(e.hopTrace)&&e.hopTrace.length>0?e.hopTrace:[e.label+'#dispatch'];"
+                + "var fromHopId=hopSeen.get(hopKeyFromTrace(trace))||(hopNodes[0]&&hopNodes[0].id);"
+                + "(e.hazards||[]).slice(0,2).forEach(function(hz){"
+                + "var hInfo=humanizeHazard(hz);"
+                + "var sid='hz-'+hInfo.title.replace(/[^a-zA-Z0-9_]/g,'_');"
+                + "if(!sinkSeen.has(sid)&&sinkNodes.length<6){sinkSeen.set(sid,true);sinkNodes.push({id:sid,label:hInfo.title,sub:trunc(hInfo.detail,34),kind:'HAZARD',compId:e.componentId});}"
+                + "if(fromHopId&&sinkSeen.has(sid)){svgEdges.push({fromCol:2,fromId:fromHopId,toCol:3,toId:sid,label:'⚠️ warning',color:'#f38ba8',dashed:false});mermaidLines.push('  '+fromHopId.replace(/[^a-zA-Z0-9_]/g,'_')+' --> '+sid+' : WARNING '+hInfo.title);}"
+                + "});"
+                + "(e.effectSinks||[]).slice(0,2).forEach(function(sk){"
+                + "var sLabel=humanizeSinkLabel(sk);"
+                + "var sid='sink-'+String(sk).replace(/[^a-zA-Z0-9_]/g,'_');"
+                + "if(!sinkSeen.has(sid)&&sinkNodes.length<6){sinkSeen.set(sid,true);sinkNodes.push({id:sid,label:sLabel,sub:humanizeSinkSub(sk),kind:'SINK',compId:e.componentId});}"
+                + "if(fromHopId&&sinkSeen.has(sid)){svgEdges.push({fromCol:2,fromId:fromHopId,toCol:3,toId:sid,label:'runs',color:'#94e2d5',dashed:false});mermaidLines.push('  '+fromHopId.replace(/[^a-zA-Z0-9_]/g,'_')+' --> '+sid+' : runs '+sLabel);}"
+                + "});"
+                + "});"
+                + "if(!sinkNodes.length){sinkNodes.push({id:'sink-ok',label:'No Lag Risks Found',sub:'Runs safely without blocking tick',kind:'SINK',compId:entries[0]?entries[0].componentId:''});if(hopNodes[0]){svgEdges.push({fromCol:2,fromId:hopNodes[0].id,toCol:3,toId:'sink-ok',label:'completes',color:'#a6e3a1',dashed:false});}}"
+                + "var maxRows=Math.max(cfgNodes.length,entries.length,hopNodes.length,sinkNodes.length,1);"
+                + "var svgH=Math.max(360,76+maxRows*68);"
+                + "var colX=[22,292,582,852];var colW=[210,226,216,204];"
+                + "var posMap={};"
+                + "function layoutCol(arr,cIdx){arr.forEach(function(n,i){var y=64+i*66;posMap[cIdx+':'+n.id]={x:colX[cIdx],y:y,w:colW[cIdx],h:50};});}"
+                + "layoutCol(cfgNodes,0);layoutCol(entries.map(function(e){return {id:e.componentId};}),1);layoutCol(hopNodes,2);layoutCol(sinkNodes,3);"
+                + "var defs='<defs>'"
+                + "+'<marker id=\"uml-arr-amber\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 10 5 L 0 9 z\" fill=\"#f9e2af\"/></marker>'"
+                + "+'<marker id=\"uml-arr-blue\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 10 5 L 0 9 z\" fill=\"#89b4fa\"/></marker>'"
+                + "+'<marker id=\"uml-arr-mauve\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 10 5 L 0 9 z\" fill=\"#cba6f7\"/></marker>'"
+                + "+'<marker id=\"uml-arr-teal\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 10 5 L 0 9 z\" fill=\"#94e2d5\"/></marker>'"
+                + "+'<marker id=\"uml-arr-red\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 10 5 L 0 9 z\" fill=\"#f38ba8\"/></marker>'"
+                + "+'</defs>';"
+                + "var laneHeaders=["
+                + "{x:colX[0],w:colW[0],title:'1. CONFIG SETTINGS & TOGGLES',col:'#f9e2af'},"
+                + "{x:colX[1],w:colW[1],title:'2. COMMANDS & EVENT LISTENERS',col:'#89b4fa'},"
+                + "{x:colX[2],w:colW[2],title:'3. INTERNAL CALL PATH',col:'#cba6f7'},"
+                + "{x:colX[3],w:colW[3],title:'4. SERVER ACTIONS & WARNINGS',col:'#94e2d5'}"
+                + "].map(function(lh){return '<g><rect x=\"'+lh.x+'\" y=\"14\" width=\"'+lh.w+'\" height=\"32\" rx=\"6\" fill=\"rgba(24,24,37,0.9)\" stroke=\"'+lh.col+'\" stroke-opacity=\"0.45\"/><text x=\"'+(lh.x+10)+'\" y=\"34\" fill=\"'+lh.col+'\" font-size=\"11\" font-weight=\"700\" font-family=\"ui-monospace,monospace\">'+esc(lh.title)+'</text></g>';}).join('');"
+                + "var edgeSvg=svgEdges.map(function(ed){"
+                + "var p1=posMap[ed.fromCol+':'+ed.fromId];var p2=posMap[ed.toCol+':'+ed.toId];if(!p1||!p2)return '';"
+                + "var x1=p1.x+p1.w;var y1=p1.y+p1.h/2;var x2=p2.x;var y2=p2.y+p2.h/2;"
+                + "var dx=Math.max(28,(x2-x1)*0.48);"
+                + "var mk=ed.color==='#f38ba8'?'uml-arr-red':(ed.color==='#f9e2af'?'uml-arr-amber':(ed.color==='#cba6f7'?'uml-arr-mauve':(ed.color==='#94e2d5'?'uml-arr-teal':'uml-arr-blue')));"
+                + "var mx=(x1+x2)/2;var my=(y1+y2)/2-5;"
+                + "return '<g><path d=\"M '+x1+' '+y1+' C '+(x1+dx)+' '+y1+', '+(x2-dx)+' '+y2+', '+x2+' '+y2+'\" fill=\"none\" stroke=\"'+ed.color+'\" stroke-width=\"1.8\" '+(ed.dashed?'stroke-dasharray=\"4,3\" ':'')+'marker-end=\"url(#'+mk+')\" opacity=\"0.88\"/>'"
+                + "+'<rect x=\"'+(mx-28)+'\" y=\"'+(my-9)+'\" width=\"56\" height=\"14\" rx=\"4\" fill=\"#11111b\" stroke=\"'+ed.color+'\" stroke-width=\"0.7\" opacity=\"0.92\"/>'"
+                + "+'<text x=\"'+mx+'\" y=\"'+my+'\" text-anchor=\"middle\" fill=\"'+ed.color+'\" font-size=\"9\" font-family=\"ui-monospace,monospace\">'+esc(trunc(ed.label,12))+'</text></g>';"
+                + "}).join('');"
+                + "var cfgSvg=cfgNodes.map(function(n){var p=posMap['0:'+n.id];var c=(n.status==='DEAD_KEY'||n.status==='UNREAD_FIELD')?'#f38ba8':(n.status==='HAZARD_GATE'?'#f9e2af':'#a6e3a1');"
+                + "var clickAct=n.compId?('window.LeafFuzzUmlTabKernel.zoomIntoUmlComponent(\\''+esc(n.compId)+'\\')'):(n.keyPath?('window.LeafFuzzUmlTabKernel.jumpKey(\\''+esc(cfgPath)+'\\',\\''+esc(n.keyPath)+'\\')'):'');"
+                + "return '<g style=\"cursor:pointer;\" onclick=\"'+clickAct+'\"><rect x=\"'+p.x+'\" y=\"'+p.y+'\" width=\"'+p.w+'\" height=\"'+p.h+'\" rx=\"7\" fill=\"#181825\" stroke=\"'+c+'\" stroke-width=\"1.5\"/>'"
+                + "+'<text x=\"'+(p.x+10)+'\" y=\"'+(p.y+19)+'\" fill=\"#f9e2af\" font-size=\"11\" font-weight=\"700\" font-family=\"ui-monospace,monospace\">⚙️ '+esc(trunc(n.label,22))+'</text>'"
+                + "+'<text x=\"'+(p.x+10)+'\" y=\"'+(p.y+36)+'\" fill=\"'+c+'\" font-size=\"9.5\" font-family=\"ui-monospace,monospace\">'+esc(trunc(n.sub,26))+'</text></g>';}).join('');"
+                + "var entSvg=entries.map(function(e){var p=posMap['1:'+e.componentId];var sel=focused&&focused.componentId===e.componentId;var haz=Array.isArray(e.hazards)&&e.hazards.length>0;var c=sel?'#89b4fa':(haz?'#f38ba8':'#89b4fa');"
+                + "return '<g style=\"cursor:pointer;\" onclick=\"window.LeafFuzzUmlTabKernel.zoomIntoUmlComponent(\\''+esc(e.componentId)+'\\')\"><rect x=\"'+p.x+'\" y=\"'+p.y+'\" width=\"'+p.w+'\" height=\"'+p.h+'\" rx=\"7\" fill=\"'+(sel?'#1e293b':'#181825')+'\" stroke=\"'+c+'\" stroke-width=\"'+(sel?'2.4':'1.6')+'\"/>'"
+                + "+'<text x=\"'+(p.x+10)+'\" y=\"'+(p.y+18)+'\" fill=\"'+c+'\" font-size=\"10.5\" font-weight=\"700\" font-family=\"ui-monospace,monospace\">⚡ '+esc(trunc(e.label,25))+'</text>'"
+                + "+'<text x=\"'+(p.x+10)+'\" y=\"'+(p.y+35)+'\" fill=\"#a6adc8\" font-size=\"9.5\" font-family=\"ui-monospace,monospace\">'+esc(humanizeStereotype(e.stereotype))+' '+(haz?'· ⚠️ '+e.hazards.length+(e.hazards.length===1?' warning':' warnings'):'· '+esc(humanizeRegMode(e.registrationMode,e.stereotype,false)))+'</text></g>';}).join('');"
+                + "var hopSvg=hopNodes.map(function(n){var p=posMap['2:'+n.id];"
+                + "return '<g style=\"cursor:pointer;\" onclick=\"window.LeafFuzzUmlTabKernel.zoomIntoUmlComponent(\\''+esc(n.compId)+'\\')\"><rect x=\"'+p.x+'\" y=\"'+p.y+'\" width=\"'+p.w+'\" height=\"'+p.h+'\" rx=\"12\" fill=\"#181825\" stroke=\"#cba6f7\" stroke-width=\"1.5\"/>'"
+                + "+'<text x=\"'+(p.x+10)+'\" y=\"'+(p.y+19)+'\" fill=\"#cba6f7\" font-size=\"10.5\" font-weight=\"700\" font-family=\"ui-monospace,monospace\">⛓️ '+esc(trunc(n.label,24))+'</text>'"
+                + "+'<text x=\"'+(p.x+10)+'\" y=\"'+(p.y+36)+'\" fill=\"#a6adc8\" font-size=\"9.5\" font-family=\"ui-monospace,monospace\">Call Path ('+esc(n.sub)+')</text></g>';}).join('');"
+                + "var sinkSvg=sinkNodes.map(function(n){var p=posMap['3:'+n.id];var isHz=n.kind==='HAZARD';var c=isHz?'#f38ba8':'#94e2d5';"
+                + "return '<g style=\"cursor:pointer;\" onclick=\"window.LeafFuzzUmlTabKernel.zoomIntoUmlComponent(\\''+esc(n.compId)+'\\')\"><rect x=\"'+p.x+'\" y=\"'+p.y+'\" width=\"'+p.w+'\" height=\"'+p.h+'\" rx=\"7\" fill=\"'+(isHz?'rgba(243,139,168,0.12)':'#181825')+'\" stroke=\"'+c+'\" stroke-width=\"1.6\"/>'"
+                + "+'<text x=\"'+(p.x+10)+'\" y=\"'+(p.y+19)+'\" fill=\"'+c+'\" font-size=\"10.2\" font-weight=\"700\" font-family=\"ui-monospace,monospace\">'+(isHz?'⚠️ ':'🎯 ')+esc(trunc(n.label,26))+'</text>'"
+                + "+'<text x=\"'+(p.x+10)+'\" y=\"'+(p.y+36)+'\" fill=\"#a6adc8\" font-size=\"9\" font-family=\"ui-monospace,monospace\">'+esc(trunc(n.sub,30))+'</text></g>';}).join('');"
+                + "var svgHtml='<svg id=\"uml-state-causal-svg\" viewBox=\"0 0 1080 '+svgH+'\" style=\"width:100%;height:'+svgH+'px;min-height:380px;max-height:450px;flex-shrink:0;display:block;background:radial-gradient(circle at 20% 20%, rgba(137,180,250,0.06), rgba(17,17,27,0.95));border:1px solid var(--overlay);border-radius:8px;\">'+defs+laneHeaders+edgeSvg+cfgSvg+entSvg+hopSvg+sinkSvg+'</svg>';"
+                + "return {svg:svgHtml,mermaid:mermaidLines.join('\\n')};"
+                + "}"
+                + "function draw(){"
+                + "var el=state.container;if(!el)return;"
+                + "var models=Array.isArray(state.models)?state.models:[];"
+                + "if(!models.length){el.innerHTML='<div style=\"padding:24px;color:var(--subtext);\">No plugin UML models loaded in this LeafFuzz session.</div>';return;}"
+                + "var active=models.find(function(m){return m.artifactId===state.activeArtifactId;})||models[0];"
+                + "state.activeArtifactId=active.artifactId;"
+                + "var allComps=Array.isArray(active.components)?active.components:[];"
+                + "var allEdges=Array.isArray(active.edges)?active.edges:[];"
+                + "var focused=state.activeComponentId?allComps.find(function(c){return c.componentId===state.activeComponentId;}):null;"
+                + "var conn=new Set();if(focused){conn.add(focused.componentId);allEdges.forEach(function(e){if(e.fromId===focused.componentId)conn.add(e.toId);if(e.toId===focused.componentId)conn.add(e.fromId);});}"
+                + "var vis=focused?allComps.filter(function(c){return conn.has(c.componentId);}):allComps;"
+                + "var sideHtml=models.map(function(m){var act=m.artifactId===active.artifactId;var dead=(m.keyBadges||[]).filter(function(b){return b.status==='DEAD_KEY'||b.status==='UNREAD_FIELD';}).length;"
+                + "return '<button type=\"button\" onclick=\"window.LeafFuzzUmlTabKernel.selectPlugin(\\''+esc(m.artifactId)+'\\')\" style=\"text-align:left;padding:9px 11px;border-radius:6px;border:1px solid '+(act?'var(--accent)':'var(--overlay)')+';background:'+(act?'rgba(137,180,250,0.14)':'var(--dark)')+';color:var(--text);cursor:pointer;display:flex;flex-direction:column;gap:3px;\">'"
+                + "+'<div style=\"display:flex;justify-content:space-between;align-items:center;\"><b style=\"font-size:0.82rem;color:'+(act?'var(--accent)':'var(--text)')+';\">🧩 '+esc(m.displayName||m.artifactId)+'</b><span style=\"font-size:0.66rem;color:var(--subtext);font-family:var(--mono);\">'+esc(m.version||'')+'</span></div>'"
+                + "+'<div style=\"font-size:0.69rem;color:var(--subtext);\">'+(m.components||[]).length+' flow nodes'+(dead>0?' · <span style=\"color:var(--red);\">'+dead+' unused key(s)</span>':'')+'</div></button>';}).join('');"
+                + "function lane(title,icon,types,col){var items=vis.filter(function(c){return types.indexOf(c.stereotype)>=0;});if(!items.length)return '';"
+                + "var cards=items.map(function(c){var sel=focused&&c.componentId===focused.componentId;var haz=Array.isArray(c.hazards)&&c.hazards.length>0;"
+                + "var outs=allEdges.filter(function(e){return e.fromId===c.componentId;}).slice(0,4).map(function(e){var t=allComps.find(function(x){return x.componentId===e.toId;});return '<span style=\"font-size:0.65rem;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,0.06);color:var(--subtext);font-family:var(--mono);\">&rarr; '+esc(t?humanizeSinkLabel(t.label):e.toId)+'</span>';}).join(' ');"
+                + "return '<div onclick=\"window.LeafFuzzUmlTabKernel.zoomIntoUmlComponent(\\''+esc(c.componentId)+'\\')\" style=\"padding:10px 12px;border-radius:6px;border:1px solid '+(sel?'var(--accent)':(haz?'var(--red)':'var(--overlay)'))+';background:'+(sel?'rgba(137,180,250,0.16)':'var(--dark)')+';cursor:pointer;min-width:210px;max-width:310px;flex:1 1 230px;\">'"
+                + "+'<div style=\"display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px;\"><span style=\"font-size:0.64rem;font-family:var(--mono);padding:1px 5px;border-radius:3px;background:rgba(0,0,0,0.35);color:'+col+';\">'+esc(humanizeStereotype(c.stereotype))+'</span>'+(haz?'<span style=\"font-size:0.64rem;color:var(--red);font-weight:700;\">⚠️ '+c.hazards.length+(c.hazards.length===1?' WARNING':' WARNINGS')+'</span>':'<span style=\"font-size:0.64rem;color:var(--green);\">'+esc(humanizeRegMode(c.registrationMode,c.stereotype,false))+'</span>')+'</div>'"
+                + "+'<div style=\"font-weight:700;font-size:0.82rem;color:var(--text);font-family:var(--mono);word-break:break-all;\">'+esc(humanizeSinkLabel(c.label))+'</div>'"
+                + "+'<div style=\"font-size:0.72rem;color:var(--subtext);margin-top:3px;\">'+esc(c.summary||'')+'</div>'+(outs?'<div style=\"margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;\">'+outs+'</div>':'')+'</div>';}).join('');"
+                + "return '<div style=\"background:rgba(0,0,0,0.18);border:1px solid var(--overlay);border-radius:8px;padding:12px 14px;\"><div style=\"font-size:0.78rem;font-weight:700;color:'+col+';margin-bottom:9px;\">'+icon+' '+esc(title)+' ('+items.length+')</div><div style=\"display:flex;flex-wrap:wrap;gap:10px;\">'+cards+'</div></div>';}"
+                + "var cfgPath='plugins/'+active.displayName+'/config.yml';"
+                + "var badgeRows=(active.keyBadges||[]).map(function(b){var sc=(b.status==='DEAD_KEY'||b.status==='UNREAD_FIELD')?'var(--red)':(b.status==='HAZARD_GATE'?'var(--yellow)':'var(--green)');"
+                + "return '<div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 9px;border-radius:5px;background:var(--dark);border:1px solid var(--overlay);font-size:0.74rem;\"><div><code style=\"color:var(--accent);font-weight:700;\">'+esc(b.keyPath)+'</code> <span style=\"color:'+sc+';font-weight:700;margin-left:6px;\">['+esc(humanizeCfgSub(b.status))+']</span> <span style=\"color:var(--subtext);font-family:var(--mono);\">('+esc(humanizeCfgSub(b.provenReloadTier))+')</span><div style=\"font-size:0.70rem;color:var(--subtext);margin-top:2px;\">'+esc(b.summary||'')+'</div></div>'"
+                + "+'<button type=\"button\" class=\"btn\" style=\"padding:2px 8px;font-size:0.69rem;white-space:nowrap;\" onclick=\"window.LeafFuzzUmlTabKernel.jumpKey(\\''+esc(cfgPath)+'\\',\\''+esc(b.keyPath)+'\\')\">Edit Key ↗</button></div>';}).join('');"
+                + "var inspHtml='';if(focused){"
+                + "var links=(focused.readConfigKeys||[]).map(function(rk){return '<button type=\"button\" class=\"btn\" style=\"padding:2px 7px;font-size:0.69rem;\" onclick=\"window.LeafFuzzUmlTabKernel.jumpKey(\\''+esc(cfgPath)+'\\',\\''+esc(rk)+'\\')\">⚙️ '+esc(rk)+' ↗</button>';}).join(' ');"
+                + "var hops=(focused.hopTrace||[]).map(function(h){return '<li style=\"margin:2px 0;font-family:var(--mono);font-size:0.71rem;\">'+esc(humanizeHopLine(h))+'</li>';}).join('');"
+                + "var hzs=(focused.hazards||[]).map(function(hz){return '<li style=\"margin:2px 0;color:var(--red);\">'+esc(humanizeHazard(hz).full)+'</li>';}).join('');"
+                + "inspHtml='<div style=\"margin-bottom:6px;\"><b style=\"font-size:0.86rem;color:var(--accent);font-family:var(--mono);\">'+esc(humanizeSinkLabel(focused.label))+'</b> <span style=\"font-size:0.71rem;color:var(--subtext);\">('+esc(focused.className||'-')+')</span></div>'"
+                + "+'<div style=\"margin-bottom:6px;padding:6px 8px;border-radius:5px;background:var(--dark);border:1px solid var(--overlay);\">'+esc(focused.summary||'')+'</div>'"
+                + "+'<div style=\"margin-bottom:4px;\"><b>Activation Status:</b> <code>'+esc(humanizeRegMode(focused.registrationMode,focused.stereotype,true))+'</code>'+(focused.gatingConfigKey?' · <span style=\"color:var(--yellow);\"><b>Controlled by Config Key:</b> <code>'+esc(focused.gatingConfigKey)+'</code></span>':'')+'</div>'"
+                + "+(links?'<div style=\"margin-bottom:6px;\"><b>Linked Config Keys:</b> <span style=\"display:inline-flex;flex-wrap:wrap;gap:4px;\">'+links+'</span></div>':'')"
+                + "+(hops?'<div style=\"margin-bottom:6px;\"><b>🧭 Execution Call Path ('+focused.hopTrace.length+' step(s)):</b><ol style=\"margin:3px 0 0 18px;padding:0;\">'+hops+'</ol></div>':'')"
+                + "+(hzs?'<div style=\"margin-bottom:4px;\"><b>⚠️ Potential Lag &amp; Reliability Warnings:</b><ul style=\"margin:3px 0 0 16px;padding:0;\">'+hzs+'</ul></div>':'<div style=\"color:var(--green);font-size:0.73rem;\">✔ No main-thread lag, silent error, or memory leak risks detected on this path.</div>');"
+                + "}else{inspHtml='<p style=\"margin:0 0 6px 0;\">Viewing config-to-action flowchart for <b>'+esc(active.displayName)+'</b> (<code>'+esc(active.artifactId)+'</code>).</p><p style=\"color:var(--subtext);margin:0;\">Click any box in the flowchart (or switch to View B: Component Cards) to see which config settings it reads, what server actions it runs, and any lag or error warnings.</p>';}"
+                + "var scStripHtml='';if(active.scorecard){"
+                + "var sc=active.scorecard;var openCmds=Array.isArray(sc.openCommands)?sc.openCommands:[];"
+                + "var cmdFixes=openCmds.slice(0,4).map(function(oc){return '<div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 8px;border-radius:4px;background:rgba(243,139,168,0.10);border:1px solid rgba(243,139,168,0.35);font-size:0.72rem;\"><span>🔓 <code>'+esc(oc.commandPath)+'</code> open to default players ('+esc(oc.reason||'')+')</span><button type=\"button\" class=\"btn\" style=\"padding:2px 7px;font-size:0.68rem;border-color:var(--green);color:var(--green);\" onclick=\"window.LeafFuzzUmlTabKernel.lockCommandInConfig(\\''+esc(oc.alias||'command')+'\\',\\''+esc(oc.commandsYmlSnippet||'')+'\\')\">🔒 Lock in commands.yml</button></div>';}).join('');"
+                + "scStripHtml='<div style=\"padding:8px 12px;border-radius:6px;background:var(--mantle);border:1px solid var(--overlay);display:flex;flex-direction:column;gap:6px;\"><div style=\"display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;font-size:0.74rem;\"><b style=\"color:var(--accent);\">🛡️ 5-Stage Health Check Verdict: '+esc(sc.overallVerdict||'PASS')+'</b><span style=\"color:var(--subtext);font-family:var(--mono);font-size:0.70rem;\">Permissions: '+esc(sc.stage1Verdict)+' · Command Fuzzing: '+esc(sc.stage2Verdict)+' · Lag Spikes: '+esc(sc.stage3Verdict)+' · Memory Leaks: '+esc(sc.stage4Verdict)+' · Code Audit: '+esc(sc.stage5Verdict)+'</span></div>'+cmdFixes+'</div>';"
+                + "}"
+                + "var isFlow=state.viewMode!=='cards';"
+                + "var flowData=buildFlowchartSvgAndMermaid(active,allComps,allComps,allEdges,focused,cfgPath);"
+                + "var abToggleHtml='<div style=\"display:inline-flex;border:1px solid var(--overlay);border-radius:6px;overflow:hidden;background:var(--dark);\">'"
+                + "+'<button type=\"button\" onclick=\"window.LeafFuzzUmlTabKernel.setViewMode(\\'flowchart\\')\" style=\"padding:5px 11px;font-size:0.74rem;font-weight:700;border:none;cursor:pointer;background:'+(isFlow?'var(--accent)':'transparent')+';color:'+(isFlow?'#11111b':'var(--text)')+';\">📐 View A: Config-to-Action Flowchart (Mermaid)</button>'"
+                + "+'<button type=\"button\" onclick=\"window.LeafFuzzUmlTabKernel.setViewMode(\\'cards\\')\" style=\"padding:5px 11px;font-size:0.74rem;font-weight:700;border:none;cursor:pointer;background:'+(!isFlow?'var(--accent)':'transparent')+';color:'+(!isFlow?'#11111b':'var(--text)')+';\">🗂️ View B: Component Cards &amp; Wiring</button>'"
+                + "+'</div>';"
+                + "var mainBodyHtml='';"
+                + "if(isFlow){"
+                + "mainBodyHtml='<div style=\"flex:1;display:flex;flex-direction:column;overflow-y:auto;padding:14px 18px;background:var(--base);gap:12px;\">'"
+                + "+'<div style=\"display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--overlay);padding-bottom:10px;flex-wrap:wrap;gap:8px;\"><div><h2 style=\"margin:0;font-size:1.12rem;color:var(--accent);\">🔬 '+esc(active.displayName||active.artifactId)+' — Config-to-Action Flowchart (Mermaid UML)</h2><span style=\"font-size:0.73rem;color:var(--subtext);font-family:var(--mono);\">How config settings control commands &amp; events, what server actions they run, and where lag or errors can occur</span></div><div style=\"display:flex;gap:8px;align-items:center;\">'+(focused?'<button type=\"button\" class=\"btn\" style=\"padding:4px 10px;font-size:0.73rem;\" onclick=\"window.LeafFuzzUmlTabKernel.zoomOutUmlComponent()\">🔍 Full Plugin Flowchart</button>':'')+abToggleHtml+'<span class=\"session-badge\">SUPPLIED BY LEAFFUZZ</span></div></div>'"
+                + "+scStripHtml+flowData.svg"
+                + "+'<div style=\"display:grid;grid-template-columns:1.15fr 0.85fr;gap:12px;align-items:start;\">'"
+                + "+'<div style=\"background:var(--mantle);border:1px solid var(--overlay);border-radius:8px;padding:12px 14px;max-height:260px;overflow-y:auto;\"><div class=\"tracker-title\" style=\"margin-bottom:6px;\"><span>🔍 Component Zoom Inspector</span><span class=\"tracker-badge\">'+(focused?esc(humanizeStereotype(focused.stereotype)):'FLOWCHART OVERVIEW')+'</span></div><div style=\"font-size:0.76rem;color:var(--text);line-height:1.45;\">'+inspHtml+'</div></div>'"
+                + "+'<div style=\"background:var(--mantle);border:1px solid var(--overlay);border-radius:8px;padding:12px 14px;max-height:260px;overflow-y:auto;\"><div class=\"tracker-title\" style=\"margin-bottom:6px;\"><span>📋 Mermaid stateDiagram-v2 Source</span><span class=\"tracker-badge\">direction LR</span></div><pre style=\"margin:0;padding:8px 10px;border-radius:5px;background:#11111b;border:1px solid var(--overlay);color:var(--green);font-family:var(--mono);font-size:0.69rem;max-height:195px;overflow:auto;line-height:1.4;\">'+esc(flowData.mermaid)+'</pre></div>'"
+                + "+'</div></div>';"
+                + "}else{"
+                + "mainBodyHtml='<div style=\"flex:1;display:flex;flex-direction:column;overflow-y:auto;padding:16px 20px;background:var(--base);\">'"
+                + "+'<div style=\"display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--overlay);padding-bottom:10px;margin-bottom:12px;flex-wrap:wrap;gap:8px;\"><div><h2 style=\"margin:0;font-size:1.12rem;color:var(--accent);\">🔬 '+esc(active.displayName||active.artifactId)+' — Component Cards &amp; Key Wiring</h2><span style=\"font-size:0.73rem;color:var(--subtext);font-family:var(--mono);\">Click any component box to inspect its execution path, config toggles, and server actions</span></div><div style=\"display:flex;gap:8px;align-items:center;\">'+(focused?'<button type=\"button\" class=\"btn\" style=\"padding:4px 10px;font-size:0.73rem;\" onclick=\"window.LeafFuzzUmlTabKernel.zoomOutUmlComponent()\">🔍 Zoom Out</button>':'')+abToggleHtml+'<span class=\"session-badge\">SUPPLIED BY LEAFFUZZ</span></div></div>'"
+                + "+scStripHtml+'<div style=\"display:flex;flex-direction:column;gap:14px;\">'+lane('Configuration Settings & Toggles','⚙️',['CONFIG_GUARD'],'var(--yellow)')+lane('Plugin Entry Points (Commands, Event Listeners & Background Tasks)','⚡',['COMMAND','EVENT_LISTENER','ASYNC_WORKER','COMPONENT'],'var(--accent)')+lane('Server Actions & Side Effects','🎯',['EFFECT_SINK'],'var(--teal)')+(badgeRows?'<div style=\"background:rgba(0,0,0,0.18);border:1px solid var(--overlay);border-radius:8px;padding:12px 14px;\"><div style=\"font-size:0.78rem;font-weight:700;color:var(--mauve);margin-bottom:8px;\">🔬 Config Setting Usage &amp; Reload Behavior ('+active.keyBadges.length+')</div><div style=\"display:flex;flex-direction:column;gap:6px;\">'+badgeRows+'</div></div>':'')+'</div></div>'"
+                + "+'<aside style=\"width:330px;border-left:1px solid var(--overlay);background:var(--mantle);padding:14px 16px;overflow-y:auto;\"><div class=\"tracker-title\" style=\"margin-bottom:8px;\"><span>🔍 Component Zoom Inspector</span><span class=\"tracker-badge\">'+(focused?esc(humanizeStereotype(focused.stereotype)):'PLUGIN OVERVIEW')+'</span></div><div style=\"font-size:0.78rem;color:var(--text);line-height:1.5;\">'+inspHtml+'</div></aside>';"
+                + "}"
+                + "el.style.display='';el.innerHTML='<div style=\"display:flex;width:100%;height:100%;overflow:hidden;\">'"
+                + "+'<aside style=\"width:240px;border-right:1px solid var(--overlay);background:var(--mantle);display:flex;flex-direction:column;overflow-y:auto;\"><div style=\"padding:12px 14px;border-bottom:1px solid var(--overlay);\"><h3 style=\"margin:0;font-size:0.9rem;color:var(--accent);\">🔬 Plugins (Vertical Tabs)</h3><span style=\"font-size:0.72rem;color:var(--subtext);\">Supplied by LeafFuzz</span></div><div style=\"display:flex;flex-direction:column;gap:6px;padding:10px;\">'+sideHtml+'</div></aside>'"
+                + "+mainBodyHtml+'</div>';"
+                + "}"
+                + "return {render:render,focus:focus,selectPlugin:selectPlugin,setViewMode:setViewMode,zoomIntoUmlComponent:zoomIntoUmlComponent,zoomOutUmlComponent:zoomOutUmlComponent,jumpKey:jumpKey,lockCommandInConfig:lockCommandInConfig};"
+                + "})();";
+    }
     private List<CausalGraphReport> resolveCausalReportsForTarget(String effTarget) {
         List<CausalGraphReport> reports = new ArrayList<>();
         Set<String> seenIds = new LinkedHashSet<>();
@@ -1342,7 +2256,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
 
         long elapsed = Math.max(1L, System.currentTimeMillis() - t0);
         LeafFuzzScorecardReport.ExecutionTelemetry execTelemetry = buildExecutionTelemetry(effTarget);
-        List<ClaimDeliveryFinding> claimFindings = auditClaimDelivery(effTarget);
+        List<CausalFinding> causalFindings = auditCausalDelivery(effTarget);
         List<DualAudienceMitigationReport> finalReproducers = enrichReproducersWithAstLlm(shrunkReproducers, effTarget);
         LeafFuzzScorecardReport scorecard = new LeafFuzzScorecardReport(
                 effTarget,
@@ -1360,7 +2274,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
                 targetLeaks,
                 elapsed,
                 execTelemetry,
-                claimFindings
+                causalFindings
         );
         this.latestScorecard = scorecard;
         try {
@@ -1665,7 +2579,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
 
             long elapsed = Math.max(1L, System.currentTimeMillis() - t0);
             LeafFuzzScorecardReport.ExecutionTelemetry execTelemetry = buildExecutionTelemetry(effTarget);
-            List<ClaimDeliveryFinding> claimFindings = auditClaimDelivery(effTarget);
+            List<CausalFinding> causalFindings = auditCausalDelivery(effTarget);
             List<DualAudienceMitigationReport> finalReproducers = enrichReproducersWithAstLlm(shrunkReproducers, effTarget);
             LeafFuzzScorecardReport scorecard = new LeafFuzzScorecardReport(
                     effTarget,
@@ -1683,7 +2597,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
                     targetLeaks,
                     elapsed,
                     execTelemetry,
-                    claimFindings
+                    causalFindings
             );
             this.latestScorecard = scorecard;
             try {

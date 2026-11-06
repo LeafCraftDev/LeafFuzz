@@ -1,6 +1,6 @@
-package io.github.dailystruggle.rtp.common.bit.config.atlas;
+package io.github.dailystruggle.bytecode;
 
-import io.github.dailystruggle.rtp.common.configuration.yaml.RtpYamlConfig;
+import io.github.dailystruggle.yaml.YamlConfig;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -26,7 +26,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Zero-classloading JVM {@code .class} causal graph mapper and two-order claim delivery auditor
+ * Zero-classloading JVM {@code .class} causal graph mapper and two-order causal auditor
  * ({@code leaffuzz-ADR-001}, {@code ADR-125}, {@code corpus-atlas-ADR-002}).
  *
  * <p>Extracts three entry-point families from compiled plugin/mod archives without loading classes:
@@ -46,7 +46,7 @@ import java.util.zip.ZipFile;
  *
  * <p>Evaluates first-order (0-hop existence/registration wiring) and second-order ($k$-hop causal
  * chain to terminal effect sinks, $k \le 4$) invariants formatted as
- * {@code "Claims: <X> -> Does Not Deliver: <Y>"} with deterministic {@link ConfidenceTier}s.
+ * {@code "<DeclaredSurface> -> <CausalDefect>"} with deterministic {@link ConfidenceTier}s.
  *
  * @governedBy ADR-115
  * @governedBy ADR-125
@@ -86,6 +86,10 @@ public final class BytecodeCausalGraphScanner {
     private static final int CONSTANT_Package = 20;
 
     // Access flags
+    static final int ACC_STATIC = 0x0008;
+    static final int ACC_FINAL = 0x0010;
+    static final int ACC_SYNCHRONIZED = 0x0020;
+    static final int ACC_VOLATILE = 0x0040;
     private static final int ACC_INTERFACE = 0x0200;
     private static final int ACC_ABSTRACT = 0x0400;
     private static final int ACC_SYNTHETIC = 0x1000;
@@ -187,7 +191,7 @@ public final class BytecodeCausalGraphScanner {
         NOT_APPLICABLE
     }
 
-    /** Deterministic confidence tier for a {@link ClaimDeliveryFinding}. */
+    /** Deterministic confidence tier for a {@link CausalFinding}. */
     public enum ConfidenceTier {
         CONFIRMED(100, "CONFIRMED 100%"),
         HIGH(90, "HIGH 90%"),
@@ -211,48 +215,216 @@ public final class BytecodeCausalGraphScanner {
         }
     }
 
-    /** Category of a first-order or second-order claim delivery finding. */
+    /** Category of a first-order or second-order causal audit finding. */
     public enum FindingKind {
         /** Order 1: Concrete {@code @EventHandler}/{@code @SubscribeEvent} listener is never instantiated or registered. */
-        CLAIM_UNREGISTERED_LISTENER,
+        CAUSAL_UNREGISTERED_LISTENER,
         /** Order 1: Command declared in {@code plugin.yml} is never bound in {@code onEnable} or handled in {@code onCommand}. */
-        CLAIM_UNWIRED_COMMAND,
+        CAUSAL_UNWIRED_COMMAND,
         /** Order 1: Configuration key advertised in embedded {@code config.yml} has 0 bytecode readers in the JAR. */
-        CLAIM_DEAD_CONFIG_KEY,
+        CAUSAL_DEAD_CONFIG_KEY,
         /** Order 2: Configuration key is read into a class field, but that field has 0 {@code getfield}/{@code getstatic} readers. */
-        CLAIM_UNREAD_CONFIG_FIELD,
+        CAUSAL_UNREAD_CONFIG_FIELD,
         /** Order 2: {@code CompletableFuture.supplyAsync} or {@code Supplier} return value is immediately popped/discarded. */
-        CLAIM_ORPHANED_SUPPLIER,
+        CAUSAL_ORPHANED_SUPPLIER,
         /** Order 2: Exception handler catches an operational exception and returns immediately with 0 logs or user feedback ({@code S-004}). */
-        CLAIM_SWALLOWED_FAILURE,
+        CAUSAL_SWALLOWED_FAILURE,
         /** Order 2: Async {@code Supplier}/{@code Runnable} invokes main-thread-only Bukkit world/chunk/entity mutators ({@code S-005}). */
-        CLAIM_ASYNC_MAIN_THREAD_SINK,
+        CAUSAL_ASYNC_MAIN_THREAD_SINK,
         /** Order 2: Config key in seconds is added/compared against {@code System.currentTimeMillis()} without {@code * 1000L} scaling. */
-        CLAIM_UNIT_MISMATCH,
+        CAUSAL_UNIT_MISMATCH,
         /** Order 2: Command advertises a world/teleport/GUI/economy action but its causal chain only sends chat messages. */
-        CLAIM_HOLLOW_COMMAND,
+        CAUSAL_HOLLOW_COMMAND,
+        /** Order 2: Shared mutable class field is accessed across methods/threads with mismatched locks or unsynchronized collection mutations ({@code CAUSAL-RACE}). */
+        CAUSAL_SHARED_STATE_RACE,
+        /** Order 2: Synchronous command or non-async event handler reaches blocking chunk/disk/JDBC/Future.get I/O within k<=4 hops ({@code CAUSAL-MAIN-IO}, {@code S-005}). */
+        CAUSAL_SYNC_MAIN_THREAD_IO,
+        /** Order 2: Intra-method Closeable/stream/ChunkTicket allocation lacks close()/release()/MemoryTracker across exit paths ({@code CAUSAL-LEAK}, {@code S-002}). */
+        CAUSAL_UNCLOSED_RESOURCE_LEAK,
         /** Order 2 (Advisory): Subscribed LLM semantic/guard-polarity mismatch grounded in closed-world AST symbols. */
-        CLAIM_LLM_SEMANTIC_MISMATCH
+        CAUSAL_LLM_SEMANTIC_MISMATCH
     }
 
     /**
-     * Structured first-order or second-order claim audit finding formatted as
-     * {@code "Claims: <X> -> Does Not Deliver: <Y>"}.
+     * Proof status for a safety invariant obligation ({@code corpus-atlas-ADR-002} §3).
+     */
+    public enum ProofStatus {
+        DISCHARGED,
+        AUDIT_GUARDED,
+        VIOLATED
+    }
+
+    /**
+     * Proof obligation badge attached to a {@link CausalChainSlice} ({@code corpus-atlas-ADR-002} §3).
      *
-     * @param findingId         stable finding identifier (e.g. {@code CLAIM-1})
+     * @param ruleId   safety invariant identifier (e.g. {@code "S-002"}, {@code "S-004"}, {@code "S-005"})
+     * @param status   verification status ({@link ProofStatus#DISCHARGED}, {@link ProofStatus#AUDIT_GUARDED}, or {@link ProofStatus#VIOLATED})
+     * @param evidence concise bytecode proof or violation summary
+     */
+    public record ProofObligation(
+            String ruleId,
+            ProofStatus status,
+            String evidence
+    ) {
+        public ProofObligation {
+            ruleId = (ruleId == null || ruleId.isBlank()) ? "S-000" : ruleId.trim();
+            status = status == null ? ProofStatus.AUDIT_GUARDED : status;
+            evidence = evidence == null ? "" : evidence.trim();
+        }
+    }
+
+    /**
+     * Hoare-style effect frame summarizing mutated fields, read fields, acquired locks, and
+     * entry guard preconditions across a causal chain ({@code corpus-atlas-ADR-002} §1).
+     */
+    public record EffectFrame(
+            List<String> mutates,
+            List<String> reads,
+            List<String> locks,
+            List<String> requires
+    ) {
+        public EffectFrame {
+            mutates = mutates == null ? List.of() : List.copyOf(mutates);
+            reads = reads == null ? List.of() : List.copyOf(reads);
+            locks = locks == null ? List.of() : List.copyOf(locks);
+            requires = requires == null ? List.of() : List.copyOf(requires);
+        }
+
+        public static EffectFrame empty() {
+            return new EffectFrame(List.of(), List.of(), List.of(), List.of());
+        }
+
+        public boolean isEmpty() {
+            return mutates.isEmpty() && reads.isEmpty() && locks.isEmpty() && requires.isEmpty();
+        }
+    }
+
+    /**
+     * Whole-class shared-state concurrency hazard detected via Eraser lock-set intersection and
+     * field descriptor analysis ({@code corpus-atlas-ADR-002} §8, {@code CAUSAL-RACE}).
+     */
+    public record ClassSharedStateHazard(
+            String ownerClass,
+            String fieldName,
+            String fieldType,
+            String hazardKind,
+            String hazardReason,
+            List<String> writerMethods,
+            List<String> readerMethods,
+            List<String> commonLocks
+    ) {
+        public ClassSharedStateHazard {
+            ownerClass = ownerClass == null ? "<unknown>" : ownerClass;
+            fieldName = fieldName == null ? "<field>" : fieldName;
+            fieldType = fieldType == null ? "Object" : fieldType;
+            hazardKind = hazardKind == null ? "LOCK_SET_MISMATCH" : hazardKind;
+            hazardReason = hazardReason == null ? "" : hazardReason;
+            writerMethods = writerMethods == null ? List.of() : List.copyOf(writerMethods);
+            readerMethods = readerMethods == null ? List.of() : List.copyOf(readerMethods);
+            commonLocks = commonLocks == null ? List.of() : List.copyOf(commonLocks);
+        }
+    }
+
+    record FieldDescriptorMeta(
+            String name,
+            int accessFlags,
+            String descriptor,
+            String signature,
+            boolean isStatic,
+            boolean isFinal,
+            boolean isVolatile,
+            boolean isThreadSafeType,
+            boolean isUnsafeCollection,
+            boolean isLinkedHashMap
+    ) {
+        FieldDescriptorMeta(
+                String name,
+                int accessFlags,
+                String descriptor,
+                boolean isStatic,
+                boolean isFinal,
+                boolean isVolatile,
+                boolean isThreadSafeType,
+                boolean isUnsafeCollection,
+                boolean isLinkedHashMap
+        ) {
+            this(
+                    name,
+                    accessFlags,
+                    descriptor,
+                    "",
+                    isStatic,
+                    isFinal,
+                    isVolatile,
+                    isThreadSafeType,
+                    isUnsafeCollection,
+                    isLinkedHashMap
+            );
+        }
+
+        static FieldDescriptorMeta fromBytecode(String name, int flags, String descriptor) {
+            return fromBytecode(name, flags, descriptor, "");
+        }
+
+        static FieldDescriptorMeta fromBytecode(String name, int flags, String descriptor, String signature) {
+            String desc = descriptor == null ? "" : descriptor;
+            String sig = signature == null ? "" : signature;
+            boolean isStatic = (flags & ACC_STATIC) != 0;
+            boolean isFinal = (flags & ACC_FINAL) != 0;
+            boolean isVolatile = (flags & ACC_VOLATILE) != 0;
+            boolean isThreadSafe = desc.contains("java/util/concurrent/")
+                    || desc.contains("Atomic")
+                    || desc.contains("Concurrent")
+                    || desc.contains("CopyOnWrite")
+                    || desc.contains("LongAdder")
+                    || desc.contains("StampedLock")
+                    || desc.contains("ReentrantLock")
+                    || desc.contains("ReadWriteLock")
+                    || desc.contains("Semaphore");
+            boolean isLinkedHashMap = desc.contains("java/util/LinkedHashMap");
+            boolean isUnsafeColl = isLinkedHashMap
+                    || desc.contains("java/util/HashMap")
+                    || desc.contains("java/util/ArrayList")
+                    || desc.contains("java/util/HashSet")
+                    || desc.contains("java/util/LinkedList")
+                    || desc.contains("java/util/TreeMap")
+                    || desc.contains("java/util/TreeSet")
+                    || desc.contains("java/util/ArrayDeque")
+                    || desc.contains("java/util/WeakHashMap")
+                    || desc.contains("java/util/IdentityHashMap");
+            return new FieldDescriptorMeta(
+                    name,
+                    flags,
+                    desc,
+                    sig,
+                    isStatic,
+                    isFinal,
+                    isVolatile,
+                    isThreadSafe,
+                    isUnsafeColl,
+                    isLinkedHashMap
+            );
+        }
+    }
+
+    /**
+     * Structured first-order or second-order causal audit finding formatted as
+     * {@code "<DeclaredSurface> -> <CausalDefect>"}.
+     *
+     * @param findingId         stable finding identifier (e.g. {@code CAUSAL-1})
      * @param artifactName      owning plugin/mod or JAR name
      * @param order             investigation order ({@code 1} = 0-hop existence/wiring, {@code 2} = $k$-hop causal chain)
      * @param kind              finding category
      * @param confidenceTier    deterministic confidence tier
      * @param confidencePercent numeric confidence score ({@code 0..100})
      * @param entryPointSymbol  attributed {@code Class#method} or config key symbol
-     * @param claims            advertised behavior from {@code plugin.yml}, {@code config.yml}, or annotations
-     * @param doesNotDeliver    concrete 1st-order or 2nd-order proof of non-delivery
+     * @param declaredSurface   declared behavior from {@code plugin.yml}, {@code config.yml}, or annotations
+     * @param causalDefect      concrete 1st-order or 2nd-order causal defect proof
      * @param clearsWhen        exact developer remediation condition
      * @param causalChainSteps  extracted {@code Jminor}-style hop trace supporting the finding
      * @param llmExplanation    optional AST-grounded root-cause explanation from {@link LlmCausalChainAuditor}
      */
-    public record ClaimDeliveryFinding(
+    public record CausalFinding(
             String findingId,
             String artifactName,
             int order,
@@ -260,29 +432,29 @@ public final class BytecodeCausalGraphScanner {
             ConfidenceTier confidenceTier,
             int confidencePercent,
             String entryPointSymbol,
-            String claims,
-            String doesNotDeliver,
+            String declaredSurface,
+            String causalDefect,
             String clearsWhen,
             List<String> causalChainSteps,
             String llmExplanation
     ) {
-        public ClaimDeliveryFinding {
-            findingId = (findingId == null || findingId.isBlank()) ? "CLAIM-0" : findingId.trim();
+        public CausalFinding {
+            findingId = (findingId == null || findingId.isBlank()) ? "CAUSAL-0" : findingId.trim();
             artifactName = (artifactName == null || artifactName.isBlank()) ? "unknown" : artifactName.trim();
             order = order <= 1 ? 1 : 2;
             Objects.requireNonNull(kind, "kind");
             confidenceTier = confidenceTier != null ? confidenceTier : ConfidenceTier.HIGH;
             confidencePercent = Math.max(1, Math.min(100, confidencePercent));
             entryPointSymbol = (entryPointSymbol == null || entryPointSymbol.isBlank()) ? "<unknown>" : entryPointSymbol.trim();
-            claims = (claims == null || claims.isBlank()) ? entryPointSymbol : claims.trim();
-            doesNotDeliver = (doesNotDeliver == null || doesNotDeliver.isBlank()) ? "No downstream delivery sink" : doesNotDeliver.trim();
+            declaredSurface = (declaredSurface == null || declaredSurface.isBlank()) ? entryPointSymbol : declaredSurface.trim();
+            causalDefect = (causalDefect == null || causalDefect.isBlank()) ? "No downstream delivery sink" : causalDefect.trim();
             clearsWhen = (clearsWhen == null || clearsWhen.isBlank()) ? "Wire the entry point to its downstream sink." : clearsWhen.trim();
             causalChainSteps = causalChainSteps == null ? List.of() : List.copyOf(causalChainSteps);
             llmExplanation = llmExplanation == null ? "" : llmExplanation.trim();
         }
 
-        public ClaimDeliveryFinding withLlmExplanation(String explanation) {
-            return new ClaimDeliveryFinding(
+        public CausalFinding withLlmExplanation(String explanation) {
+            return new CausalFinding(
                     findingId,
                     artifactName,
                     order,
@@ -290,15 +462,15 @@ public final class BytecodeCausalGraphScanner {
                     confidenceTier,
                     confidencePercent,
                     entryPointSymbol,
-                    claims,
-                    doesNotDeliver,
+                    declaredSurface,
+                    causalDefect,
                     clearsWhen,
                     causalChainSteps,
                     explanation
             );
         }
 
-        public ClaimDeliveryFinding withRuntimeCorroboration(int executions, int teleports, int menus) {
+        public CausalFinding withRuntimeCorroboration(int executions, int teleports, int menus) {
             if (executions <= 0) {
                 return this;
             }
@@ -313,7 +485,7 @@ public final class BytecodeCausalGraphScanner {
                     ? ConfidenceTier.HIGH
                     : confidenceTier;
             int boostedPct = Math.min(98, Math.max(confidencePercent, 92));
-            return new ClaimDeliveryFinding(
+            return new CausalFinding(
                     findingId,
                     artifactName,
                     order,
@@ -321,8 +493,8 @@ public final class BytecodeCausalGraphScanner {
                     boostedTier,
                     boostedPct,
                     entryPointSymbol,
-                    claims,
-                    doesNotDeliver.contains("Corroborated by Stage 2") ? doesNotDeliver : (doesNotDeliver + runtimeNote),
+                    declaredSurface,
+                    causalDefect.contains("Corroborated by Stage 2") ? causalDefect : (causalDefect + runtimeNote),
                     clearsWhen,
                     causalChainSteps,
                     llmExplanation
@@ -332,13 +504,13 @@ public final class BytecodeCausalGraphScanner {
         public String formatSummaryLine() {
             return String.format(
                     Locale.ROOT,
-                    "[%s %d%%] (Order %d - %s) Claims: %s -> Does Not Deliver: %s",
+                    "[%s %d%%] (Order %d - %s) %s -> %s",
                     confidenceTier.name(),
                     confidencePercent,
                     order,
                     kind.name(),
-                    claims,
-                    doesNotDeliver
+                    declaredSurface,
+                    causalDefect
             );
         }
     }
@@ -349,7 +521,7 @@ public final class BytecodeCausalGraphScanner {
     public record CausalChainSlice(
             EntryPointKind kind,
             String entrySymbol,
-            String advertisedClaim,
+            String declaredBehavior,
             ListenerRegistrationMode registrationMode,
             String gatingConfigKey,
             List<String> guards,
@@ -358,12 +530,15 @@ public final class BytecodeCausalGraphScanner {
             List<String> mutatedFields,
             List<String> spawnedSuppliersAndLambdas,
             List<String> hopTrace,
-            Set<String> reachableEffectSinks
+            Set<String> reachableEffectSinks,
+            EffectFrame effectFrame,
+            List<String> macros,
+            List<ProofObligation> proofObligations
     ) {
         public CausalChainSlice {
             Objects.requireNonNull(kind, "kind");
             entrySymbol = entrySymbol == null ? "<unknown>" : entrySymbol;
-            advertisedClaim = advertisedClaim == null ? "" : advertisedClaim;
+            declaredBehavior = declaredBehavior == null ? "" : declaredBehavior;
             registrationMode = registrationMode == null ? ListenerRegistrationMode.NOT_APPLICABLE : registrationMode;
             gatingConfigKey = gatingConfigKey == null ? "" : gatingConfigKey;
             guards = guards == null ? List.of() : List.copyOf(guards);
@@ -375,6 +550,42 @@ public final class BytecodeCausalGraphScanner {
             reachableEffectSinks = reachableEffectSinks == null
                     ? Set.of()
                     : Collections.unmodifiableSet(new LinkedHashSet<>(reachableEffectSinks));
+            effectFrame = effectFrame == null ? EffectFrame.empty() : effectFrame;
+            macros = macros == null ? List.of() : List.copyOf(macros);
+            proofObligations = proofObligations == null ? List.of() : List.copyOf(proofObligations);
+        }
+
+        public CausalChainSlice(
+                EntryPointKind kind,
+                String entrySymbol,
+                String declaredBehavior,
+                ListenerRegistrationMode registrationMode,
+                String gatingConfigKey,
+                List<String> guards,
+                List<String> readConfigKeys,
+                List<String> readFields,
+                List<String> mutatedFields,
+                List<String> spawnedSuppliersAndLambdas,
+                List<String> hopTrace,
+                Set<String> reachableEffectSinks
+        ) {
+            this(
+                    kind,
+                    entrySymbol,
+                    declaredBehavior,
+                    registrationMode,
+                    gatingConfigKey,
+                    guards,
+                    readConfigKeys,
+                    readFields,
+                    mutatedFields,
+                    spawnedSuppliersAndLambdas,
+                    hopTrace,
+                    reachableEffectSinks,
+                    EffectFrame.empty(),
+                    List.of(),
+                    List.of()
+            );
         }
 
         /**
@@ -384,8 +595,8 @@ public final class BytecodeCausalGraphScanner {
             StringBuilder sb = new StringBuilder();
             sb.append("CAUSAL_CHAIN [ENTRY_").append(kind.name()).append(": ")
                     .append(LlmConfigDocSynthesizer.stripPackagePrefixes(entrySymbol)).append("]:\n");
-            if (!advertisedClaim.isBlank()) {
-                sb.append("  CLAIM: ").append(advertisedClaim).append('\n');
+            if (!declaredBehavior.isBlank()) {
+                sb.append("  DECLARED: ").append(declaredBehavior).append('\n');
             }
             if (kind == EntryPointKind.EVENT) {
                 sb.append("  REGISTRATION: ").append(registrationMode.name());
@@ -405,6 +616,23 @@ public final class BytecodeCausalGraphScanner {
             }
             if (!mutatedFields.isEmpty()) {
                 sb.append("  MUTATES_FIELDS: ").append(String.join(", ", mutatedFields)).append('\n');
+            }
+            if (!effectFrame.isEmpty()) {
+                sb.append("  EFFECT_FRAME: mutates=").append(effectFrame.mutates())
+                        .append(" reads=").append(effectFrame.reads())
+                        .append(" locks=").append(effectFrame.locks())
+                        .append(" requires=").append(effectFrame.requires()).append('\n');
+            }
+            if (!macros.isEmpty()) {
+                sb.append("  MACROS: ").append(String.join(", ", macros)).append('\n');
+            }
+            if (!proofObligations.isEmpty()) {
+                List<String> badges = new ArrayList<>(proofObligations.size());
+                for (ProofObligation po : proofObligations) {
+                    badges.add(po.ruleId() + ":" + po.status().name()
+                            + (po.evidence().isEmpty() ? "" : ("(" + po.evidence() + ")")));
+                }
+                sb.append("  PROOF_OBLIGATIONS: ").append(String.join(", ", badges)).append('\n');
             }
             if (!spawnedSuppliersAndLambdas.isEmpty()) {
                 sb.append("  SPAWNS_SUPPLIERS: ").append(String.join(" -> ", spawnedSuppliersAndLambdas)).append('\n');
@@ -447,7 +675,7 @@ public final class BytecodeCausalGraphScanner {
     }
 
     /**
-     * Complete causal graph and first/second-order claim audit report for a plugin/mod artifact.
+     * Complete causal graph and first/second-order causal audit report for a plugin/mod artifact.
      */
     public record CausalGraphReport(
             String artifactId,
@@ -455,9 +683,12 @@ public final class BytecodeCausalGraphScanner {
             List<CausalChainSlice> entryChains,
             Map<String, ListenerRegistrationMode> listenerRegistrations,
             Map<String, String> configGatedListeners,
-            List<ClaimDeliveryFinding> findings,
+            List<CausalFinding> findings,
             Set<String> closedWorldSymbols,
-            List<BytecodeCommandSchema> commandSchemas
+            List<BytecodeCommandSchema> commandSchemas,
+            List<ClassSharedStateHazard> classSharedStateHazards,
+            Set<String> inferredEcosystemDependencies,
+            Set<String> inferredExternalPackages
     ) {
         public CausalGraphReport {
             artifactId = (artifactId == null || artifactId.isBlank()) ? "plugin:unknown" : artifactId;
@@ -474,6 +705,13 @@ public final class BytecodeCausalGraphScanner {
                     ? Set.of()
                     : Collections.unmodifiableSet(new LinkedHashSet<>(closedWorldSymbols));
             commandSchemas = commandSchemas == null ? List.of() : List.copyOf(commandSchemas);
+            classSharedStateHazards = classSharedStateHazards == null ? List.of() : List.copyOf(classSharedStateHazards);
+            inferredEcosystemDependencies = inferredEcosystemDependencies == null
+                    ? Set.of()
+                    : Collections.unmodifiableSet(new LinkedHashSet<>(inferredEcosystemDependencies));
+            inferredExternalPackages = inferredExternalPackages == null
+                    ? Set.of()
+                    : Collections.unmodifiableSet(new LinkedHashSet<>(inferredExternalPackages));
         }
 
         public CausalGraphReport(
@@ -482,7 +720,58 @@ public final class BytecodeCausalGraphScanner {
                 List<CausalChainSlice> entryChains,
                 Map<String, ListenerRegistrationMode> listenerRegistrations,
                 Map<String, String> configGatedListeners,
-                List<ClaimDeliveryFinding> findings,
+                List<CausalFinding> findings,
+                Set<String> closedWorldSymbols,
+                List<BytecodeCommandSchema> commandSchemas,
+                List<ClassSharedStateHazard> classSharedStateHazards
+        ) {
+            this(
+                    artifactId,
+                    displayName,
+                    entryChains,
+                    listenerRegistrations,
+                    configGatedListeners,
+                    findings,
+                    closedWorldSymbols,
+                    commandSchemas,
+                    classSharedStateHazards,
+                    Set.of(),
+                    Set.of()
+            );
+        }
+
+        public CausalGraphReport(
+                String artifactId,
+                String displayName,
+                List<CausalChainSlice> entryChains,
+                Map<String, ListenerRegistrationMode> listenerRegistrations,
+                Map<String, String> configGatedListeners,
+                List<CausalFinding> findings,
+                Set<String> closedWorldSymbols,
+                List<BytecodeCommandSchema> commandSchemas
+        ) {
+            this(
+                    artifactId,
+                    displayName,
+                    entryChains,
+                    listenerRegistrations,
+                    configGatedListeners,
+                    findings,
+                    closedWorldSymbols,
+                    commandSchemas,
+                    List.of(),
+                    Set.of(),
+                    Set.of()
+            );
+        }
+
+        public CausalGraphReport(
+                String artifactId,
+                String displayName,
+                List<CausalChainSlice> entryChains,
+                Map<String, ListenerRegistrationMode> listenerRegistrations,
+                Map<String, String> configGatedListeners,
+                List<CausalFinding> findings,
                 Set<String> closedWorldSymbols
         ) {
             this(
@@ -493,16 +782,31 @@ public final class BytecodeCausalGraphScanner {
                     configGatedListeners,
                     findings,
                     closedWorldSymbols,
-                    List.of()
+                    List.of(),
+                    List.of(),
+                    Set.of(),
+                    Set.of()
             );
         }
 
         public static CausalGraphReport empty(String name) {
-            return new CausalGraphReport(name, name, List.of(), Map.of(), Map.of(), List.of(), Set.of(), List.of());
+            return new CausalGraphReport(
+                    name,
+                    name,
+                    List.of(),
+                    Map.of(),
+                    Map.of(),
+                    List.of(),
+                    Set.of(),
+                    List.of(),
+                    List.of(),
+                    Set.of(),
+                    Set.of()
+            );
         }
     }
 
-    private record ExceptionEntry(
+    record ExceptionEntry(
             int startPc,
             int endPc,
             int handlerPc,
@@ -510,7 +814,7 @@ public final class BytecodeCausalGraphScanner {
     ) {
     }
 
-    private record ParsedAnnotations(
+    record ParsedAnnotations(
             boolean isEventHandler,
             boolean isCommandEntry,
             List<String> commandRoots,
@@ -544,7 +848,7 @@ public final class BytecodeCausalGraphScanner {
         }
     }
 
-    private record MethodNode(
+    record MethodNode(
             String ownerClass,
             String name,
             String descriptor,
@@ -577,23 +881,59 @@ public final class BytecodeCausalGraphScanner {
             List<String> swallowedExceptions,
             boolean callsCurrentTimeMillis,
             boolean multipliesBy1000Or20,
-            boolean usesDynamicConfigIteration
+            boolean usesDynamicConfigIteration,
+            Set<String> acquiredLocks,
+            Set<String> blockingIoCalls,
+            List<String> allocatedResources,
+            boolean closesOrTracksResourcesOnAllPaths,
+            String resourceLeakReason,
+            Set<String> semanticMacros,
+            boolean callsAccessOrderLinkedHashMap,
+            Set<String> collectionAddedFields,
+            Set<String> collectionRemovedFields,
+            String returnedField
     ) {
         String symbol() {
             return ownerClass + "#" + name;
         }
     }
 
-    private record ParsedClass(
+    record ParsedClass(
             String binaryClassName,
             String superClassName,
             int accessFlags,
             Set<String> interfaces,
             Set<String> declaredFields,
+            Map<String, FieldDescriptorMeta> declaredFieldMeta,
             Map<String, MethodNode> methods,
             boolean usesReflectiveScanner,
-            ParsedAnnotations classAnnotations
+            ParsedAnnotations classAnnotations,
+            Set<String> referencedClasses
     ) {
+        ParsedClass(
+                String binaryClassName,
+                String superClassName,
+                int accessFlags,
+                Set<String> interfaces,
+                Set<String> declaredFields,
+                Map<String, FieldDescriptorMeta> declaredFieldMeta,
+                Map<String, MethodNode> methods,
+                boolean usesReflectiveScanner,
+                ParsedAnnotations classAnnotations
+        ) {
+            this(
+                    binaryClassName,
+                    superClassName,
+                    accessFlags,
+                    interfaces,
+                    declaredFields,
+                    declaredFieldMeta,
+                    methods,
+                    usesReflectiveScanner,
+                    classAnnotations,
+                    Set.of()
+            );
+        }
         boolean isConcrete() {
             return (accessFlags & (ACC_INTERFACE | ACC_ABSTRACT | ACC_ENUM)) == 0;
         }
@@ -615,13 +955,28 @@ public final class BytecodeCausalGraphScanner {
      * Scans a plugin or mod {@code .jar} file off-thread and produces its {@link CausalGraphReport}.
      *
      * @param jarPath path to the plugin/mod {@code .jar} archive
-     * @return causal graph and first/second-order claim delivery findings
+     * @return causal graph and first/second-order causal audit findings
      * @throws IOException if the archive cannot be read
      */
     public static CausalGraphReport scanJar(Path jarPath) throws IOException {
         Objects.requireNonNull(jarPath, "jarPath");
-        JarConfigScanner.HarvestedArtifact harvested = JarConfigScanner.scanJar(jarPath);
+        return scanJar(jarPath, JarConfigScanner.scanJar(jarPath));
+    }
+
+    /**
+     * Scans a plugin or mod {@code .jar} file off-thread using a pre-harvested
+     * {@link JarConfigScanner.HarvestedArtifact} to avoid duplicate {@link ZipFile} passes.
+     *
+     * @param jarPath   path to the plugin/mod {@code .jar} archive
+     * @param harvested pre-harvested descriptor and config metadata
+     * @return causal graph and first/second-order causal audit findings
+     * @throws IOException if the archive cannot be read
+     */
+    public static CausalGraphReport scanJar(Path jarPath, JarConfigScanner.HarvestedArtifact harvested) throws IOException {
+        Objects.requireNonNull(jarPath, "jarPath");
+        Objects.requireNonNull(harvested, "harvested");
         List<byte[]> classBytePayloads = new ArrayList<>();
+        Map<String, String> allConfigs = new LinkedHashMap<>(harvested.embeddedConfigs());
         try (ZipFile zip = new ZipFile(jarPath.toFile())) {
             Enumeration<? extends ZipEntry> entries = zip.entries();
             int count = 0;
@@ -637,6 +992,11 @@ public final class BytecodeCausalGraphScanner {
                         classBytePayloads.add(bytes);
                         count++;
                     }
+                } else if ("plugin.yml".equals(name) || "paper-plugin.yml".equals(name)) {
+                    byte[] bytes = readBoundedBytes(zip, entry);
+                    if (bytes != null) {
+                        allConfigs.putIfAbsent(name, new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+                    }
                 }
             }
         }
@@ -645,7 +1005,7 @@ public final class BytecodeCausalGraphScanner {
                 harvested.displayName(),
                 classBytePayloads,
                 harvested.commandDescriptors(),
-                harvested.embeddedConfigs()
+                allConfigs
         );
     }
 
@@ -677,6 +1037,7 @@ public final class BytecodeCausalGraphScanner {
         Map<String, List<MethodNode>> methodsByName = new LinkedHashMap<>();
         List<MethodNode> allMethods = new ArrayList<>();
         Set<String> closedWorldSymbols = new LinkedHashSet<>();
+        Set<String> allReferencedClasses = new LinkedHashSet<>();
         boolean jarUsesReflectiveScanner = false;
         boolean jarUsesDynamicConfigIteration = false;
 
@@ -689,6 +1050,7 @@ public final class BytecodeCausalGraphScanner {
                 classesByName.put(pc.binaryClassName(), pc);
                 closedWorldSymbols.add(pc.binaryClassName());
                 closedWorldSymbols.add(simpleClassName(pc.binaryClassName()));
+                allReferencedClasses.addAll(pc.referencedClasses());
                 if (pc.usesReflectiveScanner()) {
                     jarUsesReflectiveScanner = true;
                 }
@@ -743,7 +1105,9 @@ public final class BytecodeCausalGraphScanner {
             }
             allReferencedConfigKeys.addAll(m.referencedConfigKeys());
             allStringLiterals.addAll(m.stringLiterals());
-            if (m.directEffectSinks().contains("ASYNC_SCHEDULER")) {
+            if (m.directEffectSinks().contains("ASYNC_SCHEDULER")
+                    && !m.directEffectSinks().contains("SCHEDULER_TASK")
+                    && !m.semanticMacros().contains("@folia_region_guard")) {
                 allAsyncSpawnedLambdas.addAll(m.spawnedLambdas());
             }
         }
@@ -770,7 +1134,7 @@ public final class BytecodeCausalGraphScanner {
             }
         }
 
-        List<ClaimDeliveryFinding> findings = new ArrayList<>();
+        List<CausalFinding> findings = new ArrayList<>();
         int findingSeq = 1;
 
         // =========================================================================
@@ -795,7 +1159,10 @@ public final class BytecodeCausalGraphScanner {
 
             boolean selfRegisters = pc.methods().values().stream().anyMatch(m ->
                     m.calledMethods().stream().anyMatch(c ->
-                            c.endsWith("#registerEvents") || c.contains("EventBus#register") || c.endsWith("#register")));
+                            c.endsWith("#registerEvents")
+                                    || c.contains("EventBus#register")
+                                    || c.endsWith("#register")
+                                    || c.endsWith("#addListener")));
             boolean isInlineAnonymous = pc.binaryClassName().matches(".*\\$\\d+$");
             ListenerRegistrationMode regMode;
             String gatingKey = "";
@@ -817,11 +1184,11 @@ public final class BytecodeCausalGraphScanner {
                 String evLabel = firstEv.eventTypeSimpleName().isEmpty()
                         ? "@EventHandler"
                         : ("@EventHandler " + firstEv.eventTypeSimpleName());
-                findings.add(new ClaimDeliveryFinding(
-                        "CLAIM-" + (findingSeq++),
+                findings.add(new CausalFinding(
+                        "CAUSAL-" + (findingSeq++),
                         effName,
                         1,
-                        FindingKind.CLAIM_UNREGISTERED_LISTENER,
+                        FindingKind.CAUSAL_UNREGISTERED_LISTENER,
                         ConfidenceTier.CONFIRMED,
                         100,
                         firstEv.symbol(),
@@ -877,11 +1244,11 @@ public final class BytecodeCausalGraphScanner {
                     || jarUsesReflectiveScanner;
             if (!wired && (!hasAnyOnCommandOverride || hasGetCommandCall)) {
                 String desc = cmd.description().isBlank() ? ("Executes /" + cmd.name()) : cmd.description();
-                findings.add(new ClaimDeliveryFinding(
-                        "CLAIM-" + (findingSeq++),
+                findings.add(new CausalFinding(
+                        "CAUSAL-" + (findingSeq++),
                         effName,
                         1,
-                        FindingKind.CLAIM_UNWIRED_COMMAND,
+                        FindingKind.CAUSAL_UNWIRED_COMMAND,
                         ConfidenceTier.CONFIRMED,
                         100,
                         "/" + cmd.name(),
@@ -905,10 +1272,15 @@ public final class BytecodeCausalGraphScanner {
             if (!fileName.endsWith("config.yml") || yamlBody == null || yamlBody.isBlank()) {
                 continue;
             }
-            RtpYamlConfig yaml = RtpYamlConfig.parse(yamlBody);
+            YamlConfig yaml;
+            try {
+                yaml = YamlConfig.parse(yamlBody);
+            } catch (RuntimeException ignored) {
+                continue;
+            }
             for (String key : yaml.getKeys(true)) {
                 Object val = yaml.get(key);
-                if (val instanceof io.github.dailystruggle.rtp.common.configuration.yaml.RtpYamlSection) {
+                if (val instanceof io.github.dailystruggle.yaml.YamlSection) {
                     continue;
                 }
                 closedWorldSymbols.add(key);
@@ -920,7 +1292,43 @@ public final class BytecodeCausalGraphScanner {
             }
         }
 
-        if (!jarUsesDynamicConfigIteration && !advertisedConfigDefaults.isEmpty()) {
+        boolean delegatesConfigToExternalOrParser = false;
+        for (MethodNode m : allMethods) {
+            for (String inst : m.instantiatedClasses()) {
+                if (!classesByName.containsKey(inst)
+                        && (inst.endsWith("Runtime") || inst.endsWith("Config") || inst.endsWith("Configs"))) {
+                    delegatesConfigToExternalOrParser = true;
+                    break;
+                }
+            }
+            if (delegatesConfigToExternalOrParser) {
+                break;
+            }
+            for (String call : m.calledMethods()) {
+                if (call.contains("ConfigParser#") || call.endsWith("#getConfigParser")) {
+                    delegatesConfigToExternalOrParser = true;
+                    break;
+                }
+                int hash = call.indexOf('#');
+                if (hash > 0) {
+                    String calleeOwner = call.substring(0, hash);
+                    String calleeMethod = call.substring(hash + 1);
+                    if (!classesByName.containsKey(calleeOwner)
+                            && (calleeOwner.endsWith("Runtime") || calleeOwner.endsWith("Config") || calleeOwner.endsWith("Configs"))
+                            && ("load".equals(calleeMethod) || "reload".equals(calleeMethod)
+                            || "reloadAndValidate".equals(calleeMethod) || "start".equals(calleeMethod)
+                            || "parse".equals(calleeMethod))) {
+                        delegatesConfigToExternalOrParser = true;
+                        break;
+                    }
+                }
+            }
+            if (delegatesConfigToExternalOrParser) {
+                break;
+            }
+        }
+
+        if (!jarUsesDynamicConfigIteration && !delegatesConfigToExternalOrParser && !advertisedConfigDefaults.isEmpty()) {
             for (var entry : advertisedConfigDefaults.entrySet()) {
                 String key = entry.getKey();
                 String leaf = SchemaInferrer.extractLeaf(key);
@@ -939,17 +1347,17 @@ public final class BytecodeCausalGraphScanner {
                 }
                 if (!referenced) {
                     String commentDesc = advertisedConfigComments.getOrDefault(key, "");
-                    String claimStr = "config.yml key '" + key + ": " + entry.getValue() + "'"
+                    String declaredStr = "config.yml key '" + key + ": " + entry.getValue() + "'"
                             + (commentDesc.isEmpty() ? "" : (" (\"" + commentDesc + "\")"));
-                    findings.add(new ClaimDeliveryFinding(
-                            "CLAIM-" + (findingSeq++),
+                    findings.add(new CausalFinding(
+                            "CAUSAL-" + (findingSeq++),
                             effName,
                             1,
-                            FindingKind.CLAIM_DEAD_CONFIG_KEY,
+                            FindingKind.CAUSAL_DEAD_CONFIG_KEY,
                             ConfidenceTier.CONFIRMED,
                             100,
                             key,
-                            claimStr,
+                            declaredStr,
                             "Key '" + key + "' has 0 getBoolean/getInt/getString/getDouble bytecode references in " + effName + ".",
                             "Read '" + key + "' via getConfig() and wire it to the target runtime behavior, or remove the dead key from config.yml.",
                             List.of("config.yml:" + key + " -> [0 BYTECODE READERS]"),
@@ -977,18 +1385,18 @@ public final class BytecodeCausalGraphScanner {
                 readers.remove(m.symbol());
                 if (readers.isEmpty() && reportedUnreadFields.add(fieldRef)) {
                     String commentDesc = advertisedConfigComments.getOrDefault(configKey, "");
-                    String claimStr = "config.yml key '" + configKey + "'"
+                    String declaredStr = "config.yml key '" + configKey + "'"
                             + (commentDesc.isEmpty() ? "" : (" (\"" + commentDesc + "\")"))
                             + " loaded in " + simpleMethodRef(m.symbol());
-                    findings.add(new ClaimDeliveryFinding(
-                            "CLAIM-" + (findingSeq++),
+                    findings.add(new CausalFinding(
+                            "CAUSAL-" + (findingSeq++),
                             effName,
                             2,
-                            FindingKind.CLAIM_UNREAD_CONFIG_FIELD,
+                            FindingKind.CAUSAL_UNREAD_CONFIG_FIELD,
                             ConfidenceTier.CONFIRMED,
                             100,
                             fieldRef,
-                            claimStr,
+                            declaredStr,
                             "Assigned to field " + simpleMethodRef(fieldRef)
                                     + ", which has 0 getfield/getstatic read sites in any command, event, or supplier chain across " + effName + ".",
                             "Read " + simpleMethodRef(fieldRef) + " in the corresponding command or event handler.",
@@ -1008,11 +1416,11 @@ public final class BytecodeCausalGraphScanner {
                             if (readerNode != null
                                     && readerNode.callsCurrentTimeMillis()
                                     && !readerNode.multipliesBy1000Or20()) {
-                                findings.add(new ClaimDeliveryFinding(
-                                        "CLAIM-" + (findingSeq++),
+                                findings.add(new CausalFinding(
+                                        "CAUSAL-" + (findingSeq++),
                                         effName,
                                         2,
-                                        FindingKind.CLAIM_UNIT_MISMATCH,
+                                        FindingKind.CAUSAL_UNIT_MISMATCH,
                                         ConfidenceTier.HIGH,
                                         90,
                                         readerNode.symbol(),
@@ -1044,11 +1452,11 @@ public final class BytecodeCausalGraphScanner {
                         && m.configKeyScalingHint().get(configKey) == null
                         && m.callsCurrentTimeMillis()
                         && !m.multipliesBy1000Or20()) {
-                    findings.add(new ClaimDeliveryFinding(
-                            "CLAIM-" + (findingSeq++),
+                    findings.add(new CausalFinding(
+                            "CAUSAL-" + (findingSeq++),
                             effName,
                             2,
-                            FindingKind.CLAIM_UNIT_MISMATCH,
+                            FindingKind.CAUSAL_UNIT_MISMATCH,
                             ConfidenceTier.HIGH,
                             90,
                             m.symbol(),
@@ -1067,11 +1475,11 @@ public final class BytecodeCausalGraphScanner {
                 MethodNode targetLambda = findMethodNodeFlexible(methodsBySymbol, methodsByName, m.ownerClass(), orphaned);
                 boolean lambdaSelfDelivers = targetLambda != null && hasTerminalDeliverySink(targetLambda.directEffectSinks());
                 if (!lambdaSelfDelivers) {
-                    findings.add(new ClaimDeliveryFinding(
-                            "CLAIM-" + (findingSeq++),
+                    findings.add(new CausalFinding(
+                            "CAUSAL-" + (findingSeq++),
                             effName,
                             2,
-                            FindingKind.CLAIM_ORPHANED_SUPPLIER,
+                            FindingKind.CAUSAL_ORPHANED_SUPPLIER,
                             ConfidenceTier.CONFIRMED,
                             100,
                             m.symbol(),
@@ -1101,6 +1509,8 @@ public final class BytecodeCausalGraphScanner {
                     && !mNameLow.contains("shutdown")
                     && !mNameLow.contains("prune")
                     && !mNameLow.contains("paint")
+                    && !mNameLow.contains("invalidate")
+                    && !mNameLow.contains("close")
                     && !m.name().startsWith("safe")
                     && !m.name().startsWith("try")
                     && !m.name().startsWith("is")
@@ -1108,57 +1518,73 @@ public final class BytecodeCausalGraphScanner {
                     && !m.name().startsWith("delete")
                     && !m.name().startsWith("cleanup")) {
                 for (String excType : m.swallowedExceptions()) {
-                    findings.add(new ClaimDeliveryFinding(
-                            "CLAIM-" + (findingSeq++),
-                            effName,
-                            2,
-                            FindingKind.CLAIM_SWALLOWED_FAILURE,
-                            ConfidenceTier.CONFIRMED,
-                            100,
-                            m.symbol(),
-                            simpleMethodRef(m.symbol()) + " executes operational pipeline with try/catch(" + simpleClassName(excType) + ")",
-                            "Exception handler for " + simpleClassName(excType) + " in " + simpleMethodRef(m.symbol())
-                                    + " executes an empty catch/return with 0 log calls, 0 user feedback messages, and 0 fallback actions (violates S-004).",
-                            "Log the exception via logger/RTP.log(Level.WARNING, ...) and notify the caller or roll back state.",
-                            List.of(m.symbol() + " --[catch (" + simpleClassName(excType) + ")]--> [EMPTY_RETURN (S-004)]"),
-                            ""
-                    ));
-                }
-            }
-        }
+                      findings.add(new CausalFinding(
+                              "CAUSAL-" + (findingSeq++),
+                              effName,
+                              2,
+                              FindingKind.CAUSAL_SWALLOWED_FAILURE,
+                              ConfidenceTier.CONFIRMED,
+                              100,
+                              m.symbol(),
+                              simpleMethodRef(m.symbol()) + " executes operational pipeline with try/catch(" + simpleClassName(excType) + ")",
+                              "Exception handler for " + simpleClassName(excType) + " in " + simpleMethodRef(m.symbol())
+                                      + " executes an empty catch/return with 0 log calls, 0 user feedback messages, and 0 fallback actions (silently hides runtime failures from operators and players).",
+                              "Log the exception with a warning and notify the caller or roll back state.",
+                              List.of(m.symbol() + " --[catch (" + simpleClassName(excType) + ")]--> [SILENT_EMPTY_RETURN]"),
+                              ""
+                      ));
+                  }
+              }
+          }
 
-        // 4f. Async Supplier/Runnable calling synchronous main-thread Bukkit APIs (S-005, Order 2)
-        for (String asyncLambdaSym : allAsyncSpawnedLambdas) {
-            MethodNode asyncNode = findMethodNodeFlexible(methodsBySymbol, methodsByName, null, asyncLambdaSym);
-            if (asyncNode == null) {
-                continue;
-            }
-            Set<String> mainThreadViolations = new LinkedHashSet<>(asyncNode.syncMainThreadCalls());
-            for (String hop1 : asyncNode.calledMethods()) {
-                MethodNode hopNode = findMethodNodeFlexible(methodsBySymbol, methodsByName, asyncNode.ownerClass(), hop1);
-                if (hopNode != null) {
-                    mainThreadViolations.addAll(hopNode.syncMainThreadCalls());
-                }
-            }
-            if (!mainThreadViolations.isEmpty()) {
-                findings.add(new ClaimDeliveryFinding(
-                        "CLAIM-" + (findingSeq++),
-                        effName,
-                        2,
-                        FindingKind.CLAIM_ASYNC_MAIN_THREAD_SINK,
-                        ConfidenceTier.CONFIRMED,
-                        100,
-                        asyncNode.symbol(),
-                        "Async task/supplier " + simpleMethodRef(asyncNode.symbol()) + " executes off the main server thread",
-                        "Directly invokes synchronous main-thread-only API " + mainThreadViolations
-                                + " from an async thread (violates S-005 / regional threading).",
-                        "Use asynchronous APIs (e.g. getChunkAtAsync / teleportAsync) or marshal world mutations back to the region/main thread scheduler.",
-                        List.of("ASYNC_SPAWN -> " + asyncNode.symbol() + " -> " + mainThreadViolations),
-                        ""
-                ));
-            }
-        }
+          // 4f. Async Supplier/Runnable calling synchronous main-thread Bukkit APIs (S-005, Order 2)
+          for (String asyncLambdaSym : allAsyncSpawnedLambdas) {
+              MethodNode asyncNode = findMethodNodeFlexible(methodsBySymbol, methodsByName, null, asyncLambdaSym);
+              if (asyncNode == null
+                      || asyncNode.semanticMacros().contains("@scheduler_dispatch")
+                      || asyncNode.semanticMacros().contains("@folia_region_guard")) {
+                  continue;
+              }
+              Set<String> mainThreadViolations = new LinkedHashSet<>(asyncNode.syncMainThreadCalls());
+              for (String hop1 : asyncNode.calledMethods()) {
+                  MethodNode hopNode = findMethodNodeFlexible(methodsBySymbol, methodsByName, asyncNode.ownerClass(), hop1);
+                  if (hopNode != null
+                          && !hopNode.semanticMacros().contains("@scheduler_dispatch")
+                          && !hopNode.semanticMacros().contains("@folia_region_guard")) {
+                      mainThreadViolations.addAll(hopNode.syncMainThreadCalls());
+                  }
+              }
+              if (!mainThreadViolations.isEmpty()) {
+                  findings.add(new CausalFinding(
+                          "CAUSAL-" + (findingSeq++),
+                          effName,
+                          2,
+                          FindingKind.CAUSAL_ASYNC_MAIN_THREAD_SINK,
+                          ConfidenceTier.CONFIRMED,
+                          100,
+                          asyncNode.symbol(),
+                          "Async task/supplier " + simpleMethodRef(asyncNode.symbol()) + " executes off the main server thread",
+                          "Directly invokes synchronous main-thread-only API " + mainThreadViolations
+                                  + " from an async thread (unsafe off-thread world access; can corrupt chunk state or crash regional threading).",
+                          "Use asynchronous APIs (e.g. getChunkAtAsync / teleportAsync) or marshal world mutations back to the region/main thread scheduler.",
+                          List.of("ASYNC_SPAWN -> " + asyncNode.symbol() + " -> " + mainThreadViolations),
+                          ""
+                  ));
+              }
+          }
 
+          // 4g. Folia support declaration flag (evaluated causally in traceCausalFoliaRuntimeExceptions; F-001..F-003, S-005)
+          boolean declaresFoliaSupported = false;
+          for (var cfgEntry : configs.entrySet()) {
+              String fn = cfgEntry.getKey() == null ? "" : cfgEntry.getKey().toLowerCase(Locale.ROOT);
+              String body = cfgEntry.getValue();
+              if ((fn.endsWith("plugin.yml") || fn.endsWith("paper-plugin.yml")) && body != null) {
+                  if (body.toLowerCase(Locale.ROOT).matches("(?s).*\\bfolia-supported\\s*:\\s*true\\b.*")) {
+                      declaresFoliaSupported = true;
+                      break;
+                  }
+              }
+          }
         // =========================================================================
         // 5. Build Bounded k-Hop Causal Chains for Entry Points & Check Hollow Commands
         // =========================================================================
@@ -1216,18 +1642,18 @@ public final class BytecodeCausalGraphScanner {
                 boolean hasCosmeticOrOrphanedOnly = (!slice.reachableEffectSinks().isEmpty()
                         && isHollowMessageOnlySinkSet(slice.reachableEffectSinks()))
                         || (!m.orphanedSuppliers().isEmpty() && isHollowMessageOnlySinkSet(slice.reachableEffectSinks()));
-                if (claimsActionableEffect(slice.advertisedClaim()) && hasCosmeticOrOrphanedOnly) {
-                    findings.add(new ClaimDeliveryFinding(
-                            "CLAIM-" + (findingSeq++),
+                if (declaresActionableEffect(slice.declaredBehavior()) && hasCosmeticOrOrphanedOnly) {
+                    findings.add(new CausalFinding(
+                            "CAUSAL-" + (findingSeq++),
                             effName,
                             2,
-                            FindingKind.CLAIM_HOLLOW_COMMAND,
+                            FindingKind.CAUSAL_HOLLOW_COMMAND,
                             ConfidenceTier.HIGH,
                             85,
                             m.symbol(),
-                            slice.advertisedClaim().isBlank()
+                            slice.declaredBehavior().isBlank()
                                     ? ("Command handler " + simpleMethodRef(m.symbol()))
-                                    : slice.advertisedClaim(),
+                                    : slice.declaredBehavior(),
                             "Across the " + MAX_CAUSAL_HOPS + "-hop bytecode causal chain (including spawned lambdas/suppliers), "
                                     + "reachable sinks are "
                                     + (slice.reachableEffectSinks().isEmpty() ? "[NO_OP]" : slice.reachableEffectSinks())
@@ -1235,25 +1661,108 @@ public final class BytecodeCausalGraphScanner {
                             "Invoke the downstream domain effect sink (e.g. teleportAsync, openInventory, economy transaction, or state mutation) from "
                                     + simpleMethodRef(m.symbol()) + ".",
                             slice.hopTrace(),
-                            ""
-                    ));
-                }
-            }
-        }
+                              ""
+                      ));
+                  }
+              }
+          }
+
+          if (declaresFoliaSupported) {
+              List<CausalFinding> foliaCausalFindings = traceCausalFoliaRuntimeExceptions(
+                      effName,
+                      findingSeq,
+                      allMethods,
+                      classesByName,
+                      methodsBySymbol,
+                      methodsByName,
+                      listenerRegistrations,
+                      allAsyncSpawnedLambdas,
+                      findings
+              );
+              findings.addAll(foliaCausalFindings);
+              findingSeq += foliaCausalFindings.size();
+          }
+
+          List<CausalFinding> backdoorFindings = traceCausalBackdoorAndDropperChains(
+                  effName,
+                  findingSeq,
+                  allMethods,
+                  classesByName,
+                  methodsBySymbol,
+                  methodsByName,
+                  cmds,
+                  allAsyncSpawnedLambdas
+          );
+          findings.addAll(backdoorFindings);
+          findingSeq += backdoorFindings.size();
+        // =========================================================================
+        // 6. corpus-atlas-ADR-002 Parity Passes:
+        //    - Whole-Class Eraser Lock-Set Shared-State Matrix (CAUSAL-RACE)
+        //    - N-Hop Synchronous Main-Thread I/O Contagion (CAUSAL-MAIN-IO, S-005)
+        //    - Unclosed Resource & ChunkTicket Leak Detection (CAUSAL-LEAK, S-002)
+        //    - Hoare EffectFrame, Semantic Macros & ProofObligation Synthesis
+        // =========================================================================
+        BytecodeParityAnalyzers.SharedStateAnalysisResult sharedStateResult =
+                BytecodeParityAnalyzers.computeClassSharedStateMatrix(
+                        effName,
+                        findingSeq,
+                        classesByName,
+                        methodsBySymbol,
+                        allAsyncSpawnedLambdas
+                );
+        findings.addAll(sharedStateResult.findings());
+        findingSeq += sharedStateResult.findings().size();
+
+        List<CausalFinding> syncMainIoFindings =
+                BytecodeParityAnalyzers.detectSyncMainThreadIoContagion(
+                        effName,
+                        findingSeq,
+                        classesByName,
+                        methodsBySymbol,
+                        methodsByName,
+                        allAsyncSpawnedLambdas
+                );
+        findings.addAll(syncMainIoFindings);
+        findingSeq += syncMainIoFindings.size();
+
+        List<CausalFinding> leakFindings =
+                BytecodeParityAnalyzers.detectUnclosedResourceLeaks(
+                        effName,
+                        findingSeq,
+                        classesByName,
+                        methodsBySymbol,
+                        methodsByName,
+                        listenerRegistrations
+                );
+        findings.addAll(leakFindings);
+
+        List<CausalChainSlice> enrichedChains =
+                BytecodeParityAnalyzers.enrichSlicesWithHoareFramesAndProofs(
+                        entryChains,
+                        methodsBySymbol,
+                        methodsByName,
+                        findings
+                );
+
+        ExternalDependencyClassification depClassification =
+                classifyExternalDependencies(allReferencedClasses, classesByName.keySet());
 
         return new CausalGraphReport(
                 effId,
                 effName,
-                entryChains,
+                enrichedChains,
                 listenerRegistrations,
                 configGatedListeners,
                 findings,
                 closedWorldSymbols,
-                commandSchemas
+                commandSchemas,
+                sharedStateResult.hazards(),
+                depClassification.inferredEcosystemDependencies(),
+                depClassification.inferredExternalPackages()
         );
     }
 
-    private static EntryPointKind classifyEntryPoint(
+    static EntryPointKind classifyEntryPoint(
             MethodNode m,
             ParsedClass owner,
             Set<String> allAsyncSpawnedLambdas
@@ -1402,7 +1911,7 @@ public final class BytecodeCausalGraphScanner {
             }
         }
 
-        String claim = resolveAdvertisedClaim(kind, root, rootOwner, commandDescriptors);
+        String declared = resolveDeclaredBehavior(kind, root, rootOwner, commandDescriptors);
         ListenerRegistrationMode regMode = kind == EntryPointKind.EVENT
                 ? listenerRegistrations.getOrDefault(root.ownerClass(), ListenerRegistrationMode.REGISTERED_UNCONDITIONAL)
                 : ListenerRegistrationMode.NOT_APPLICABLE;
@@ -1413,7 +1922,7 @@ public final class BytecodeCausalGraphScanner {
         return new CausalChainSlice(
                 kind,
                 root.symbol(),
-                claim,
+                declared,
                 regMode,
                 gatingKey,
                 guards,
@@ -1486,7 +1995,7 @@ public final class BytecodeCausalGraphScanner {
         return out;
     }
 
-    private static String resolveAdvertisedClaim(
+    private static String resolveDeclaredBehavior(
             EntryPointKind kind,
             MethodNode root,
             ParsedClass rootOwner,
@@ -1534,11 +2043,11 @@ public final class BytecodeCausalGraphScanner {
         return "Supplier/Lambda " + simpleMethodRef(root.symbol());
     }
 
-    private static boolean claimsActionableEffect(String claim) {
-        if (claim == null || claim.isBlank()) {
+    private static boolean declaresActionableEffect(String declaredBehavior) {
+        if (declaredBehavior == null || declaredBehavior.isBlank()) {
             return false;
         }
-        String low = claim.toLowerCase(Locale.ROOT);
+        String low = declaredBehavior.toLowerCase(Locale.ROOT);
         return low.contains("teleport")
                 || low.contains("wild")
                 || low.contains("rtp")
@@ -1591,7 +2100,7 @@ public final class BytecodeCausalGraphScanner {
         return false;
     }
 
-    private static MethodNode findMethodNodeFlexible(
+    static MethodNode findMethodNodeFlexible(
             Map<String, MethodNode> methodsBySymbol,
             Map<String, List<MethodNode>> methodsByName,
             String defaultOwner,
@@ -1613,13 +2122,18 @@ public final class BytecodeCausalGraphScanner {
         int hash = ref.indexOf('#');
         String methodName = hash >= 0 ? ref.substring(hash + 1) : ref;
         String ownerSuffix = hash >= 0 ? ref.substring(0, hash) : "";
-        List<MethodNode> byName = methodsByName != null ? methodsByName.get(methodName) : null;
-        if (byName != null) {
-            for (MethodNode cand : byName) {
-                if (ownerSuffix.isEmpty() || cand.ownerClass().endsWith(ownerSuffix)) {
-                    return cand;
+        if (methodsByName != null) {
+            List<MethodNode> byName = methodsByName.get(methodName);
+            if (byName != null) {
+                for (MethodNode cand : byName) {
+                    if (ownerSuffix.isEmpty() || cand.ownerClass().endsWith(ownerSuffix)) {
+                        return cand;
+                    }
                 }
             }
+            return null;
+        }
+        if (!ownerSuffix.isEmpty() && ownerSuffix.indexOf('.') >= 0) {
             return null;
         }
         for (var e : methodsBySymbol.entrySet()) {
@@ -1732,30 +2246,48 @@ public final class BytecodeCausalGraphScanner {
             }
 
             boolean usesReflectiveScanner = false;
+            Set<String> referencedClasses = new LinkedHashSet<>();
             for (int i = 1; i < cpCount; i++) {
                 String clsInternal = resolveClassName(i, classNameIdx, utf8Pool);
-                if (clsInternal != null && REFLECTIVE_SCANNER_MARKERS.contains(clsInternal)) {
-                    usesReflectiveScanner = true;
+                if (clsInternal != null) {
+                    if (REFLECTIVE_SCANNER_MARKERS.contains(clsInternal)) {
+                        usesReflectiveScanner = true;
+                    }
+                    String normalizedRef = normalizeConstantPoolClassName(clsInternal);
+                    if (normalizedRef != null && !normalizedRef.isEmpty()) {
+                        referencedClasses.add(normalizedRef);
+                    }
                 }
             }
 
             int fieldsCount = in.readUnsignedShort();
             Set<String> declaredFields = new LinkedHashSet<>();
+            Map<String, FieldDescriptorMeta> declaredFieldMeta = new LinkedHashMap<>();
             for (int f = 0; f < fieldsCount; f++) {
-                in.readUnsignedShort(); // flags
+                int fFlags = in.readUnsignedShort();
                 int fNameIdx = in.readUnsignedShort();
-                in.readUnsignedShort(); // desc
+                int fDescIdx = in.readUnsignedShort();
                 String fName = safeUtf8(utf8Pool, fNameIdx);
-                if (fName != null) {
-                    declaredFields.add(fName);
-                }
+                String fDesc = safeUtf8(utf8Pool, fDescIdx);
+                String fSig = "";
                 int attrsCount = in.readUnsignedShort();
                 for (int a = 0; a < attrsCount; a++) {
-                    in.readUnsignedShort();
+                    int attrNameIdx = in.readUnsignedShort();
                     int len = in.readInt();
-                    if (len > 0) {
+                    String attrName = safeUtf8(utf8Pool, attrNameIdx);
+                    if ("Signature".equals(attrName) && len == 2) {
+                        int sigIdx = in.readUnsignedShort();
+                        String resolvedSig = safeUtf8(utf8Pool, sigIdx);
+                        if (resolvedSig != null) {
+                            fSig = resolvedSig;
+                        }
+                    } else if (len > 0) {
                         in.skipBytes(len);
                     }
+                }
+                if (fName != null) {
+                    declaredFields.add(fName);
+                    declaredFieldMeta.put(fName, FieldDescriptorMeta.fromBytecode(fName, fFlags, fDesc, fSig));
                 }
             }
 
@@ -1866,12 +2398,17 @@ public final class BytecodeCausalGraphScanner {
                 }
             }
 
+            boolean classManagesCloseableFields = interfaces.stream().anyMatch(i -> i.endsWith("Closeable"))
+                    || rawMethods.stream().anyMatch(m -> "close".equals(m.name())
+                    || "shutdown".equals(m.name())
+                    || "closeQuietly".equals(m.name()));
             Map<String, MethodNode> parsedMethods = new LinkedHashMap<>();
             for (RawMethodData rm : rawMethods) {
                 MethodNode node = analyzeMethodBytecode(
                         binaryClassName,
                         rm,
                         classAnnotations,
+                        classManagesCloseableFields,
                         utf8Pool,
                         numericPool,
                         classNameIdx,
@@ -1898,9 +2435,11 @@ public final class BytecodeCausalGraphScanner {
                     accessFlags,
                     interfaces,
                     declaredFields,
+                    declaredFieldMeta,
                     parsedMethods,
                     usesReflectiveScanner,
-                    classAnnotations
+                    classAnnotations,
+                    referencedClasses
             );
         } catch (IOException | RuntimeException e) {
             LOGGER.log(Level.FINE, "[LeafConfig] Skipping unreadable or non-standard .class payload", e);
@@ -2139,6 +2678,7 @@ public final class BytecodeCausalGraphScanner {
             String binaryClassName,
             RawMethodData rm,
             ParsedAnnotations classAnnotations,
+            boolean classManagesCloseableFields,
             String[] utf8Pool,
             String[] numericPool,
             int[] classNameIdx,
@@ -2171,6 +2711,12 @@ public final class BytecodeCausalGraphScanner {
 
         byte[] code = rm.code();
         if (code == null || code.length == 0) {
+            Set<String> emptyLocks = new LinkedHashSet<>();
+            Set<String> emptyMacros = new LinkedHashSet<>();
+            if ((rm.accessFlags() & ACC_SYNCHRONIZED) != 0) {
+                emptyLocks.add((rm.accessFlags() & ACC_STATIC) != 0 ? "class" : "this");
+                emptyMacros.add("@synchronized_lock");
+            }
             return new MethodNode(
                     binaryClassName,
                     rm.name(),
@@ -2204,7 +2750,17 @@ public final class BytecodeCausalGraphScanner {
                     List.of(),
                     false,
                     false,
-                    false
+                    false,
+                    emptyLocks,
+                    Set.of(),
+                    List.of(),
+                    true,
+                    "",
+                    emptyMacros,
+                    false,
+                    Set.of(),
+                    Set.of(),
+                    ""
             );
         }
 
@@ -2217,6 +2773,9 @@ public final class BytecodeCausalGraphScanner {
         Set<String> readFields = new LinkedHashSet<>();
         Set<String> writtenFields = new LinkedHashSet<>();
         Set<String> producedQueueFields = new LinkedHashSet<>();
+        Set<String> collectionAddedFields = new LinkedHashSet<>();
+        Set<String> collectionRemovedFields = new LinkedHashSet<>();
+        String returnedField = "";
         Set<String> dispatchedEventTypes = new LinkedHashSet<>();
         Map<String, String> configKeyToAssignedField = new LinkedHashMap<>();
         Map<String, String> configKeyScalingHint = new LinkedHashMap<>();
@@ -2231,6 +2790,21 @@ public final class BytecodeCausalGraphScanner {
         boolean callsCurrentTimeMillis = false;
         boolean multipliesBy1000Or20 = false;
         boolean usesDynamicConfigIteration = false;
+        Set<String> acquiredLocks = new LinkedHashSet<>();
+        Set<String> blockingIoCalls = new LinkedHashSet<>();
+        List<String> allocatedResources = new ArrayList<>();
+        Set<String> semanticMacros = new LinkedHashSet<>();
+        boolean callsAccessOrderLinkedHashMap = false;
+        int firstAllocPc = -1;
+        List<Integer> closePcs = new ArrayList<>();
+        List<Integer> earlyExitPcs = new ArrayList<>();
+        boolean trackedByMemoryTracker = false;
+        boolean storedInManagedClassField = false;
+        boolean sawFutureIsDoneGuard = false;
+        if ((rm.accessFlags() & ACC_SYNCHRONIZED) != 0) {
+            acquiredLocks.add((rm.accessFlags() & ACC_STATIC) != 0 ? "class" : "this");
+            semanticMacros.add("@synchronized_lock");
+        }
 
         // Pass 1: Record conditional jump spans [branchPc -> targetPc] and early-return guard PCs
         // (`if (!flag) return;`) to detect generalized config/branch-gated listener registration.
@@ -2265,6 +2839,8 @@ public final class BytecodeCausalGraphScanner {
         String recentStringLiteral = null;
         String recentInstantiatedSimpleClass = null;
         String recentIndyLambdaTarget = null;
+        boolean sawAload0SinceFieldRead = false;
+        boolean recentLoadWasAload0 = false;
         int pc = 0;
 
         while (pc < code.length) {
@@ -2272,6 +2848,26 @@ public final class BytecodeCausalGraphScanner {
             int insLen = instructionLength(code, pc);
             if (insLen <= 0) {
                 break;
+            }
+            if (op == 0x2A) { // ALOAD_0
+                sawAload0SinceFieldRead = true;
+                recentLoadWasAload0 = true;
+            } else if (op == 0x19 || (op >= 0x2B && op <= 0x2D)) { // ALOAD local variable (slot >= 1)
+                recentLoadWasAload0 = false;
+                recentReadField = null;
+            }
+            if (op == 0xC2) { // MONITORENTER
+                semanticMacros.add("@synchronized_lock");
+                if (recentReadField != null && !sawAload0SinceFieldRead) {
+                    acquiredLocks.add(recentReadField);
+                } else if (recentLoadWasAload0) {
+                    acquiredLocks.add("this");
+                }
+            }
+            if ((op >= 0xAC && op <= 0xB1) || op == 0xBF) { // RETURN..ARETURN or ATHROW
+                if (firstAllocPc >= 0 && pc > firstAllocPc) {
+                    earlyExitPcs.add(pc);
+                }
             }
 
             // Detect numeric constants 1000 or 20 used for unit scaling
@@ -2281,17 +2877,27 @@ public final class BytecodeCausalGraphScanner {
                 multipliesBy1000Or20 = true;
             }
 
-            // String literals & config keys
+            // String literals, Class literals (ldc Class.class) & config keys
             String strLiteral = null;
             if (op == 0x12 && pc + 1 < code.length) { // ldc
                 int idx = code[pc + 1] & 0xFF;
                 if (idx > 0 && idx < stringUtf8Idx.length && stringUtf8Idx[idx] > 0) {
                     strLiteral = safeUtf8(utf8Pool, stringUtf8Idx[idx]);
+                } else if (idx > 0 && idx < classNameIdx.length && classNameIdx[idx] > 0) {
+                    String ldcCls = resolveClassName(idx, classNameIdx, utf8Pool);
+                    if (ldcCls != null && !ldcCls.startsWith("[")) {
+                        instantiatedClasses.add(ldcCls.replace('/', '.'));
+                    }
                 }
             } else if (op == 0x13 && pc + 2 < code.length) { // ldc_w
                 int idx = readUnsignedShort(code, pc + 1);
                 if (idx > 0 && idx < stringUtf8Idx.length && stringUtf8Idx[idx] > 0) {
                     strLiteral = safeUtf8(utf8Pool, stringUtf8Idx[idx]);
+                } else if (idx > 0 && idx < classNameIdx.length && classNameIdx[idx] > 0) {
+                    String ldcCls = resolveClassName(idx, classNameIdx, utf8Pool);
+                    if (ldcCls != null && !ldcCls.startsWith("[")) {
+                        instantiatedClasses.add(ldcCls.replace('/', '.'));
+                    }
                 }
             } else if (op == 0xB2 && pc + 2 < code.length) { // getstatic *Keys/*Params enum
                 int fCpIdx = readUnsignedShort(code, pc + 1);
@@ -2359,7 +2965,7 @@ public final class BytecodeCausalGraphScanner {
                 }
             }
 
-            // Field reads & writes: GETSTATIC (0xB2), PUTSTATIC (0xB3), GETFIELD (0xB4), PUTFIELD (0xB5)
+            // Field accesses: GETSTATIC (0xB2), PUTSTATIC (0xB3), GETFIELD (0xB4), PUTFIELD (0xB5)
             if ((op >= 0xB2 && op <= 0xB5) && pc + 2 < code.length) {
                 int fCpIdx = readUnsignedShort(code, pc + 1);
                 String fOwner = (fCpIdx > 0 && fCpIdx < fieldClassIdx.length)
@@ -2370,16 +2976,35 @@ public final class BytecodeCausalGraphScanner {
                 if (fOwner != null && fName != null && !fName.startsWith("$")) {
                     String fullField = fOwner.replace('/', '.') + "#" + fName;
                     if (op == 0xB2 || op == 0xB4) {
-                        readFields.add(fullField);
+                        if (!writtenFields.contains(fullField)) {
+                            readFields.add(fullField);
+                        }
                         recentReadField = fName;
-                        recentReadFullField = fullField;
-                        recentReadFieldDesc = fDesc;
+                        boolean isCollectionOrQueueField = fDesc != null && (
+                                fDesc.contains("Collection") || fDesc.contains("List")
+                                || fDesc.contains("Set") || fDesc.contains("Map")
+                                || fDesc.contains("Queue") || fDesc.contains("Deque")
+                                || fDesc.contains("RingBuffer")
+                        );
+                        recentReadFullField = isCollectionOrQueueField ? fullField : null;
+                        recentReadFieldDesc = isCollectionOrQueueField ? fDesc : null;
+                        sawAload0SinceFieldRead = false;
+                        int nextFieldPc = pc + insLen;
+                        if (isCollectionOrQueueField && nextFieldPc < code.length && (code[nextFieldPc] & 0xFF) == 0xB0) {
+                            returnedField = fullField;
+                        }
                     } else {
                         writtenFields.add(fullField);
+                        if (classManagesCloseableFields && fDesc != null
+                                && (fDesc.contains("Channel") || fDesc.contains("Stream")
+                                || fDesc.contains("Closeable") || fDesc.contains("RandomAccessFile")
+                                || fDesc.contains("Ticket") || fDesc.contains("Socket")
+                                || fDesc.contains("Reader") || fDesc.contains("Writer"))) {
+                            storedInManagedClassField = true;
+                        }
                     }
                 }
             }
-
             // Method invocations: INVOKEVIRTUAL (0xB6), INVOKESPECIAL (0xB7), INVOKESTATIC (0xB8), INVOKEINTERFACE (0xB9)
             if ((op >= 0xB6 && op <= 0xB9) && pc + 2 < code.length) {
                 int mCpIdx = readUnsignedShort(code, pc + 1);
@@ -2416,19 +3041,71 @@ public final class BytecodeCausalGraphScanner {
                         }
                     }
 
-                    // Track collection/queue producer writes (`getfield queue` + `offer`/`add`/`put`/`push`)
-                    if (recentReadFullField != null && QUEUE_PRODUCER_METHODS.contains(mName)) {
+                    // Track collection/queue producer writes (`getfield queue` + `offer`/`add`/`put`/`push`/`remove`/`clear`, or 1-hop getter `getX().put(...)`)
+                    String effectiveCollectionTarget = recentReadFullField;
+                    if (effectiveCollectionTarget == null && (QUEUE_PRODUCER_METHODS.contains(mName)
+                            || "remove".equals(mName) || "clear".equals(mName)
+                            || "compute".equals(mName) || "merge".equals(mName)
+                            || "replace".equals(mName) || "putAll".equals(mName)
+                            || "addAll".equals(mName) || "removeAll".equals(mName)
+                            || "removeIf".equals(mName))
+                            && !calledMethods.isEmpty()) {
+                        for (int cIdx = calledMethods.size() - 1; cIdx >= Math.max(0, calledMethods.size() - 4); cIdx--) {
+                            String prevCall = calledMethods.get(cIdx);
+                            if (prevCall.equals(callRef)) {
+                                continue;
+                            }
+                            if (prevCall.startsWith("java.lang.") || prevCall.startsWith("java.util.")) {
+                                continue;
+                            }
+                            effectiveCollectionTarget = "GETTER:" + prevCall;
+                            break;
+                        }
+                    }
+                    if (effectiveCollectionTarget != null && (QUEUE_PRODUCER_METHODS.contains(mName)
+                            || "remove".equals(mName) || "clear".equals(mName)
+                            || "compute".equals(mName) || "merge".equals(mName)
+                            || "replace".equals(mName) || "putAll".equals(mName)
+                            || "addAll".equals(mName) || "removeAll".equals(mName)
+                            || "removeIf".equals(mName) || "keySet".equals(mName)
+                            || "values".equals(mName) || "entrySet".equals(mName)
+                            || "iterator".equals(mName))) {
                         boolean isQueueLikeOwner = mOwnerInternal.contains("Queue")
                                 || mOwnerInternal.contains("Deque")
                                 || mOwnerInternal.contains("RingBuffer")
                                 || (recentReadFieldDesc != null && (recentReadFieldDesc.contains("Queue")
                                 || recentReadFieldDesc.contains("Deque")
                                 || recentReadFieldDesc.contains("RingBuffer")));
-                        if (isQueueLikeOwner) {
-                            producedQueueFields.add(recentReadFullField);
-                            directEffectSinks.add("QUEUE_HANDOFF");
-                        } else if (mOwnerInternal.startsWith("java/util/") || mOwnerInternal.contains("Map") || mOwnerInternal.contains("Collection") || mOwnerInternal.contains("List") || mOwnerInternal.contains("Set")) {
-                            writtenFields.add(recentReadFullField);
+                        if (recentReadFullField != null) {
+                            if (isQueueLikeOwner && QUEUE_PRODUCER_METHODS.contains(mName)) {
+                                producedQueueFields.add(recentReadFullField);
+                                directEffectSinks.add("QUEUE_HANDOFF");
+                            } else if (mOwnerInternal.startsWith("java/util/") || mOwnerInternal.contains("Map") || mOwnerInternal.contains("Collection") || mOwnerInternal.contains("List") || mOwnerInternal.contains("Set")) {
+                                writtenFields.add(recentReadFullField);
+                            }
+                        }
+                        if (QUEUE_PRODUCER_METHODS.contains(mName)
+                                || "putAll".equals(mName)
+                                || "addAll".equals(mName)
+                                || "compute".equals(mName)
+                                || "merge".equals(mName)) {
+                            collectionAddedFields.add(effectiveCollectionTarget);
+                        } else if ("remove".equals(mName)
+                                || "clear".equals(mName)
+                                || "removeAll".equals(mName)
+                                || "removeIf".equals(mName)
+                                || "poll".equals(mName)) {
+                            collectionRemovedFields.add(effectiveCollectionTarget);
+                        }
+                    } else if (recentReadFullField != null
+                            && ("remove".equals(mName) || "removeIf".equals(mName) || "clear".equals(mName))
+                            && (mOwnerInternal.contains("Iterator") || mOwnerInternal.contains("Set") || mOwnerInternal.contains("Collection"))) {
+                        collectionRemovedFields.add(recentReadFullField);
+                    }
+                    if (("isOnline".equals(mName) || "hasDisconnected".equals(mName) || "isRemoved".equals(mName))
+                            && (mOwnerInternal.contains("Player") || mOwnerInternal.contains("Entity"))) {
+                        if (!guards.contains("Player#isOnline")) {
+                            guards.add("Player#isOnline");
                         }
                     }
 
@@ -2468,16 +3145,166 @@ public final class BytecodeCausalGraphScanner {
                             syncMainThreadCalls
                     );
 
-                    // Check if CompletableFuture.supplyAsync or Supplier.get is immediately followed by POP (0x57) or POP2 (0x58)
+                    // Track explicit Lock acquisitions, Folia region guards, scheduler dispatches,
+                    // blocking I/O sinks (CAUSAL-MAIN-IO / S-005), and resource/ticket lifecycles (CAUSAL-LEAK / S-002)
+                    if (("lock".equals(mName) || "tryLock".equals(mName) || "readLock".equals(mName) || "writeLock".equals(mName))
+                            && (mOwnerInternal.contains("concurrent/locks/") || mOwnerInternal.endsWith("Lock"))) {
+                        acquiredLocks.add(recentReadField != null ? recentReadField : "lock");
+                        semanticMacros.add("@synchronized_lock");
+                    }
+                      if ("isOwnedByCurrentRegion".equals(mName)
+                              || mOwnerInternal.contains("RegionScheduler")
+                              || mOwnerInternal.contains("GlobalRegionScheduler")
+                              || mOwnerInternal.contains("EntityScheduler")) {
+                          semanticMacros.add("@folia_region_guard");
+                          if ("isOwnedByCurrentRegion".equals(mName) && !guards.contains("Bukkit#isOwnedByCurrentRegion")) {
+                              guards.add("Bukkit#isOwnedByCurrentRegion");
+                          }
+                      }
+                      if (recentIndyLambdaTarget != null) {
+                          if (mOwnerInternal.contains("GlobalRegionScheduler")
+                                  && ("run".equals(mName) || "runDelayed".equals(mName)
+                                  || "runAtFixedRate".equals(mName) || "execute".equals(mName))) {
+                              semanticMacros.add("@folia_global_region_lambda:" + recentIndyLambdaTarget);
+                          } else if (((mOwnerInternal.contains("RegionScheduler")
+                                  && !mOwnerInternal.contains("GlobalRegionScheduler"))
+                                  || mOwnerInternal.contains("EntityScheduler"))
+                                  && ("run".equals(mName) || "runDelayed".equals(mName)
+                                  || "runAtFixedRate".equals(mName) || "execute".equals(mName))) {
+                              semanticMacros.add("@folia_owned_region_lambda:" + recentIndyLambdaTarget);
+                          }
+                      }
+                      if ((mOwnerInternal.endsWith("BukkitScheduler")
+                              || mOwnerInternal.toLowerCase(Locale.ROOT).contains("bukkitscheduler"))
+                              && (mName.startsWith("runTask")
+                              || mName.startsWith("scheduleSync")
+                              || mName.startsWith("scheduleAsync")
+                              || "callSyncMethod".equals(mName)
+                              || "cancelTasks".equals(mName)
+                              || "cancelTask".equals(mName))) {
+                          semanticMacros.add("@bukkit_scheduler_task_sink:" + simpleClassName(mOwnerInternal) + "#" + mName);
+                      }
+                    String combinedCallLow = (mOwnerInternal + "#" + mName).toLowerCase(Locale.ROOT);
+                    if (combinedCallLow.contains("runtask") || combinedCallLow.contains("schedule")
+                            || combinedCallLow.contains("supplyasync") || combinedCallLow.contains("runasync")
+                            || mOwnerInternal.contains("Scheduler")) {
+                        semanticMacros.add("@scheduler_dispatch");
+                    }
+                    if ("java/util/LinkedHashMap".equals(mOwnerInternal)
+                            && "<init>".equals(mName)
+                            && "(IFZ)V".equals(mDesc)) {
+                        callsAccessOrderLinkedHashMap = true;
+                    }
+                    // Blocking I/O detection (S-005 / CAUSAL-MAIN-IO)
+                    boolean returnsAsyncFuture = mDesc != null && (
+                            mDesc.endsWith(")Ljava/util/concurrent/CompletableFuture;")
+                            || mDesc.endsWith(")Ljava/util/concurrent/Future;")
+                            || mDesc.endsWith(")Ljava/util/concurrent/CompletionStage;")
+                    );
+                    if (("getChunkAt".equals(mName) || "loadChunk".equals(mName))
+                            && !mName.toLowerCase(Locale.ROOT).contains("async")
+                            && (mOwnerInternal.startsWith("org/bukkit/")
+                            || mOwnerInternal.contains("World")
+                            || mOwnerInternal.contains("ServerLevel"))) {
+                        if (returnsAsyncFuture) {
+                            semanticMacros.add("@async_chunk_io");
+                        } else {
+                            blockingIoCalls.add(simpleClassName(mOwnerInternal) + "#" + mName);
+                            semanticMacros.add("@sync_chunk_hazard");
+                        }
+                    } else if (mName.toLowerCase(Locale.ROOT).contains("getchunkatasync")) {
+                        semanticMacros.add("@async_chunk_io");
+                    }
+                    if ("java/nio/file/Files".equals(mOwnerInternal)
+                            && ("readAllBytes".equals(mName) || "readString".equals(mName)
+                            || "readAllLines".equals(mName) || "write".equals(mName)
+                            || "writeString".equals(mName) || "newByteChannel".equals(mName)
+                            || "newInputStream".equals(mName) || "newOutputStream".equals(mName)
+                            || "lines".equals(mName) || "walk".equals(mName) || "copy".equals(mName))) {
+                        blockingIoCalls.add("Files#" + mName);
+                        directEffectSinks.add("STORAGE_IO");
+                    } else if ("java/nio/channels/FileChannel".equals(mOwnerInternal) && "open".equals(mName)) {
+                        blockingIoCalls.add("FileChannel#open");
+                        directEffectSinks.add("STORAGE_IO");
+                    } else if (("<init>".equals(mName))
+                            && ("java/io/FileInputStream".equals(mOwnerInternal)
+                            || "java/io/FileOutputStream".equals(mOwnerInternal)
+                            || "java/io/RandomAccessFile".equals(mOwnerInternal))) {
+                        blockingIoCalls.add(simpleClassName(mOwnerInternal) + "#<init>");
+                        directEffectSinks.add("STORAGE_IO");
+                    } else if ((mOwnerInternal.startsWith("java/sql/") || mOwnerInternal.contains("PreparedStatement") || mOwnerInternal.contains("Statement"))
+                            && ("executeQuery".equals(mName) || "executeUpdate".equals(mName) || "execute".equals(mName))) {
+                        blockingIoCalls.add(simpleClassName(mOwnerInternal) + "#" + mName);
+                        directEffectSinks.add("STORAGE_IO");
+                    } else if ((mOwnerInternal.endsWith("CompletableFuture") || mOwnerInternal.endsWith("Future"))
+                            && "isDone".equals(mName)) {
+                        sawFutureIsDoneGuard = true;
+                    } else if ((mOwnerInternal.endsWith("CompletableFuture") || mOwnerInternal.endsWith("Future"))
+                            && ("get".equals(mName) || "join".equals(mName))
+                            && !sawFutureIsDoneGuard) {
+                        blockingIoCalls.add(simpleClassName(mOwnerInternal) + "#" + mName);
+                    }
+
+                    // Resource & ChunkTicket allocation / release tracking (S-002 / CAUSAL-LEAK)
+                    if (("<init>".equals(mName)
+                            && ("java/io/FileInputStream".equals(mOwnerInternal)
+                            || "java/io/FileOutputStream".equals(mOwnerInternal)
+                            || "java/io/RandomAccessFile".equals(mOwnerInternal)))
+                            || ("java/nio/channels/FileChannel".equals(mOwnerInternal) && "open".equals(mName))
+                            || ("java/nio/file/Files".equals(mOwnerInternal)
+                            && ("newByteChannel".equals(mName) || "newInputStream".equals(mName)
+                            || "newOutputStream".equals(mName) || "lines".equals(mName) || "walk".equals(mName)))
+                            || "acquireTicket".equals(mName)
+                            || "reserveChunk".equals(mName)
+                            || "addPluginChunkTicket".equals(mName)) {
+                        String resLabel = "<init>".equals(mName)
+                                ? simpleClassName(mOwnerInternal)
+                                : (simpleClassName(mOwnerInternal) + "#" + mName);
+                        if (!allocatedResources.contains(resLabel)) {
+                            allocatedResources.add(resLabel);
+                        }
+                        if (firstAllocPc < 0) {
+                            firstAllocPc = pc;
+                        }
+                    }
+                    if (mOwnerInternal.contains("MemoryTracker")
+                            || mName.startsWith("trackTicket")
+                            || mName.startsWith("registerTicket")
+                            || mName.startsWith("trackChunk")) {
+                        trackedByMemoryTracker = true;
+                        semanticMacros.add("@tracked_ticket");
+                    }
+                    if ("close".equals(mName)
+                            || "release".equals(mName)
+                            || "releaseTicket".equals(mName)
+                            || "removePluginChunkTicket".equals(mName)
+                            || "untrack".equals(mName)
+                            || "closeQuietly".equals(mName)) {
+                        closePcs.add(pc);
+                        if ("removePluginChunkTicket".equals(mName) || "releaseTicket".equals(mName) || "untrack".equals(mName)) {
+                            semanticMacros.add("@tracked_ticket");
+                        }
+                    }
+
+                    // Check if CompletableFuture.supplyAsync, Supplier.get, or a CompletableFuture-returning call is immediately followed by POP (0x57) or POP2 (0x58)
                     int nextPc = pc + insLen;
                     if (nextPc < code.length) {
                         int nextOp = code[nextPc] & 0xFF;
                         if (nextOp == 0x57 || nextOp == 0x58) {
                             boolean isSupplyAsync = mOwnerInternal.endsWith("CompletableFuture") && "supplyAsync".equals(mName);
+                            boolean isFutureReturn = mDesc != null && (
+                                    mDesc.endsWith(")Ljava/util/concurrent/CompletableFuture;")
+                                    || mDesc.endsWith(")Ljava/util/concurrent/CompletionStage;")
+                            ) && (mName.startsWith("get")
+                                    || mName.startsWith("supply")
+                                    || mName.startsWith("compute")
+                                    || mName.startsWith("fetch")
+                                    || mName.startsWith("find")
+                                    || mName.startsWith("query")
+                                    || mName.startsWith("select")
+                                    || mName.startsWith("pick"));
                             boolean isSupplierGet = ("get".equals(mName) && mOwnerInternal.toLowerCase(Locale.ROOT).contains("supplier"))
-                                    || (mDesc != null && mDesc.endsWith(")Ljava/util/concurrent/CompletableFuture;")
-                                    && ("get".equals(mName) || mName.startsWith("supply") || mName.startsWith("compute")
-                                    || mName.startsWith("locate") || mName.startsWith("fetch")));
+                                    || isFutureReturn;
                             if (isSupplyAsync || isSupplierGet) {
                                 String orphanTarget = (isSupplyAsync && recentIndyLambdaTarget != null)
                                         ? recentIndyLambdaTarget
@@ -2487,12 +3314,10 @@ public final class BytecodeCausalGraphScanner {
                                 }
                             }
                         }
-                    }
                     recentIndyLambdaTarget = null;
                 }
             }
-
-            // INVOKEDYNAMIC (0xBA): link to BootstrapMethods target lambda/method-reference
+            }
             if (op == 0xBA && pc + 2 < code.length) {
                 int indyCpIdx = readUnsignedShort(code, pc + 1);
                 if (indyCpIdx > 0 && indyCpIdx < indyBootstrapIdx.length) {
@@ -2510,7 +3335,7 @@ public final class BytecodeCausalGraphScanner {
             pc += insLen;
         }
 
-        // Check exception table for empty catch blocks (S-004 CLAIM_SWALLOWED_FAILURE)
+        // Check exception table for empty catch blocks (S-004 CAUSAL_SWALLOWED_FAILURE)
         List<String> swallowedExceptions = new ArrayList<>();
         for (ExceptionEntry ex : rm.exceptionTable()) {
             if (ex.catchClassInternal() == null || BENIGN_CAUGHT_EXCEPTIONS.contains(ex.catchClassInternal())) {
@@ -2522,6 +3347,52 @@ public final class BytecodeCausalGraphScanner {
                     swallowedExceptions.add(caughtBinary);
                 }
             }
+        }
+        if (!swallowedExceptions.isEmpty()) {
+            semanticMacros.add("@silent_catch_hazard");
+        }
+
+        boolean closesOrTracksResourcesOnAllPaths = true;
+        String resourceLeakReason = "";
+        if (!allocatedResources.isEmpty() && ! "<init>".equals(rm.name()) && !"<clinit>".equals(rm.name())) {
+            String retDesc = rm.descriptor() != null && rm.descriptor().contains(")")
+                    ? rm.descriptor().substring(rm.descriptor().indexOf(')') + 1)
+                    : "V";
+            boolean returnsResource = !retDesc.equals("V") && !retDesc.equals("Z") && !retDesc.equals("I")
+                    && (retDesc.contains("Stream") || retDesc.contains("Channel") || retDesc.contains("Closeable")
+                    || retDesc.contains("RandomAccessFile") || retDesc.contains("Ticket") || retDesc.contains("Reader")
+                    || retDesc.contains("Writer") || rm.name().startsWith("open") || rm.name().startsWith("acquire")
+                    || rm.name().startsWith("create"));
+              if (!returnsResource && !trackedByMemoryTracker && !storedInManagedClassField) {
+                  if (closePcs.isEmpty()) {
+                      closesOrTracksResourcesOnAllPaths = false;
+                      resourceLeakReason = "Allocates " + allocatedResources
+                              + " without invoking close()/release()/removePluginChunkTicket() or registering with a lifecycle tracker (risks file-handle or force-loaded chunk memory leaks).";
+                  } else {
+                      boolean hasExceptionHandlerClose = false;
+                      for (ExceptionEntry ex : rm.exceptionTable()) {
+                          for (int cPc : closePcs) {
+                              if (cPc >= ex.handlerPc() - 4) {
+                                  hasExceptionHandlerClose = true;
+                                  break;
+                              }
+                          }
+                      }
+                      if (!hasExceptionHandlerClose) {
+                          int firstClose = closePcs.get(0);
+                          for (int exitPc : earlyExitPcs) {
+                              if (exitPc > firstAllocPc && exitPc < firstClose) {
+                                  closesOrTracksResourcesOnAllPaths = false;
+                                  resourceLeakReason = "Allocates " + allocatedResources
+                                          + " at pc=" + firstAllocPc + " with an unguarded early return/throw at pc=" + exitPc
+                                          + " before close()/release() at pc=" + firstClose
+                                          + " and no try-with-resources/finally handler (risks file-handle or chunk-ticket leaks on early exit).";
+                                  break;
+                              }
+                          }
+                      }
+                  }
+              }
         }
 
         return new MethodNode(
@@ -2557,7 +3428,17 @@ public final class BytecodeCausalGraphScanner {
                 swallowedExceptions,
                 callsCurrentTimeMillis,
                 multipliesBy1000Or20,
-                usesDynamicConfigIteration
+                usesDynamicConfigIteration,
+                acquiredLocks,
+                blockingIoCalls,
+                allocatedResources,
+                closesOrTracksResourcesOnAllPaths,
+                resourceLeakReason,
+                semanticMacros,
+                callsAccessOrderLinkedHashMap,
+                collectionAddedFields,
+                collectionRemovedFields,
+                returnedField
         );
     }
 
@@ -2699,9 +3580,15 @@ public final class BytecodeCausalGraphScanner {
             Set<String> syncMainThreadCalls
     ) {
         String combined = (ownerInternal + "#" + methodName).toLowerCase(Locale.ROOT);
+        boolean returnsFuture = methodDesc != null && (
+                methodDesc.endsWith(")Ljava/util/concurrent/CompletableFuture;")
+                || methodDesc.endsWith(")Ljava/util/concurrent/Future;")
+                || methodDesc.endsWith(")Ljava/util/concurrent/CompletionStage;")
+        );
         if (combined.contains("teleport")) {
             directEffectSinks.add("TELEPORT");
             if ("teleport".equals(methodName)
+                    && !returnsFuture
                     && (ownerInternal.contains("org/bukkit/entity") || ownerInternal.contains("Player") || ownerInternal.contains("Entity"))) {
                 syncMainThreadCalls.add(simpleClassName(ownerInternal) + "#teleport");
             }
@@ -2711,18 +3598,29 @@ public final class BytecodeCausalGraphScanner {
                 || (ownerInternal.contains("menu") && ("open".equals(methodName) || "stage".equals(methodName) || "redeem".equals(methodName)))) {
             directEffectSinks.add("INVENTORY_MENU");
         }
-        if (combined.contains("settype") || combined.contains("setblockdata") || combined.contains("breaknaturally")
-                || combined.contains("spawnentity") || combined.contains("createexplosion")
-                || combined.contains("sethealth") || combined.contains("setfoodlevel")) {
-            directEffectSinks.add("WORLD_MUTATION");
-            if (ownerInternal.startsWith("org/bukkit/")) {
+          if (combined.contains("settype") || combined.contains("setblockdata") || combined.contains("breaknaturally")
+                  || combined.contains("spawnentity") || combined.contains("createexplosion")
+                  || combined.contains("sethealth") || combined.contains("setfoodlevel")) {
+              directEffectSinks.add("WORLD_MUTATION");
+              if ((ownerInternal.startsWith("org/bukkit/")
+                      || ownerInternal.contains("Block")
+                      || ownerInternal.contains("World")
+                      || ownerInternal.contains("Entity")
+                      || ownerInternal.contains("Player"))
+                      && !ownerInternal.endsWith("/BlockState")
+                      && !ownerInternal.endsWith("$BlockState")) {
+                  syncMainThreadCalls.add(simpleClassName(ownerInternal) + "#" + methodName);
+              }
+          }
+        if (("getchunkat".equals(methodName.toLowerCase(Locale.ROOT)) || "loadchunk".equals(methodName.toLowerCase(Locale.ROOT)))
+                && !methodName.toLowerCase(Locale.ROOT).contains("async")
+                && (ownerInternal.startsWith("org/bukkit/")
+                || ownerInternal.contains("World")
+                || ownerInternal.contains("ServerLevel"))) {
+            directEffectSinks.add("CHUNK_IO");
+            if (!returnsFuture) {
                 syncMainThreadCalls.add(simpleClassName(ownerInternal) + "#" + methodName);
             }
-        }
-        if (("getchunkat".equals(methodName.toLowerCase(Locale.ROOT)) || "loadchunk".equals(methodName.toLowerCase(Locale.ROOT)))
-                && !methodName.toLowerCase(Locale.ROOT).contains("async")) {
-            directEffectSinks.add("CHUNK_IO");
-            syncMainThreadCalls.add(simpleClassName(ownerInternal) + "#" + methodName);
         } else if (combined.contains("getchunkatasync")) {
             directEffectSinks.add("CHUNK_IO");
         }
@@ -2731,14 +3629,18 @@ public final class BytecodeCausalGraphScanner {
         }
         if (combined.contains("executeupdate") || combined.contains("executequery") || combined.contains("saveconfig")
                 || combined.contains("writestring") || combined.contains("files#write")
-                || combined.contains("export") || combined.contains("writebytes")) {
+                || combined.contains("export") || combined.contains("writebytes")
+                || combined.contains("healandverifyworld") || combined.contains("convertworld")
+                || combined.contains("compactopenregions")
+                || ("flush".equals(methodName.toLowerCase(Locale.ROOT)) && ownerInternal.contains("StorageSession"))) {
             directEffectSinks.add("STORAGE_IO");
         }
         if ("setcancelled".equals(methodName.toLowerCase(Locale.ROOT))) {
             directEffectSinks.add("EVENT_CANCEL");
         }
         if (combined.contains("runtaskasynchronously") || combined.contains("supplyasync")
-                || combined.contains("runasync") || combined.contains("asyncscheduler")) {
+                || combined.contains("runasync") || combined.contains("runbatchtaskasync")
+                || combined.contains("asyncscheduler")) {
             directEffectSinks.add("ASYNC_SCHEDULER");
         } else if (combined.contains("runtask") || combined.contains("schedule")) {
             directEffectSinks.add("SCHEDULER_TASK");
@@ -2964,7 +3866,7 @@ public final class BytecodeCausalGraphScanner {
         return simpleClassName(internal);
     }
 
-    private static String simpleClassName(String name) {
+    static String simpleClassName(String name) {
         if (name == null || name.isEmpty()) {
             return "";
         }
@@ -2973,7 +3875,7 @@ public final class BytecodeCausalGraphScanner {
         return dot >= 0 ? norm.substring(dot + 1) : norm;
     }
 
-    private static String simpleMethodRef(String symbol) {
+    static String simpleMethodRef(String symbol) {
         if (symbol == null || symbol.isEmpty()) {
             return "";
         }
@@ -3185,6 +4087,7 @@ public final class BytecodeCausalGraphScanner {
     }
 
     private static boolean isShadedLibraryClass(String entryName) {
+        String low = entryName.toLowerCase(Locale.ROOT);
         return entryName.startsWith("META-INF/")
                 || entryName.startsWith("kotlin/")
                 || entryName.startsWith("kotlinx/")
@@ -3196,6 +4099,876 @@ public final class BytecodeCausalGraphScanner {
                 || entryName.startsWith("org/sqlite/")
                 || entryName.startsWith("org/mariadb/")
                 || entryName.startsWith("com/mysql/")
-                || entryName.startsWith("org/bstats/");
+                || entryName.startsWith("org/bstats/")
+                || entryName.startsWith("org/h2/")
+                || entryName.startsWith("okhttp3/")
+                || entryName.startsWith("org/apache/")
+                || entryName.startsWith("org/incendo/cloud/")
+                || entryName.startsWith("net/kyori/adventure/")
+                || low.contains("/libs/")
+                || low.contains("/libraries/")
+                || low.contains("/shadow/")
+                || low.contains("/shaded/")
+                || low.contains("/external/")
+                || low.contains("/relocated/")
+                || low.contains("/bstats/")
+                || low.contains("/hikari/")
+                || low.contains("/hikaricp/")
+                || low.contains("/kyori/adventure/")
+                || low.contains("/paperlib/")
+                || low.contains("/morepaperlib/")
+                || low.contains("/xseries/");
     }
-}
+
+    private static final Map<String, String> KNOWN_ECOSYSTEM_PACKAGE_PREFIXES = createKnownEcosystemPrefixes();
+
+    private static Map<String, String> createKnownEcosystemPrefixes() {
+        Map<String, String> map = new LinkedHashMap<>();
+        map.put("net.milkbowl.vault.", "Vault");
+        map.put("me.clip.placeholderapi.", "PlaceholderAPI");
+        map.put("com.sk89q.worldguard.", "WorldGuard");
+        map.put("com.sk89q.worldedit.", "WorldEdit");
+        map.put("com.comphenix.protocol.", "ProtocolLib");
+        map.put("net.luckperms.api.", "LuckPerms");
+        map.put("net.citizensnpcs.", "Citizens");
+        map.put("io.lumine.mythic.", "MythicMobs");
+        map.put("com.palmergames.bukkit.towny.", "Towny");
+        map.put("me.ryanhamshire.GriefPrevention.", "GriefPrevention");
+        map.put("me.angeschossen.lands.", "Lands");
+        map.put("dev.lone.itemsadder.", "ItemsAdder");
+        map.put("io.th0rgal.oraxen.", "Oraxen");
+        map.put("de.tr7zw.changeme.nbtapi.", "NBTAPI");
+        map.put("de.tr7zw.nbtapi.", "NBTAPI");
+        map.put("fr.minuskube.inv.", "SmartInvs");
+        map.put("fr.mrmicky.fastboard.", "FastBoard");
+        map.put("com.bgsoftware.superiorskyblock.", "SuperiorSkyblock2");
+        map.put("world.bentobox.bentobox.", "BentoBox");
+        map.put("com.plotsquared.", "PlotSquared");
+        map.put("com.massivecraft.factions.", "Factions");
+        map.put("org.geysermc.floodgate.", "Floodgate");
+        map.put("org.geysermc.geyser.", "Geyser");
+        map.put("eu.decentsoftware.holograms.", "DecentHolograms");
+        map.put("me.filoghost.holographicdisplays.", "HolographicDisplays");
+        map.put("de.oliver.fancyholograms.", "FancyHolograms");
+        return Collections.unmodifiableMap(map);
+    }
+
+    private static final List<String> STANDARD_OR_PLATFORM_CLASS_PREFIXES = List.of(
+            "java.",
+            "javax.",
+            "jdk.",
+            "sun.",
+            "com.sun.",
+            "org.w3c.",
+            "org.xml.",
+            "org.ietf.",
+            "kotlin.",
+            "kotlinx.",
+            "scala.",
+            "groovy.",
+            "org.jetbrains.",
+            "org.intellij.",
+            "org.bukkit.",
+            "org.spigotmc.",
+            "io.papermc.",
+            "com.destroystokyo.paper.",
+            "net.md_5.",
+            "com.mojang.",
+            "net.minecraft.",
+            "net.fabricmc.",
+            "net.neoforged.",
+            "net.minecraftforge.",
+            "cpw.mods.",
+            "com.velocitypowered.",
+            "net.kyori.",
+            "org.spongepowered.",
+            "org.slf4j.",
+            "org.apache.logging.",
+            "com.google.",
+            "io.netty.",
+            "org.yaml.snakeyaml.",
+            "com.zaxxer.hikari.",
+            "org.sqlite.",
+            "org.mariadb.",
+            "com.mysql.",
+            "org.bstats.",
+            "org.junit.",
+            "org.opentest4j.",
+            "org.mockito."
+    );
+
+    private record ExternalDependencyClassification(
+            Set<String> inferredEcosystemDependencies,
+            Set<String> inferredExternalPackages
+    ) {
+    }
+
+    private static String normalizeConstantPoolClassName(String rawInternal) {
+        if (rawInternal == null || rawInternal.isBlank()) {
+            return null;
+        }
+        String s = rawInternal.trim();
+        int idx = 0;
+        while (idx < s.length() && s.charAt(idx) == '[') {
+            idx++;
+        }
+        if (idx > 0) {
+            if (idx < s.length() && s.charAt(idx) == 'L' && s.endsWith(";")) {
+                s = s.substring(idx + 1, s.length() - 1);
+            } else {
+                return null;
+            }
+        }
+        if (s.indexOf('/') <= 0) {
+            return null;
+        }
+        return s.replace('/', '.');
+    }
+
+    private static ExternalDependencyClassification classifyExternalDependencies(
+            Set<String> allReferencedClasses,
+            Set<String> intraJarClasses
+    ) {
+        if (allReferencedClasses == null || allReferencedClasses.isEmpty()) {
+            return new ExternalDependencyClassification(Set.of(), Set.of());
+        }
+        Set<String> intraRoots = new LinkedHashSet<>();
+        Set<String> intraPackages = new LinkedHashSet<>();
+        for (String intra : intraJarClasses) {
+            intraRoots.add(intra);
+            int dollar = intra.indexOf('$');
+            if (dollar > 0) {
+                intraRoots.add(intra.substring(0, dollar));
+            }
+            int lastDot = intra.lastIndexOf('.');
+            if (lastDot > 0) {
+                intraPackages.add(intra.substring(0, lastDot));
+            }
+        }
+
+        Set<String> ecosystemDeps = new java.util.TreeSet<>();
+        Set<String> externalPackages = new java.util.TreeSet<>();
+        for (String ref : allReferencedClasses) {
+            if (intraRoots.contains(ref)) {
+                continue;
+            }
+            int dollar = ref.indexOf('$');
+            String outerRef = dollar > 0 ? ref.substring(0, dollar) : ref;
+            if (intraRoots.contains(outerRef)) {
+                continue;
+            }
+
+            String matchedEcosystem = null;
+            for (var entry : KNOWN_ECOSYSTEM_PACKAGE_PREFIXES.entrySet()) {
+                if (outerRef.startsWith(entry.getKey())) {
+                    matchedEcosystem = entry.getValue();
+                    break;
+                }
+            }
+            if (matchedEcosystem != null) {
+                ecosystemDeps.add(matchedEcosystem);
+                continue;
+            }
+
+            int lastDot = outerRef.lastIndexOf('.');
+            if (lastDot <= 0) {
+                continue;
+            }
+            String pkg = outerRef.substring(0, lastDot);
+            if (intraPackages.contains(pkg)) {
+                continue;
+            }
+
+            boolean isStandardOrShaded = isShadedLibraryClass(outerRef.replace('.', '/') + ".class");
+            if (!isStandardOrShaded) {
+                for (String stdPrefix : STANDARD_OR_PLATFORM_CLASS_PREFIXES) {
+                    if (outerRef.startsWith(stdPrefix)) {
+                        isStandardOrShaded = true;
+                        break;
+                    }
+                }
+            }
+            if (isStandardOrShaded) {
+                continue;
+            }
+
+            externalPackages.add(extractThreeSegmentPackagePrefix(pkg));
+        }
+          return new ExternalDependencyClassification(ecosystemDeps, externalPackages);
+      }
+
+      private static String extractThreeSegmentPackagePrefix(String pkg) {
+          if (pkg == null || pkg.isEmpty()) {
+              return "";
+          }
+          int firstDot = pkg.indexOf('.');
+          if (firstDot < 0) {
+              return pkg;
+          }
+          int secondDot = pkg.indexOf('.', firstDot + 1);
+          if (secondDot < 0) {
+              return pkg;
+          }
+          int thirdDot = pkg.indexOf('.', secondDot + 1);
+          return thirdDot < 0 ? pkg : pkg.substring(0, thirdDot);
+      }
+
+      private record FoliaHopState(
+              MethodNode node,
+              int depth,
+              boolean onGlobalRegion,
+              boolean onOwnedRegion,
+              boolean onAsync,
+              List<String> path
+      ) {
+      }
+
+      private static List<CausalFinding> traceCausalFoliaRuntimeExceptions(
+              String effName,
+              int startingSeq,
+              List<MethodNode> allMethods,
+              Map<String, ParsedClass> classesByName,
+              Map<String, MethodNode> methodsBySymbol,
+              Map<String, List<MethodNode>> methodsByName,
+              Map<String, ListenerRegistrationMode> listenerRegistrations,
+              Set<String> allAsyncSpawnedLambdas,
+              List<CausalFinding> existingFindings
+      ) {
+          List<CausalFinding> out = new ArrayList<>();
+          int seq = startingSeq;
+          Set<String> alreadyFlaggedSymbols = new LinkedHashSet<>();
+          for (CausalFinding f : existingFindings) {
+              if (f.kind() == FindingKind.CAUSAL_ASYNC_MAIN_THREAD_SINK
+                      && f.declaredSurface().contains("folia-supported: true")) {
+                  alreadyFlaggedSymbols.add(f.entryPointSymbol());
+              }
+          }
+
+          List<MethodNode> roots = collectActiveFoliaRoots(
+                  allMethods,
+                  classesByName,
+                  listenerRegistrations,
+                  allAsyncSpawnedLambdas
+          );
+          for (MethodNode root : roots) {
+              boolean rootAsync = root.isEventHandler()
+                      && root.eventTypeSimpleName().toLowerCase(Locale.ROOT).startsWith("async");
+              boolean rootOwned = root.isEventHandler()
+                      && !rootAsync
+                      && !isGlobalLifecycleEvent(root.eventTypeSimpleName());
+
+              Deque<FoliaHopState> queue = new ArrayDeque<>();
+              Set<String> visited = new LinkedHashSet<>();
+              queue.add(new FoliaHopState(root, 0, false, rootOwned, rootAsync, List.of(root.symbol())));
+              visited.add(root.symbol() + "|G=false|O=" + rootOwned + "|A=" + rootAsync);
+
+              while (!queue.isEmpty()) {
+                  FoliaHopState cur = queue.poll();
+                  MethodNode node = cur.node();
+                  boolean callsFoliaDetect = callsFoliaRuntimeDetection(node);
+                  boolean callsFoliaSched = callsFoliaSchedulerApi(node);
+                  boolean callsAsyncTp = node.calledMethods().stream().anyMatch(c -> c.endsWith("#teleportAsync"));
+                  boolean callsAsyncChunk = node.calledMethods().stream().anyMatch(c ->
+                          c.toLowerCase(Locale.ROOT).contains("getchunkatasync") || c.endsWith("#isChunkLoaded"))
+                          || node.semanticMacros().contains("@async_chunk_io");
+
+                  List<String> sinkViolations = collectFoliaExceptionSinksForNode(
+                          node,
+                          cur.onGlobalRegion(),
+                          cur.onOwnedRegion(),
+                          cur.onAsync(),
+                          callsFoliaDetect,
+                          callsFoliaSched,
+                          callsAsyncTp,
+                          callsAsyncChunk
+                  );
+                  if (!sinkViolations.isEmpty() && alreadyFlaggedSymbols.add(node.symbol())) {
+                      alreadyFlaggedSymbols.add(root.symbol() + "->" + node.symbol());
+                      List<String> steps = new ArrayList<>();
+                      steps.add("FOLIA_CAUSAL_EXCEPTION -> "
+                              + String.join(" -> ", cur.path())
+                              + " -> " + sinkViolations);
+                      out.add(new CausalFinding(
+                              "CAUSAL-" + (seq++),
+                              effName,
+                              2,
+                              FindingKind.CAUSAL_ASYNC_MAIN_THREAD_SINK,
+                              ConfidenceTier.CONFIRMED,
+                              100,
+                              root.symbol(),
+                              effName + " declares 'folia-supported: true' in plugin descriptor",
+                              "Active entrypoint " + simpleMethodRef(root.symbol())
+                                      + " causally reaches Folia runtime exception sink " + sinkViolations
+                                      + " at " + simpleMethodRef(node.symbol())
+                                      + " without a Folia branch guard or region scheduler handoff.",
+                              "Dispatch region-owned mutations via Folia RegionScheduler/EntityScheduler and replace legacy BukkitScheduler/sync teleport with Folia schedulers and teleportAsync.",
+                              steps,
+                              ""
+                      ));
+                  }
+                  expandFoliaHops(
+                          cur,
+                          callsFoliaDetect,
+                          callsFoliaSched,
+                          callsAsyncTp,
+                          methodsBySymbol,
+                          methodsByName,
+                          allAsyncSpawnedLambdas,
+                          visited,
+                          queue
+                  );
+              }
+          }
+          return out;
+      }
+
+      private static List<MethodNode> collectActiveFoliaRoots(
+              List<MethodNode> allMethods,
+              Map<String, ParsedClass> classesByName,
+              Map<String, ListenerRegistrationMode> listenerRegistrations,
+              Set<String> allAsyncSpawnedLambdas
+      ) {
+          List<MethodNode> roots = new ArrayList<>();
+          for (MethodNode m : allMethods) {
+              if ((m.accessFlags() & (ACC_SYNTHETIC | 0x0040)) != 0 && !m.name().startsWith("lambda$")) {
+                  continue;
+              }
+              if ("onEnable".equals(m.name()) || "onLoad".equals(m.name()) || "onDisable".equals(m.name())) {
+                  roots.add(m);
+                  continue;
+              }
+              ParsedClass ownerPc = classesByName.get(m.ownerClass());
+              EntryPointKind kind = classifyEntryPoint(m, ownerPc, allAsyncSpawnedLambdas);
+              if (kind == EntryPointKind.COMMAND) {
+                  roots.add(m);
+              } else if (kind == EntryPointKind.EVENT
+                      && listenerRegistrations.get(m.ownerClass()) != ListenerRegistrationMode.UNREGISTERED) {
+                  roots.add(m);
+              }
+          }
+          if (roots.isEmpty()) {
+              boolean hasDedicatedFoliaAdapter = classesByName.keySet().stream().anyMatch(c ->
+                      c.contains(".folia.") || c.contains("FoliaScheduler") || c.contains("FoliaRTP"));
+              if (!hasDedicatedFoliaAdapter) {
+                  for (MethodNode m : allMethods) {
+                      if ((m.accessFlags() & (ACC_SYNTHETIC | 0x0040)) != 0
+                              || "<init>".equals(m.name())
+                              || "<clinit>".equals(m.name())
+                              || m.semanticMacros().contains("@folia_region_guard")) {
+                          continue;
+                      }
+                      roots.add(m);
+                  }
+              }
+          }
+          return roots;
+      }
+
+      private static boolean isGlobalLifecycleEvent(String eventSimpleName) {
+          if (eventSimpleName == null || eventSimpleName.isEmpty()) {
+              return true;
+          }
+          return eventSimpleName.startsWith("Server")
+                  || eventSimpleName.startsWith("Plugin")
+                  || eventSimpleName.startsWith("RemoteServer")
+                  || eventSimpleName.startsWith("Service");
+      }
+
+      private static boolean callsFoliaRuntimeDetection(MethodNode node) {
+          for (String c : node.calledMethods()) {
+              String low = c.toLowerCase(Locale.ROOT);
+              if (low.endsWith("#isfolia")
+                      || low.endsWith("#hasfolia")
+                      || low.endsWith("#isfoliasupported")
+                      || low.endsWith("#isregionizedserver")
+                      || low.endsWith("#ispaperfolia")
+                      || low.endsWith("#isownedbycurrentregion")) {
+                  return true;
+              }
+          }
+          for (String lit : node.stringLiterals()) {
+              if (lit.contains("RegionizedServer")
+                      || lit.contains("io.papermc.paper.threadedregions")
+                      || lit.contains("GlobalRegionScheduler")
+                      || lit.contains("RegionScheduler")) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      private static boolean callsFoliaSchedulerApi(MethodNode node) {
+          for (String c : node.calledMethods()) {
+              if (c.contains("GlobalRegionScheduler")
+                      || c.contains("RegionScheduler")
+                      || c.contains("EntityScheduler")
+                      || c.contains("AsyncScheduler")) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      private static List<String> collectFoliaExceptionSinksForNode(
+              MethodNode node,
+              boolean onGlobalRegion,
+              boolean onOwnedRegion,
+              boolean onAsync,
+              boolean callsFoliaDetect,
+              boolean callsFoliaSched,
+              boolean callsAsyncTp,
+              boolean callsAsyncChunk
+      ) {
+          Set<String> sinks = new LinkedHashSet<>();
+          if (!callsFoliaDetect && !callsFoliaSched) {
+              for (String c : node.calledMethods()) {
+                  if (c.endsWith("Bukkit#getScheduler") || c.endsWith("Server#getScheduler")) {
+                      sinks.add(simpleMethodRef(c));
+                  }
+              }
+              for (String macro : node.semanticMacros()) {
+                  if (macro.startsWith("@bukkit_scheduler_task_sink:")) {
+                      sinks.add(macro.substring("@bukkit_scheduler_task_sink:".length()));
+                  }
+              }
+          }
+          if (!callsFoliaDetect && !callsAsyncTp) {
+              for (String syncCall : node.syncMainThreadCalls()) {
+                  if (syncCall.endsWith("#teleport")) {
+                      sinks.add(syncCall);
+                  }
+              }
+          }
+          if ((onGlobalRegion || onAsync) && !onOwnedRegion && !callsFoliaDetect) {
+              for (String syncCall : node.syncMainThreadCalls()) {
+                  sinks.add(syncCall);
+              }
+          } else if (!onOwnedRegion && !callsFoliaDetect && !callsAsyncChunk) {
+              for (String syncCall : node.syncMainThreadCalls()) {
+                  if (syncCall.endsWith("#getChunkAt") || syncCall.endsWith("#loadChunk")) {
+                      sinks.add(syncCall);
+                  }
+              }
+          }
+          return new ArrayList<>(sinks);
+      }
+
+      private static void expandFoliaHops(
+              FoliaHopState cur,
+              boolean callsFoliaDetect,
+              boolean callsFoliaSched,
+              boolean callsAsyncTp,
+              Map<String, MethodNode> methodsBySymbol,
+              Map<String, List<MethodNode>> methodsByName,
+              Set<String> allAsyncSpawnedLambdas,
+              Set<String> visited,
+              Deque<FoliaHopState> queue
+      ) {
+          if (cur.depth() >= MAX_CAUSAL_HOPS) {
+              return;
+          }
+          MethodNode node = cur.node();
+          Set<String> globalLambdaTargets = new LinkedHashSet<>();
+          Set<String> ownedLambdaTargets = new LinkedHashSet<>();
+          for (String macro : node.semanticMacros()) {
+              if (macro.startsWith("@folia_global_region_lambda:")) {
+                  globalLambdaTargets.add(macro.substring("@folia_global_region_lambda:".length()));
+              } else if (macro.startsWith("@folia_owned_region_lambda:")) {
+                  ownedLambdaTargets.add(macro.substring("@folia_owned_region_lambda:".length()));
+              }
+          }
+          List<String> rawTargets = new ArrayList<>(node.calledMethods());
+          for (String lam : node.spawnedLambdas()) {
+              if (!rawTargets.contains(lam)) {
+                  rawTargets.add(lam);
+              }
+          }
+          for (String raw : rawTargets) {
+              MethodNode callee = findMethodNodeFlexible(methodsBySymbol, methodsByName, node.ownerClass(), raw);
+              if (callee == null) {
+                  continue;
+              }
+              boolean isGlobalLam = globalLambdaTargets.contains(callee.symbol())
+                      || globalLambdaTargets.contains(simpleMethodRef(callee.symbol()));
+              boolean isOwnedLam = ownedLambdaTargets.contains(callee.symbol())
+                      || ownedLambdaTargets.contains(simpleMethodRef(callee.symbol()));
+              if (isDischargedFoliaFallbackCallee(callee, callsFoliaDetect, callsFoliaSched, callsAsyncTp, isGlobalLam, isOwnedLam)) {
+                  continue;
+              }
+              boolean nextGlobal = isGlobalLam || (cur.onGlobalRegion() && !isOwnedLam);
+              boolean nextOwned = isOwnedLam
+                      || (cur.onOwnedRegion() && !nextGlobal && !allAsyncSpawnedLambdas.contains(callee.symbol()));
+              boolean nextAsync = allAsyncSpawnedLambdas.contains(callee.symbol())
+                      || (cur.onAsync() && !nextOwned && !nextGlobal);
+              String stateKey = callee.symbol() + "|G=" + nextGlobal + "|O=" + nextOwned + "|A=" + nextAsync;
+              if (visited.add(stateKey)) {
+                  List<String> nextPath = new ArrayList<>(cur.path());
+                  nextPath.add(callee.symbol());
+                  queue.add(new FoliaHopState(callee, cur.depth() + 1, nextGlobal, nextOwned, nextAsync, nextPath));
+              }
+          }
+      }
+
+      private static boolean isDischargedFoliaFallbackCallee(
+              MethodNode callee,
+              boolean callerHasFoliaDetect,
+              boolean callerHasFoliaSched,
+              boolean callerHasAsyncTp,
+              boolean isGlobalLam,
+              boolean isOwnedLam
+      ) {
+          if (isGlobalLam || isOwnedLam) {
+              return false;
+          }
+          String symLow = callee.symbol().toLowerCase(Locale.ROOT);
+          boolean looksLikeLegacyFallback = symLow.contains("spigot")
+                  || symLow.contains("legacy")
+                  || symLow.contains("bukkit")
+                  || symLow.contains("fallback");
+          if (callerHasFoliaDetect && (looksLikeLegacyFallback || !callee.name().startsWith("lambda$"))) {
+              return true;
+          }
+          if (callerHasFoliaSched && looksLikeLegacyFallback) {
+              return true;
+          }
+          return callerHasAsyncTp && symLow.contains("teleport");
+      }
+
+      private record SecurityHopState(
+              MethodNode node,
+              int depth,
+              boolean hasPermGuard,
+              boolean isChatOrJoinRoot,
+              String secretTriggerLiteral,
+              String networkSourceStep,
+              List<String> path
+      ) {
+      }
+
+      private static List<CausalFinding> traceCausalBackdoorAndDropperChains(
+              String effName,
+              int startingSeq,
+              List<MethodNode> allMethods,
+              Map<String, ParsedClass> classesByName,
+              Map<String, MethodNode> methodsBySymbol,
+              Map<String, List<MethodNode>> methodsByName,
+              List<JarConfigScanner.CommandDescriptor> cmds,
+              Set<String> allAsyncSpawnedLambdas
+      ) {
+          List<CausalFinding> out = new ArrayList<>();
+          int seq = startingSeq;
+          Set<String> emittedSinks = new LinkedHashSet<>();
+
+          Set<String> permissionedCommands = new LinkedHashSet<>();
+          for (JarConfigScanner.CommandDescriptor cd : cmds) {
+              if (cd.permission() != null && !cd.permission().isBlank()) {
+                  permissionedCommands.add(cd.name().toLowerCase(Locale.ROOT));
+              }
+          }
+
+          for (MethodNode root : allMethods) {
+              if ((root.accessFlags() & (ACC_SYNTHETIC | 0x0040)) != 0 && !root.name().startsWith("lambda$")) {
+                  continue;
+              }
+              ParsedClass ownerPc = classesByName.get(root.ownerClass());
+              EntryPointKind epKind = classifyEntryPoint(root, ownerPc, allAsyncSpawnedLambdas);
+              boolean isLifecycle = "onEnable".equals(root.name()) || "onLoad".equals(root.name());
+              if (epKind == null && !isLifecycle) {
+                  continue;
+              }
+              boolean rootPerm = hasMethodPermissionGuard(root)
+                      || (epKind == EntryPointKind.COMMAND && !permissionedCommands.isEmpty()
+                      && (root.annotatedCommandRoots().isEmpty()
+                      || root.annotatedCommandRoots().stream().anyMatch(r ->
+                      permissionedCommands.contains(r.toLowerCase(Locale.ROOT)))));
+              boolean chatOrJoin = isChatOrJoinMethod(root);
+
+              Deque<SecurityHopState> queue = new ArrayDeque<>();
+              Set<String> visited = new LinkedHashSet<>();
+              queue.add(new SecurityHopState(
+                      root,
+                      0,
+                      rootPerm,
+                      chatOrJoin,
+                      findSecretOrUuidLiteral(root),
+                      findNetworkSourceCall(root),
+                      List.of(root.symbol())
+              ));
+              visited.add(root.symbol());
+
+              while (!queue.isEmpty()) {
+                  SecurityHopState cur = queue.poll();
+                  MethodNode node = cur.node();
+                  boolean permGuard = cur.hasPermGuard() || hasMethodPermissionGuard(node);
+                  String secretLit = cur.secretTriggerLiteral() != null
+                          ? cur.secretTriggerLiteral()
+                          : findSecretOrUuidLiteral(node);
+                  String netSrc = cur.networkSourceStep() != null
+                          ? cur.networkSourceStep()
+                          : findNetworkSourceCall(node);
+
+                  String backdoorSink = findBackdoorPrivilegeSink(node, permGuard, cur.isChatOrJoinRoot(), secretLit);
+                  if (backdoorSink != null) {
+                      String sinkKey = "SEC-FORCE-OP-BACKDOOR:" + node.symbol();
+                      String bareSinkKey = "SEC-FORCE-OP-BACKDOOR:" + node.ownerClass() + "#" + node.name();
+                      if (emittedSinks.add(sinkKey)) {
+                          emittedSinks.add(bareSinkKey);
+                          String chainStep = "MALICIOUS_BACKDOOR -> "
+                                  + String.join(" -> ", cur.path())
+                                  + (secretLit != null ? " [trigger=" + secretLit + "]" : "")
+                                  + " -> " + backdoorSink;
+                          out.add(new CausalFinding(
+                                  "CAUSAL-" + (seq++),
+                                  effName,
+                                  2,
+                                  FindingKind.CAUSAL_LLM_SEMANTIC_MISMATCH,
+                                  ConfidenceTier.CONFIRMED,
+                                  100,
+                                  root.symbol(),
+                                  "[SEC-FORCE-OP-BACKDOOR | CWE-269] " + root.symbol(),
+                                  "Entrypoint " + simpleMethodRef(root.symbol())
+                                          + " causally reaches privilege-escalation sink " + backdoorSink
+                                          + " at " + simpleMethodRef(node.symbol()) + ".",
+                                  "Remove covert setOp/wildcard-permission/console-dispatch triggers and enforce explicit server permission nodes.",
+                                  List.of(chainStep),
+                                  ""
+                          ));
+                      }
+                  }
+
+                  String dropperSink = findDynamicClassLoaderSink(node, netSrc);
+                  if (netSrc != null && dropperSink != null) {
+                      String sinkKey = "SEC-COVERT-CLASSLOADER-DROPPER:" + node.symbol();
+                      String bareSinkKey = "SEC-COVERT-CLASSLOADER-DROPPER:" + node.ownerClass() + "#" + node.name();
+                      if (emittedSinks.add(sinkKey)) {
+                          emittedSinks.add(bareSinkKey);
+                          String chainStep = "MALICIOUS_BACKDOOR -> "
+                                  + String.join(" -> ", cur.path())
+                                  + " [net=" + netSrc + "] -> " + dropperSink;
+                          out.add(new CausalFinding(
+                                  "CAUSAL-" + (seq++),
+                                  effName,
+                                  2,
+                                  FindingKind.CAUSAL_LLM_SEMANTIC_MISMATCH,
+                                  ConfidenceTier.CONFIRMED,
+                                  100,
+                                  root.symbol(),
+                                  "[SEC-COVERT-CLASSLOADER-DROPPER | CWE-494] " + root.symbol(),
+                                  "Entrypoint " + simpleMethodRef(root.symbol())
+                                          + " causally chains remote network source (" + netSrc
+                                          + ") to dynamic classloader sink (" + dropperSink + ").",
+                                  "Do not download and dynamically load untrusted remote .jar/.class payloads at runtime.",
+                                  List.of(chainStep),
+                                  ""
+                          ));
+                      }
+                  }
+
+                  if (cur.depth() >= MAX_CAUSAL_HOPS) {
+                      continue;
+                  }
+                  List<String> nextTargets = new ArrayList<>(node.calledMethods());
+                  for (String lam : node.spawnedLambdas()) {
+                      if (!nextTargets.contains(lam)) {
+                          nextTargets.add(lam);
+                      }
+                  }
+                  for (String raw : nextTargets) {
+                      MethodNode callee = findMethodNodeFlexible(methodsBySymbol, methodsByName, node.ownerClass(), raw);
+                      if (callee != null && visited.add(callee.symbol())) {
+                          List<String> nextPath = new ArrayList<>(cur.path());
+                          nextPath.add(callee.symbol());
+                          queue.add(new SecurityHopState(
+                                  callee,
+                                  cur.depth() + 1,
+                                  permGuard,
+                                  cur.isChatOrJoinRoot(),
+                                  secretLit,
+                                  netSrc,
+                                  nextPath
+                          ));
+                      }
+                  }
+              }
+          }
+
+          List<BytecodeCweAnalyzers.CweBytecodeFinding> cweFindings =
+                  BytecodeCweAnalyzers.analyzeParsedClasses(classesByName);
+          for (BytecodeCweAnalyzers.CweBytecodeFinding cwe : cweFindings) {
+              if ("SEC-FORCE-OP-BACKDOOR".equals(cwe.ruleId())
+                      || "SEC-COVERT-CLASSLOADER-DROPPER".equals(cwe.ruleId())) {
+                  String bareSinkKey = cwe.ruleId() + ":" + cwe.ownerClass() + "#" + cwe.methodName();
+                  if (emittedSinks.add(bareSinkKey)) {
+                      out.add(new CausalFinding(
+                              "CAUSAL-" + (seq++),
+                              effName,
+                              2,
+                              FindingKind.CAUSAL_LLM_SEMANTIC_MISMATCH,
+                              ConfidenceTier.CONFIRMED,
+                              100,
+                              cwe.ownerClass() + "#" + cwe.methodName(),
+                              "[" + cwe.ruleId() + " | " + cwe.cweId() + "] " + cwe.ownerClass() + "#" + cwe.methodName(),
+                              cwe.message(),
+                              cwe.remediation(),
+                              cwe.chain(),
+                              ""
+                      ));
+                  }
+              }
+          }
+          return out;
+      }
+
+      private static boolean hasMethodPermissionGuard(MethodNode node) {
+          if (!node.inlinePermissions().isEmpty()) {
+              return true;
+          }
+          for (String g : node.guards()) {
+              if (g.contains("hasPermission")) {
+                  return true;
+              }
+          }
+          for (String c : node.calledMethods()) {
+              if (c.endsWith("#hasPermission") || c.endsWith("#checkPermission")) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      private static boolean isChatOrJoinMethod(MethodNode node) {
+          String evLow = node.eventTypeSimpleName().toLowerCase(Locale.ROOT);
+          String nameLow = node.name().toLowerCase(Locale.ROOT);
+          return evLow.contains("chat")
+                  || evLow.contains("join")
+                  || evLow.contains("login")
+                  || nameLow.contains("onchat")
+                  || nameLow.contains("onplayerchat")
+                  || nameLow.contains("onjoin")
+                  || nameLow.contains("onlogin");
+      }
+
+      private static String findSecretOrUuidLiteral(MethodNode node) {
+          for (String s : node.stringLiterals()) {
+              if (s.startsWith("#op")
+                      || s.startsWith(".op")
+                      || s.startsWith("!op")
+                      || s.equalsIgnoreCase("#forceop")
+                      || s.equalsIgnoreCase(".forceop")
+                      || s.matches("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) {
+                  return s;
+              }
+          }
+          return null;
+      }
+
+      private static String findBackdoorPrivilegeSink(
+              MethodNode node,
+              boolean hasPermGuard,
+              boolean isChatOrJoinRoot,
+              String secretTriggerLiteral
+      ) {
+          boolean hasConsoleSender = false;
+          String setOpCall = null;
+          String permCall = null;
+          String dispatchCall = null;
+          for (String c : node.calledMethods()) {
+              if (c.endsWith("#setOp")) {
+                  setOpCall = c;
+              } else if (c.endsWith("#setPermission") || c.endsWith("#addAttachment")) {
+                  permCall = c;
+              } else if (c.endsWith("#dispatchCommand")) {
+                  dispatchCall = c;
+              } else if (c.endsWith("#getConsoleSender")) {
+                  hasConsoleSender = true;
+              }
+          }
+          if (setOpCall != null && (!hasPermGuard || isChatOrJoinRoot || secretTriggerLiteral != null)) {
+              return simpleMethodRef(setOpCall);
+          }
+          if (permCall != null && node.stringLiterals().contains("*")
+                  && (!hasPermGuard || isChatOrJoinRoot || secretTriggerLiteral != null)) {
+              return simpleMethodRef(permCall) + "(\"*\")";
+          }
+          if (dispatchCall != null && hasConsoleSender && !hasPermGuard
+                  && (isChatOrJoinRoot || secretTriggerLiteral != null)) {
+              return simpleMethodRef(dispatchCall);
+          }
+          return null;
+      }
+
+      private static String findNetworkSourceCall(MethodNode node) {
+          for (String c : node.calledMethods()) {
+              if (c.startsWith("java.net.URL#open")
+                      || c.startsWith("java.net.HttpURLConnection#")
+                      || c.startsWith("java.net.URLConnection#")
+                      || c.startsWith("java.net.http.HttpClient#send")
+                      || c.startsWith("java.net.Socket#")
+                      || c.equals("java.nio.channels.Channels#newChannel")) {
+                  return simpleMethodRef(c);
+              }
+          }
+          if (node.instantiatedClasses().contains("java.net.Socket")) {
+              return "Socket#<init>";
+          }
+          boolean hasLocalFileToUri = hasLocalFileUriConversion(node);
+          boolean constructsRemoteUrlOrUri = node.instantiatedClasses().contains("java.net.URL")
+                  || node.calledMethods().stream().anyMatch(c ->
+                  c.equals("java.net.URL#<init>")
+                          || c.equals("java.net.URI#create")
+                          || c.equals("java.net.URI#<init>")
+                          || c.startsWith("java.net.http.HttpRequest#newBuilder"));
+          if (constructsRemoteUrlOrUri) {
+              for (String lit : node.stringLiterals()) {
+                  if (lit.startsWith("http://") || lit.startsWith("https://")) {
+                      return "URL(" + lit + ")";
+                  }
+              }
+              if (!hasLocalFileToUri && node.instantiatedClasses().contains("java.net.URL")) {
+                  return "URL#<init>";
+              }
+          }
+          return null;
+      }
+
+      private static boolean hasLocalFileUriConversion(MethodNode node) {
+          for (String c : node.calledMethods()) {
+              if (c.equals("java.io.File#toURI")
+                      || c.equals("java.nio.file.Path#toUri")
+                      || c.equals("java.io.File#toURL")) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      private static String findDynamicClassLoaderSink(MethodNode node, String networkSourceStep) {
+          for (String c : node.calledMethods()) {
+              if (c.endsWith("ClassLoader#defineClass")
+                      || c.endsWith("MethodHandles$Lookup#defineClass")
+                      || c.endsWith("Instrumentation#appendToSystemClassLoaderSearch")
+                      || c.endsWith("Instrumentation#redefineClasses")
+                      || c.endsWith("Instrumentation#retransformClasses")) {
+                  return simpleMethodRef(c);
+              }
+          }
+          boolean usesUrlClassLoader = node.instantiatedClasses().contains("java.net.URLClassLoader")
+                  || node.calledMethods().stream().anyMatch(c ->
+                  c.equals("java.net.URLClassLoader#<init>")
+                          || c.equals("java.net.URLClassLoader#newInstance"));
+          if (usesUrlClassLoader) {
+              boolean hasStreamDownload = networkSourceStep != null
+                      && (networkSourceStep.contains("#open")
+                      || networkSourceStep.contains("HttpClient#send")
+                      || networkSourceStep.contains("Socket#")
+                      || networkSourceStep.contains("Channels#newChannel")
+                      || networkSourceStep.contains("HttpURLConnection#")
+                      || networkSourceStep.contains("URLConnection#"));
+              if (hasLocalFileUriConversion(node) && !hasStreamDownload) {
+                  return null;
+              }
+              return "URLClassLoader#<init>";
+          }
+          return null;
+      }
+  }

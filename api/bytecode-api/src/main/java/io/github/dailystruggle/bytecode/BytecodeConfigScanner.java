@@ -1,4 +1,4 @@
-package io.github.dailystruggle.rtp.common.bit.config.atlas;
+package io.github.dailystruggle.bytecode;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -52,7 +52,7 @@ public final class BytecodeConfigScanner {
     private static final int ACC_FINAL = 0x0010;
     private static final int ACC_ENUM = 0x4000;
 
-    /** Known configuration getter method names across Bukkit/Paper, Bungee, Velocity, NightConfig, and RTP. */
+    /** Known configuration getter method names across Bukkit/Paper, Bungee, Velocity, NightConfig, Mojang Codec, and RTP. */
     private static final Set<String> CONFIG_GETTER_METHODS = Set.of(
             "getBoolean", "getInt", "getLong", "getDouble", "getString",
             "getStringList", "getIntegerList", "getDoubleList", "getFloatList",
@@ -61,7 +61,8 @@ public final class BytecodeConfigScanner {
             "getConfigValue", "getNumber", "getOrDefault", "node",
             "getDuration", "getData", "resolveScalar", "parse",
             "parseSecondsDurationMillis", "parseDurationSetting",
-            "resolveCapacity", "resolveCapacityInt", "getProperty"
+            "resolveCapacity", "resolveCapacityInt", "getProperty",
+            "fieldOf", "optionalFieldOf"
     );
 
     /** Zero-arg methods that are generic JDK/framework helpers rather than config property accessors. */
@@ -291,148 +292,463 @@ public final class BytecodeConfigScanner {
             String superInternal = resolveClassName(superClass, classNameIdx, utf8Pool);
             boolean isEnum = (accessFlags & ACC_ENUM) != 0 || "java/lang/Enum".equals(superInternal);
 
-            int interfacesCount = in.readUnsignedShort();
-            in.skipBytes(interfacesCount * 2);
+              int interfacesCount = in.readUnsignedShort();
+              in.skipBytes(interfacesCount * 2);
 
-            // Scan fields for ACC_ENUM constants
-            int fieldsCount = in.readUnsignedShort();
-            List<String> enumConstants = new ArrayList<>();
-            for (int f = 0; f < fieldsCount; f++) {
-                int fieldFlags = in.readUnsignedShort();
-                int nameIndex = in.readUnsignedShort();
-                in.readUnsignedShort(); // descriptor_index
-                int attrsCount = in.readUnsignedShort();
-                for (int a = 0; a < attrsCount; a++) {
-                    in.readUnsignedShort(); // attr_name_index
-                    int attrLen = in.readInt();
-                    if (attrLen > 0) {
-                        in.skipBytes(attrLen);
-                    }
-                }
-                if ((fieldFlags & ACC_ENUM) != 0
-                        || (isEnum && (fieldFlags & (ACC_STATIC | ACC_FINAL)) == (ACC_STATIC | ACC_FINAL))) {
-                    String fName = safeUtf8(utf8Pool, nameIndex);
-                    if (fName != null && !fName.startsWith("$VALUES") && !fName.startsWith("ENUM$VALUES")) {
-                        enumConstants.add(fName);
-                    }
-                }
-            }
+              // Scan fields for ACC_ENUM constants and POJO/annotation config bindings
+              int fieldsCount = in.readUnsignedShort();
+              List<String> enumConstants = new ArrayList<>();
+              List<RawFieldDescriptor> rawFields = new ArrayList<>();
+              for (int f = 0; f < fieldsCount; f++) {
+                  int fieldFlags = in.readUnsignedShort();
+                  int nameIndex = in.readUnsignedShort();
+                  int descIndex = in.readUnsignedShort();
+                  String fName = safeUtf8(utf8Pool, nameIndex);
+                  String fDesc = safeUtf8(utf8Pool, descIndex);
+                  List<String> fieldAnnotationKeys = new ArrayList<>();
+                  boolean hasConfigFieldAnnotation = false;
+                  int attrsCount = in.readUnsignedShort();
+                  for (int a = 0; a < attrsCount; a++) {
+                      int attrNameIdx = in.readUnsignedShort();
+                      int attrLen = in.readInt();
+                      String attrName = safeUtf8(utf8Pool, attrNameIdx);
+                      if (("RuntimeVisibleAnnotations".equals(attrName) || "RuntimeInvisibleAnnotations".equals(attrName))
+                              && attrLen >= 2 && attrLen <= 65_536) {
+                          byte[] attrBytes = new byte[attrLen];
+                          in.readFully(attrBytes);
+                          if (parseAnnotationsAttribute(attrBytes, utf8Pool, fieldAnnotationKeys)) {
+                              hasConfigFieldAnnotation = true;
+                          }
+                      } else if (attrLen > 0) {
+                          in.skipBytes(attrLen);
+                      }
+                  }
+                  if ((fieldFlags & ACC_ENUM) != 0
+                          || (isEnum && (fieldFlags & (ACC_STATIC | ACC_FINAL)) == (ACC_STATIC | ACC_FINAL))) {
+                      if (fName != null && !fName.startsWith("$VALUES") && !fName.startsWith("ENUM$VALUES")) {
+                          enumConstants.add(fName);
+                      }
+                  } else if (!isEnum && fName != null && fDesc != null
+                          && (fieldFlags & ACC_STATIC) == 0
+                          && (fieldFlags & 0x1000 /* ACC_SYNTHETIC */) == 0
+                          && !fName.startsWith("this$")) {
+                      rawFields.add(new RawFieldDescriptor(fName, fDesc, hasConfigFieldAnnotation, fieldAnnotationKeys));
+                  }
+              }
 
-            // Scan methods and their Code attributes for call-site AST extraction
-            boolean hasOnDisable = false;
-            int methodsCount = in.readUnsignedShort();
-            Map<String, byte[]> methodCodeByName = new LinkedHashMap<>();
-            for (int m = 0; m < methodsCount; m++) {
-                in.readUnsignedShort(); // method_flags
-                int mNameIdx = in.readUnsignedShort();
-                in.readUnsignedShort(); // descriptor_index
-                String mName = safeUtf8(utf8Pool, mNameIdx);
-                if ("onDisable".equals(mName)) {
-                    hasOnDisable = true;
-                }
-                int attrsCount = in.readUnsignedShort();
-                for (int a = 0; a < attrsCount; a++) {
-                    int attrNameIdx = in.readUnsignedShort();
-                    int attrLen = in.readInt();
-                    String attrName = safeUtf8(utf8Pool, attrNameIdx);
-                    if ("Code".equals(attrName) && attrLen >= 8 && attrLen <= 262_144 && mName != null) {
-                        byte[] attrBytes = new byte[attrLen];
-                        in.readFully(attrBytes);
-                        int codeLen = ((attrBytes[4] & 0xFF) << 24)
-                                | ((attrBytes[5] & 0xFF) << 16)
-                                | ((attrBytes[6] & 0xFF) << 8)
-                                | (attrBytes[7] & 0xFF);
-                        if (codeLen > 0 && 8 + codeLen <= attrBytes.length) {
-                            byte[] code = new byte[codeLen];
-                            System.arraycopy(attrBytes, 8, code, 0, codeLen);
-                            String methodKey = methodCodeByName.containsKey(mName) ? (mName + "\0" + m) : mName;
-                            methodCodeByName.put(methodKey, code);
-                        }
-                    } else if (attrLen > 0) {
-                        in.skipBytes(attrLen);
-                    }
-                }
-            }
+              // Scan methods and their Code attributes for call-site AST extraction
+              boolean hasOnDisable = false;
+              int methodsCount = in.readUnsignedShort();
+              Map<String, byte[]> methodCodeByName = new LinkedHashMap<>();
+              for (int m = 0; m < methodsCount; m++) {
+                  in.readUnsignedShort(); // method_flags
+                  int mNameIdx = in.readUnsignedShort();
+                  in.readUnsignedShort(); // descriptor_index
+                  String mName = safeUtf8(utf8Pool, mNameIdx);
+                  if ("onDisable".equals(mName)) {
+                      hasOnDisable = true;
+                  }
+                  int attrsCount = in.readUnsignedShort();
+                  for (int a = 0; a < attrsCount; a++) {
+                      int attrNameIdx = in.readUnsignedShort();
+                      int attrLen = in.readInt();
+                      String attrName = safeUtf8(utf8Pool, attrNameIdx);
+                      if ("Code".equals(attrName) && attrLen >= 8 && attrLen <= 262_144 && mName != null) {
+                          byte[] attrBytes = new byte[attrLen];
+                          in.readFully(attrBytes);
+                          int codeLen = ((attrBytes[4] & 0xFF) << 24)
+                                  | ((attrBytes[5] & 0xFF) << 16)
+                                  | ((attrBytes[6] & 0xFF) << 8)
+                                  | (attrBytes[7] & 0xFF);
+                          if (codeLen > 0 && 8 + codeLen <= attrBytes.length) {
+                              byte[] code = new byte[codeLen];
+                              System.arraycopy(attrBytes, 8, code, 0, codeLen);
+                              String methodKey = methodCodeByName.containsKey(mName) ? (mName + "\0" + m) : mName;
+                              methodCodeByName.put(methodKey, code);
+                          }
+                      } else if (attrLen > 0) {
+                          in.skipBytes(attrLen);
+                      }
+                  }
+              }
 
-            // Inspect method references for config getters, saveConfig, and Enum.valueOf
-            boolean invokesConfigGetter = false;
-            boolean invokesSaveConfig = false;
-            Set<String> referencedEnums = new LinkedHashSet<>();
+              // Scan class-level attributes for @ConfigSerializable / @Configuration annotations
+              boolean hasClassConfigAnnotation = false;
+              if (in.available() >= 2) {
+                  int classAttrsCount = in.readUnsignedShort();
+                  for (int a = 0; a < classAttrsCount; a++) {
+                      if (in.available() < 6) {
+                          break;
+                      }
+                      int attrNameIdx = in.readUnsignedShort();
+                      int attrLen = in.readInt();
+                      String attrName = safeUtf8(utf8Pool, attrNameIdx);
+                      if (("RuntimeVisibleAnnotations".equals(attrName) || "RuntimeInvisibleAnnotations".equals(attrName))
+                              && attrLen >= 2 && attrLen <= 65_536 && in.available() >= attrLen) {
+                          byte[] attrBytes = new byte[attrLen];
+                          in.readFully(attrBytes);
+                          if (parseAnnotationsAttribute(attrBytes, utf8Pool, null)) {
+                              hasClassConfigAnnotation = true;
+                          }
+                      } else if (attrLen > 0 && in.available() >= attrLen) {
+                          in.skipBytes(attrLen);
+                      } else {
+                          break;
+                      }
+                  }
+              }
 
-            for (int i = 1; i < cpCount; i++) {
-                int nat = methodNatIdx[i];
-                if (nat <= 0 || nat >= cpCount) {
-                    continue;
-                }
-                String mName = safeUtf8(utf8Pool, natNameIdx[nat]);
-                String mDesc = safeUtf8(utf8Pool, natDescIdx[nat]);
-                String ownerInternal = resolveClassName(methodClassIdx[i], classNameIdx, utf8Pool);
-                if (mName == null) {
-                    continue;
-                }
-                if (CONFIG_GETTER_METHODS.contains(mName)) {
-                    invokesConfigGetter = true;
-                }
-                if ("saveConfig".equals(mName)) {
-                    invokesSaveConfig = true;
-                }
-                if ("valueOf".equals(mName) && mDesc != null && mDesc.startsWith("(Ljava/lang/String;)L")) {
-                    if (ownerInternal != null && !ownerInternal.startsWith("java/lang/")) {
-                        referencedEnums.add(ownerInternal.replace('/', '.'));
-                    }
-                }
-            }
+              // Inspect method references for config getters, saveConfig, and Enum.valueOf
+              boolean invokesConfigGetter = false;
+              boolean invokesSaveConfig = false;
+              Set<String> referencedEnums = new LinkedHashSet<>();
 
-            // Collect CONSTANT_String literals and *Keys/*Params enum field refs when the class interacts with config getters
-            Set<String> configKeys = new LinkedHashSet<>();
-            if (invokesConfigGetter) {
-                for (int i = 1; i < cpCount; i++) {
-                    int utfIdx = stringUtf8Idx[i];
-                    if (utfIdx > 0 && utfIdx < cpCount) {
-                        String literal = utf8Pool[utfIdx];
-                        if (isPlausibleConfigKeyLiteral(literal)) {
-                            configKeys.add(literal);
-                        }
-                    }
-                    String enumKey = resolveConfigEnumKey(i, fieldClassIdx, fieldNatIdx, classNameIdx, natNameIdx, utf8Pool);
-                    if (enumKey != null) {
-                        configKeys.add(enumKey);
-                    }
-                }
-            }
+              for (int i = 1; i < cpCount; i++) {
+                  int nat = methodNatIdx[i];
+                  if (nat <= 0 || nat >= cpCount) {
+                      continue;
+                  }
+                  String mName = safeUtf8(utf8Pool, natNameIdx[nat]);
+                  String mDesc = safeUtf8(utf8Pool, natDescIdx[nat]);
+                  String ownerInternal = resolveClassName(methodClassIdx[i], classNameIdx, utf8Pool);
+                  if (mName == null) {
+                      continue;
+                  }
+                  if (CONFIG_GETTER_METHODS.contains(mName)) {
+                      invokesConfigGetter = true;
+                  }
+                  if ("saveConfig".equals(mName)) {
+                      invokesSaveConfig = true;
+                  }
+                  if ("valueOf".equals(mName) && mDesc != null && mDesc.startsWith("(Ljava/lang/String;)L")) {
+                      if (ownerInternal != null && !ownerInternal.startsWith("java/lang/")) {
+                          referencedEnums.add(ownerInternal.replace('/', '.'));
+                      }
+                  }
+              }
 
-            MethodFlowScan flowScan = scanMethodFlowsAndCallSites(
-                    binaryClassName,
-                    invokesConfigGetter,
-                    methodCodeByName,
-                    utf8Pool,
-                    numericConstantPool,
-                    classNameIdx,
-                    stringUtf8Idx,
-                    fieldClassIdx,
-                    fieldNatIdx,
-                    methodClassIdx,
-                    methodNatIdx,
-                    natNameIdx,
-                    natDescIdx
-            );
+              // Collect CONSTANT_String literals and *Keys/*Params enum field refs when the class interacts with config getters
+              Set<String> configKeys = new LinkedHashSet<>();
+              if (invokesConfigGetter) {
+                  for (int i = 1; i < cpCount; i++) {
+                      int utfIdx = stringUtf8Idx[i];
+                      if (utfIdx > 0 && utfIdx < cpCount) {
+                          String literal = utf8Pool[utfIdx];
+                          if (isPlausibleConfigKeyLiteral(literal)) {
+                              configKeys.add(literal);
+                          }
+                      }
+                      String enumKey = resolveConfigEnumKey(i, fieldClassIdx, fieldNatIdx, classNameIdx, natNameIdx, utf8Pool);
+                      if (enumKey != null) {
+                          configKeys.add(enumKey);
+                      }
+                  }
+              }
 
-            return new ClassScanResult(
-                    binaryClassName,
-                    isEnum,
-                    enumConstants,
-                    configKeys,
-                    referencedEnums,
-                    hasOnDisable && invokesSaveConfig,
-                    flowScan.callSites(),
-                    flowScan.symbolReaders(),
-                    flowScan.methodSubsystems(),
-                    flowScan.symbolGuards()
-            );
-        } catch (IOException | RuntimeException e) {
-            return null;
-        }
-    }
+              MethodFlowScan flowScan = scanMethodFlowsAndCallSites(
+                      binaryClassName,
+                      invokesConfigGetter,
+                      methodCodeByName,
+                      utf8Pool,
+                      numericConstantPool,
+                      classNameIdx,
+                      stringUtf8Idx,
+                      fieldClassIdx,
+                      fieldNatIdx,
+                      methodClassIdx,
+                      methodNatIdx,
+                      natNameIdx,
+                      natDescIdx
+              );
+
+              Map<String, List<KeyCallSite>> mergedCallSites = new LinkedHashMap<>(flowScan.callSites());
+              boolean isConfigPojoClass = hasClassConfigAnnotation || isConfigPojoClassName(internalName, accessFlags, isEnum);
+              for (RawFieldDescriptor rf : rawFields) {
+                  if (!rf.hasAnnotation() && !isConfigPojoClass) {
+                      continue;
+                  }
+                  Set<String> fieldKeyCandidates = resolvePojoFieldKeys(rf);
+                  if (fieldKeyCandidates.isEmpty()) {
+                      continue;
+                  }
+                  String syntheticGetter = mapFieldDescriptorToGetter(rf.descriptor());
+                  String candidateEnum = extractCandidateEnumFromFieldDescriptor(rf.descriptor());
+                  List<String> fieldGuards = new ArrayList<>();
+                  if (candidateEnum != null) {
+                      referencedEnums.add(candidateEnum);
+                      addUniqueGuard(fieldGuards, "enum: " + candidateEnum);
+                  }
+                  for (String g : flowScan.symbolGuards().getOrDefault(rf.name(), List.of())) {
+                      addUniqueGuard(fieldGuards, g);
+                  }
+                  Set<String> downstream = new LinkedHashSet<>(flowScan.symbolReaders().getOrDefault(rf.name(), Set.of()));
+                  Set<String> subsystems = new LinkedHashSet<>();
+                  for (String readerRef : downstream) {
+                      int hash = readerRef.indexOf('#');
+                      if (hash > 0) {
+                          String rMethod = readerRef.substring(hash + 1);
+                          subsystems.addAll(flowScan.methodSubsystems().getOrDefault(rMethod, Set.of()));
+                      }
+                  }
+                  KeyCallSite pojoSite = new KeyCallSite(
+                          binaryClassName,
+                          "<field:" + rf.name() + ">",
+                          syntheticGetter,
+                          null,
+                          rf.name(),
+                          null,
+                          new ArrayList<>(downstream),
+                          new ArrayList<>(subsystems),
+                          fieldGuards
+                  );
+                  for (String fKey : fieldKeyCandidates) {
+                      configKeys.add(fKey);
+                      mergedCallSites.computeIfAbsent(fKey, k -> new ArrayList<>()).add(pojoSite);
+                  }
+              }
+
+              return new ClassScanResult(
+                      binaryClassName,
+                      isEnum,
+                      enumConstants,
+                      configKeys,
+                      referencedEnums,
+                      hasOnDisable && invokesSaveConfig,
+                      mergedCallSites,
+                      flowScan.symbolReaders(),
+                      flowScan.methodSubsystems(),
+                      flowScan.symbolGuards()
+              );
+          } catch (IOException | RuntimeException e) {
+              return null;
+          }
+      }
+
+      private record RawFieldDescriptor(
+              String name,
+              String descriptor,
+              boolean hasAnnotation,
+              List<String> explicitKeys
+      ) {
+      }
+
+      private static boolean isConfigPojoClassName(String internalName, int accessFlags, boolean isEnum) {
+          if (isEnum || (accessFlags & 0x0200 /* ACC_INTERFACE */) != 0
+                  || (accessFlags & 0x2000 /* ACC_ANNOTATION */) != 0
+                  || (accessFlags & 0x0400 /* ACC_ABSTRACT */) != 0) {
+              return false;
+          }
+          int slash = internalName.lastIndexOf('/');
+          String simple = slash >= 0 ? internalName.substring(slash + 1) : internalName;
+          int dollar = simple.lastIndexOf('$');
+          if (dollar >= 0 && dollar + 1 < simple.length()) {
+              simple = simple.substring(dollar + 1);
+          }
+          if ("YamlConfig".equals(simple) || "LlmHookConfig".equals(simple)) {
+              return false;
+          }
+          return simple.endsWith("Config") || simple.endsWith("Settings") || simple.endsWith("Configuration");
+      }
+
+      private static Set<String> resolvePojoFieldKeys(RawFieldDescriptor rf) {
+          Set<String> keys = new LinkedHashSet<>();
+          for (String ek : rf.explicitKeys()) {
+              if (isPlausibleConfigKeyLiteral(ek)) {
+                  keys.add(ek);
+                  addNormalizedCaseVariants(keys, ek);
+              }
+          }
+          if (keys.isEmpty() && isPlausibleConfigKeyLiteral(rf.name())) {
+              keys.add(rf.name());
+              addNormalizedCaseVariants(keys, rf.name());
+          }
+          return keys;
+      }
+
+      private static void addNormalizedCaseVariants(Set<String> out, String key) {
+          String kebab = camelToSeparated(key, '-');
+          if (!kebab.equals(key) && isPlausibleConfigKeyLiteral(kebab)) {
+              out.add(kebab);
+          }
+          String snake = camelToSeparated(key, '_');
+          if (!snake.equals(key) && isPlausibleConfigKeyLiteral(snake)) {
+              out.add(snake);
+          }
+      }
+
+      private static String camelToSeparated(String s, char sep) {
+          boolean hasUpper = false;
+          boolean hasLower = false;
+          for (int i = 0; i < s.length(); i++) {
+              char c = s.charAt(i);
+              if (Character.isUpperCase(c)) hasUpper = true;
+              else if (Character.isLowerCase(c)) hasLower = true;
+          }
+          if (!hasUpper || !hasLower) {
+              return s;
+          }
+          StringBuilder sb = new StringBuilder(s.length() + 4);
+          for (int i = 0; i < s.length(); i++) {
+              char c = s.charAt(i);
+              if (Character.isUpperCase(c)) {
+                  if (i > 0 && (Character.isLowerCase(s.charAt(i - 1)) || Character.isDigit(s.charAt(i - 1)))) {
+                      sb.append(sep);
+                  }
+                  sb.append(Character.toLowerCase(c));
+              } else {
+                  sb.append(c);
+              }
+          }
+          return sb.toString();
+      }
+
+      private static String mapFieldDescriptorToGetter(String fDesc) {
+          if (fDesc == null || fDesc.isEmpty()) {
+              return "getString";
+          }
+          return switch (fDesc) {
+              case "I", "S", "B", "Ljava/lang/Integer;", "Ljava/lang/Short;", "Ljava/lang/Byte;",
+                      "Ljava/util/concurrent/atomic/AtomicInteger;" -> "getInt";
+              case "J", "Ljava/lang/Long;", "Ljava/util/concurrent/atomic/AtomicLong;" -> "getLong";
+              case "D", "F", "Ljava/lang/Double;", "Ljava/lang/Float;" -> "getDouble";
+              case "Z", "Ljava/lang/Boolean;", "Ljava/util/concurrent/atomic/AtomicBoolean;" -> "getBoolean";
+              case "Ljava/lang/String;" -> "getString";
+              case "Ljava/util/List;", "Ljava/util/Set;", "Ljava/util/Collection;" -> "getStringList";
+              case "Ljava/util/Map;" -> "getConfigurationSection";
+              default -> fDesc.startsWith("[") ? "getStringList" : "getString";
+          };
+      }
+
+      private static String extractCandidateEnumFromFieldDescriptor(String fDesc) {
+          if (fDesc == null || !fDesc.startsWith("L") || !fDesc.endsWith(";") || fDesc.length() <= 2) {
+              return null;
+          }
+          String internal = fDesc.substring(1, fDesc.length() - 1);
+          if (internal.startsWith("java/") || internal.startsWith("javax/") || internal.startsWith("jdk/")
+                  || internal.startsWith("com/google/gson/") || internal.startsWith("com/fasterxml/jackson/")) {
+              return null;
+          }
+          return internal.replace('/', '.');
+      }
+
+      private static boolean parseAnnotationsAttribute(
+              byte[] attrBytes,
+              String[] utf8Pool,
+              List<String> extractedKeysOut
+      ) {
+          if (attrBytes == null || attrBytes.length < 2) {
+              return false;
+          }
+          int[] pos = new int[]{0};
+          int numAnnotations = readU2(attrBytes, pos);
+          boolean matchedConfigAnnotation = false;
+          for (int i = 0; i < numAnnotations && pos[0] < attrBytes.length; i++) {
+              if (parseSingleAnnotation(attrBytes, pos, utf8Pool, extractedKeysOut)) {
+                  matchedConfigAnnotation = true;
+              }
+          }
+          return matchedConfigAnnotation;
+      }
+
+      private static boolean parseSingleAnnotation(
+              byte[] attrBytes,
+              int[] pos,
+              String[] utf8Pool,
+              List<String> extractedKeysOut
+      ) {
+          if (pos[0] + 4 > attrBytes.length) {
+              pos[0] = attrBytes.length;
+              return false;
+          }
+          int typeIdx = readU2(attrBytes, pos);
+          int numPairs = readU2(attrBytes, pos);
+          String typeDesc = safeUtf8(utf8Pool, typeIdx);
+          boolean isKeyAnnotation = isSupportedFieldKeyAnnotation(typeDesc);
+          boolean isClassAnnotation = isSupportedClassConfigAnnotation(typeDesc);
+          for (int p = 0; p < numPairs && pos[0] < attrBytes.length; p++) {
+              if (pos[0] + 2 > attrBytes.length) {
+                  pos[0] = attrBytes.length;
+                  break;
+              }
+              int elemNameIdx = readU2(attrBytes, pos);
+              String elemName = safeUtf8(utf8Pool, elemNameIdx);
+              boolean captureString = isKeyAnnotation
+                      && extractedKeysOut != null
+                      && (elemName == null
+                              || "value".equals(elemName)
+                              || "name".equals(elemName)
+                              || "node".equals(elemName)
+                              || "key".equals(elemName)
+                              || "alternate".equals(elemName));
+              parseElementValue(attrBytes, pos, utf8Pool, captureString ? extractedKeysOut : null);
+          }
+          return isKeyAnnotation || isClassAnnotation;
+      }
+
+      private static void parseElementValue(
+              byte[] attrBytes,
+              int[] pos,
+              String[] utf8Pool,
+              List<String> captureOut
+      ) {
+          if (pos[0] >= attrBytes.length) {
+              return;
+          }
+          int tag = attrBytes[pos[0]++] & 0xFF;
+          switch ((char) tag) {
+              case 'B', 'C', 'D', 'F', 'I', 'J', 'S', 'Z', 'c' -> readU2(attrBytes, pos);
+              case 's' -> {
+                  int strUtfIdx = readU2(attrBytes, pos);
+                  if (captureOut != null) {
+                      String val = safeUtf8(utf8Pool, strUtfIdx);
+                      if (val != null && !val.isBlank() && !captureOut.contains(val.trim())) {
+                          captureOut.add(val.trim());
+                      }
+                  }
+              }
+              case 'e' -> {
+                  readU2(attrBytes, pos);
+                  readU2(attrBytes, pos);
+              }
+              case '@' -> parseSingleAnnotation(attrBytes, pos, utf8Pool, null);
+              case '[' -> {
+                  int numVals = readU2(attrBytes, pos);
+                  for (int i = 0; i < numVals && pos[0] < attrBytes.length; i++) {
+                      parseElementValue(attrBytes, pos, utf8Pool, captureOut);
+                  }
+              }
+              default -> pos[0] = attrBytes.length;
+          }
+      }
+
+      private static int readU2(byte[] bytes, int[] pos) {
+          if (pos[0] + 2 > bytes.length) {
+              pos[0] = bytes.length;
+              return 0;
+          }
+          int v = ((bytes[pos[0]] & 0xFF) << 8) | (bytes[pos[0] + 1] & 0xFF);
+          pos[0] += 2;
+          return v;
+      }
+
+      private static boolean isSupportedFieldKeyAnnotation(String typeDesc) {
+          if (typeDesc == null) return false;
+          return typeDesc.endsWith("/SerializedName;") || typeDesc.endsWith("$SerializedName;")
+                  || typeDesc.endsWith("/JsonProperty;") || typeDesc.endsWith("$JsonProperty;")
+                  || typeDesc.endsWith("/Setting;") || typeDesc.endsWith("$Setting;")
+                  || typeDesc.endsWith("/ConfigField;") || typeDesc.endsWith("$ConfigField;")
+                  || typeDesc.endsWith("/SerialEntry;") || typeDesc.endsWith("$SerialEntry;")
+                  || typeDesc.endsWith("/ConfigEntry;") || typeDesc.endsWith("$ConfigEntry;")
+                  || typeDesc.endsWith("/PropertyName;") || typeDesc.endsWith("$PropertyName;");
+      }
+
+      private static boolean isSupportedClassConfigAnnotation(String typeDesc) {
+          if (typeDesc == null) return false;
+          return typeDesc.endsWith("/ConfigSerializable;") || typeDesc.endsWith("$ConfigSerializable;")
+                  || typeDesc.endsWith("/Configuration;") || typeDesc.endsWith("$Configuration;")
+                  || typeDesc.endsWith("/Config;") || typeDesc.endsWith("$Config;")
+                  || typeDesc.endsWith("/ConfigData;") || typeDesc.endsWith("$ConfigData;");
+      }
 
     /**
      * Checks whether a constant-pool string literal looks like a valid configuration key path.
@@ -646,6 +962,7 @@ public final class BytecodeConfigScanner {
                 }
 
                 if (readSymbol != null) {
+                if (readSymbol != null) {
                     String guard = extractPostReadGuardPredicate(
                             readSymbol,
                             code,
@@ -664,6 +981,28 @@ public final class BytecodeConfigScanner {
                             gList.add(guard);
                         }
                     }
+                    List<String> optionGuards = new ArrayList<>();
+                    extractPostReadOptionGuards(
+                            code,
+                            pc + step,
+                            optionGuards,
+                            numericConstantPool,
+                            stringUtf8Idx,
+                            fieldNatIdx,
+                            methodClassIdx,
+                            methodNatIdx,
+                            classNameIdx,
+                            natNameIdx,
+                            natDescIdx,
+                            utf8Pool
+                    );
+                    if (!optionGuards.isEmpty()) {
+                        List<String> gList = symbolGuardsMap.computeIfAbsent(readSymbol, k -> new ArrayList<>());
+                        for (String og : optionGuards) {
+                            addUniqueGuard(gList, og);
+                        }
+                    }
+                }
                 }
 
                 pc += step;
@@ -778,10 +1117,21 @@ public final class BytecodeConfigScanner {
                                     addUniqueGuard(localGuards, "capacity >= 0 (memory-bounded)");
                                 }
                             } else if (getter != null && invokedName != null) {
+                                String invokedDesc = resolveMethodDesc(mCpIdx, methodNatIdx, natDescIdx, utf8Pool);
                                 if ("parseSecondsDurationMillis".equals(invokedName) || "parseDurationSetting".equals(invokedName)) {
                                     scalingHint = "*1000_MS (seconds -> ms)";
                                 } else if ("resolveCapacity".equals(invokedName) || "resolveCapacityInt".equals(invokedName)) {
                                     addUniqueGuard(localGuards, "capacity >= 0 (memory-bounded)");
+                                } else if (sOp == 0xB8 && "valueOf".equals(invokedName)
+                                        && invokedOwner != null && !isNonEnumValueOfOwner(invokedOwner)
+                                        && invokedDesc != null && invokedDesc.startsWith("(Ljava/lang/String;)L")) {
+                                    addUniqueGuard(localGuards, "enum: " + invokedOwner.replace('/', '.'));
+                                } else if ("java/lang/String".equals(invokedOwner)
+                                        && ("equals".equals(invokedName) || "equalsIgnoreCase".equals(invokedName))) {
+                                    String cmpLit = pushedConstAfterGetter != null ? pushedConstAfterGetter : preGetterConst;
+                                    if (isPlausibleOptionToken(cmpLit)) {
+                                        addUniqueGuard(localGuards, "match == " + cmpLit);
+                                    }
                                 } else if ("java/lang/Math".equals(invokedOwner)) {
                                     if ("max".equals(invokedName)) {
                                         String bound = preGetterConst != null ? preGetterConst : pushedConstAfterGetter;
@@ -804,6 +1154,27 @@ public final class BytecodeConfigScanner {
                             assignedField = resolveFieldName(fCpIdx, fieldNatIdx, natNameIdx, utf8Pool);
                             break;
                         } else if (getter != null && isLocalStoreOpcode(sOp)) {
+                            int storedSlot = extractLocalStoreSlot(sOp, code, scanPc);
+                            if (storedSlot >= 0) {
+                                String slotField = scanLocalSlotUsages(
+                                        code,
+                                        scanPc + sLen,
+                                        storedSlot,
+                                        localGuards,
+                                        numericConstantPool,
+                                        stringUtf8Idx,
+                                        fieldNatIdx,
+                                        methodClassIdx,
+                                        methodNatIdx,
+                                        classNameIdx,
+                                        natNameIdx,
+                                        natDescIdx,
+                                        utf8Pool
+                                );
+                                if (assignedField == null && slotField != null) {
+                                    assignedField = slotField;
+                                }
+                            }
                             break;
                         }
                         scanPc += sLen;
@@ -884,6 +1255,220 @@ public final class BytecodeConfigScanner {
 
     private static boolean isLocalStoreOpcode(int op) {
         return (op >= 0x36 && op <= 0x3A) || (op >= 0x3B && op <= 0x4E);
+    }
+
+    private static int extractLocalStoreSlot(int op, byte[] code, int pc) {
+        if (op >= 0x36 && op <= 0x3A) {
+            return pc + 1 < code.length ? (code[pc + 1] & 0xFF) : -1;
+        }
+        if (op >= 0x3B && op <= 0x4E) {
+            return (op - 0x3B) & 3;
+        }
+        return -1;
+    }
+
+    private static int extractAloadSlot(int op, byte[] code, int pc) {
+        if (op == 0x19) {
+            return pc + 1 < code.length ? (code[pc + 1] & 0xFF) : -1;
+        }
+        if (op >= 0x2A && op <= 0x2D) {
+            return op - 0x2A;
+        }
+        return -1;
+    }
+
+    private static int extractAstoreSlot(int op, byte[] code, int pc) {
+        if (op == 0x3A) {
+            return pc + 1 < code.length ? (code[pc + 1] & 0xFF) : -1;
+        }
+        if (op >= 0x4B && op <= 0x4E) {
+            return op - 0x4B;
+        }
+        return -1;
+    }
+
+    private static boolean isNonEnumValueOfOwner(String binaryOwner) {
+        if (binaryOwner == null || binaryOwner.isEmpty()) return true;
+        return switch (binaryOwner) {
+            case "java/lang/String", "java/lang/Integer", "java/lang/Long", "java/lang/Double",
+                    "java/lang/Float", "java/lang/Boolean", "java/lang/Short", "java/lang/Byte",
+                    "java/lang/Character", "java/math/BigDecimal", "java/math/BigInteger",
+                    "java/lang/Enum" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isPlausibleOptionToken(String literal) {
+        if (literal == null || literal.length() < 2 || literal.length() > 40) {
+            return false;
+        }
+        if ("true".equalsIgnoreCase(literal) || "false".equalsIgnoreCase(literal) || "null".equalsIgnoreCase(literal)) {
+            return false;
+        }
+        return literal.matches("^[A-Za-z][A-Za-z0-9_.:-]*$");
+    }
+
+    private static void extractPostReadOptionGuards(
+            byte[] code,
+            int startPc,
+            List<String> targetGuards,
+            String[] numericConstantPool,
+            int[] stringUtf8Idx,
+            int[] fieldNatIdx,
+            int[] methodClassIdx,
+            int[] methodNatIdx,
+            int[] classNameIdx,
+            int[] natNameIdx,
+            int[] natDescIdx,
+            String[] utf8Pool
+    ) {
+        int pc = startPc;
+        int steps = 0;
+        String pushedConst = null;
+        while (pc < code.length && steps < 6) {
+            int op = code[pc] & 0xFF;
+            int len = instructionLength(code, pc);
+            if (len <= 0) break;
+
+            String c = extractPushedConstant(code, pc, numericConstantPool, stringUtf8Idx, utf8Pool);
+            if (c != null) {
+                pushedConst = c;
+            } else if ((op == 0xB6 || op == 0xB8 || op == 0xB9) && pc + 2 < code.length) {
+                int mCpIdx = ((code[pc + 1] & 0xFF) << 8) | (code[pc + 2] & 0xFF);
+                String owner = resolveClassName(methodClassIdx[mCpIdx], classNameIdx, utf8Pool);
+                String name = resolveMethodName(mCpIdx, methodNatIdx, natNameIdx, utf8Pool);
+                String desc = resolveMethodDesc(mCpIdx, methodNatIdx, natDescIdx, utf8Pool);
+                if (op == 0xB8 && "valueOf".equals(name)
+                        && owner != null && !isNonEnumValueOfOwner(owner)
+                        && desc != null && desc.startsWith("(Ljava/lang/String;)L")) {
+                    addUniqueGuard(targetGuards, "enum: " + owner.replace('/', '.'));
+                } else if ("java/lang/String".equals(owner)
+                        && ("equals".equals(name) || "equalsIgnoreCase".equals(name))
+                        && isPlausibleOptionToken(pushedConst)) {
+                    addUniqueGuard(targetGuards, "match == " + pushedConst);
+                }
+            } else if (isLocalStoreOpcode(op) && steps <= 4) {
+                int slot = extractAstoreSlot(op, code, pc);
+                if (slot >= 0) {
+                    scanLocalSlotUsages(
+                            code,
+                            pc + len,
+                            slot,
+                            targetGuards,
+                            numericConstantPool,
+                            stringUtf8Idx,
+                            fieldNatIdx,
+                            methodClassIdx,
+                            methodNatIdx,
+                            classNameIdx,
+                            natNameIdx,
+                            natDescIdx,
+                            utf8Pool
+                    );
+                }
+                break;
+            }
+            pc += len;
+            steps++;
+        }
+    }
+
+    private static String scanLocalSlotUsages(
+            byte[] code,
+            int startPc,
+            int initialSlot,
+            List<String> targetGuards,
+            String[] numericConstantPool,
+            int[] stringUtf8Idx,
+            int[] fieldNatIdx,
+            int[] methodClassIdx,
+            int[] methodNatIdx,
+            int[] classNameIdx,
+            int[] natNameIdx,
+            int[] natDescIdx,
+            String[] utf8Pool
+    ) {
+        Set<Integer> trackedSlots = new LinkedHashSet<>();
+        trackedSlots.add(initialSlot);
+        String assignedField = null;
+        int slotLoadedStepsAgo = -1;
+        String recentStringConst = null;
+        int recentStringStepsAgo = -1;
+
+        int pc = startPc;
+        while (pc < code.length && !trackedSlots.isEmpty()) {
+            int op = code[pc] & 0xFF;
+            int len = instructionLength(code, pc);
+            if (len <= 0) break;
+
+            if (slotLoadedStepsAgo >= 0) {
+                slotLoadedStepsAgo++;
+                if (slotLoadedStepsAgo > 8) {
+                    slotLoadedStepsAgo = -1;
+                }
+            }
+            if (recentStringStepsAgo >= 0) {
+                recentStringStepsAgo++;
+                if (recentStringStepsAgo > 4) {
+                    recentStringStepsAgo = -1;
+                    recentStringConst = null;
+                }
+            }
+
+            int aloadSlot = extractAloadSlot(op, code, pc);
+            if (aloadSlot >= 0) {
+                if (trackedSlots.contains(aloadSlot)) {
+                    slotLoadedStepsAgo = 0;
+                } else if (aloadSlot != 0) {
+                    slotLoadedStepsAgo = -1;
+                }
+            } else if (isLocalStoreOpcode(op)) {
+                int astoreSlot = extractAstoreSlot(op, code, pc);
+                int anyStoreSlot = extractLocalStoreSlot(op, code, pc);
+                if (astoreSlot >= 0 && slotLoadedStepsAgo >= 0 && slotLoadedStepsAgo <= 6) {
+                    trackedSlots.add(astoreSlot);
+                    slotLoadedStepsAgo = -1;
+                } else if (anyStoreSlot >= 0 && trackedSlots.contains(anyStoreSlot)) {
+                    trackedSlots.remove(anyStoreSlot);
+                }
+            } else {
+                String c = extractPushedConstant(code, pc, numericConstantPool, stringUtf8Idx, utf8Pool);
+                if (c != null) {
+                    recentStringConst = c;
+                    recentStringStepsAgo = 0;
+                } else if ((op == 0xB3 || op == 0xB5) && pc + 2 < code.length
+                        && slotLoadedStepsAgo >= 0 && slotLoadedStepsAgo <= 3 && assignedField == null) {
+                    int fCpIdx = ((code[pc + 1] & 0xFF) << 8) | (code[pc + 2] & 0xFF);
+                    assignedField = resolveFieldName(fCpIdx, fieldNatIdx, natNameIdx, utf8Pool);
+                } else if ((op == 0xB6 || op == 0xB8 || op == 0xB9) && pc + 2 < code.length) {
+                    int mCpIdx = ((code[pc + 1] & 0xFF) << 8) | (code[pc + 2] & 0xFF);
+                    String owner = resolveClassName(methodClassIdx[mCpIdx], classNameIdx, utf8Pool);
+                    String name = resolveMethodName(mCpIdx, methodNatIdx, natNameIdx, utf8Pool);
+                    String desc = resolveMethodDesc(mCpIdx, methodNatIdx, natDescIdx, utf8Pool);
+                    if (name != null && CONFIG_GETTER_METHODS.contains(name)) {
+                        slotLoadedStepsAgo = -1;
+                    } else if (slotLoadedStepsAgo >= 0 && slotLoadedStepsAgo <= 4) {
+                        if (op == 0xB8 && "valueOf".equals(name)
+                                && owner != null && !isNonEnumValueOfOwner(owner)
+                                && desc != null && desc.startsWith("(Ljava/lang/String;)L")) {
+                            addUniqueGuard(targetGuards, "enum: " + owner.replace('/', '.'));
+                        } else if ("java/lang/String".equals(owner)
+                                && ("equals".equals(name) || "equalsIgnoreCase".equals(name))
+                                && recentStringStepsAgo >= 0 && recentStringStepsAgo <= 3
+                                && isPlausibleOptionToken(recentStringConst)) {
+                            addUniqueGuard(targetGuards, "match == " + recentStringConst);
+                        } else if (("java/lang/String".equals(owner)
+                                && ("toLowerCase".equals(name) || "toUpperCase".equals(name)
+                                || "trim".equals(name) || "strip".equals(name)))
+                                || ("java/util/Objects".equals(owner) && "requireNonNull".equals(name))) {
+                            slotLoadedStepsAgo = 1;
+                        }
+                    }
+                }
+            }
+            pc += len;
+        }
+        return assignedField;
     }
 
     private static String extractPostReadGuardPredicate(
@@ -1097,7 +1682,7 @@ public final class BytecodeConfigScanner {
                 || combined.contains("processbuilder") || combined.contains("serversocket")) {
             return "Network/HttpSshTransport";
         }
-        if (combined.contains("rtpyamlconfig") || combined.contains("jarconfigscanner")
+        if (combined.contains("yamlconfig") || combined.contains("rtpyamlconfig") || combined.contains("jarconfigscanner")
                 || combined.contains("configbackups") || combined.contains("serverconfigatlas")) {
             return "ConfigAtlas/YamlWorkspace";
         }

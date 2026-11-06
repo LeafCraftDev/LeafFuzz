@@ -3,7 +3,6 @@ package io.github.dailystruggle.anvil;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -70,6 +69,13 @@ final class LcaSectionCodec {
     static final int[][] CURVE_TO_YZX = new int[4][SECTION_VOXELS];
     static final int[][] YZX_TO_CURVE = new int[4][SECTION_VOXELS];
     static final int[] YZX_TO_OCTANT6 = new int[SECTION_VOXELS];
+    /**
+     * Precomputed `(wordIdx << 12) | (bitShift << 6) | octant6` indexed by `[bits][yzx]` for
+     * `bits in 4..12`, eliminating two integer divisions (`yzx / entriesPerLong`,
+     * `yzx % entriesPerLong`) and a second array lookup (`YZX_TO_OCTANT6[yzx]`) per voxel in
+     * `decodeDeltaRoaringBlocks`.
+     */
+    static final int[][] YZX_BITS_TO_PACKED_LOC = new int[13][SECTION_VOXELS];
 
     /**
      * Per-worker thread-local scratch arena (`anvil-api-ADR-003` Section 5.5) avoiding heap
@@ -116,7 +122,12 @@ final class LcaSectionCodec {
         }
     }
 
+    @SuppressWarnings("java:S5164")
     private static final ThreadLocal<ScratchArena> SCRATCH = ThreadLocal.withInitial(ScratchArena::new);
+
+    static void clearThreadLocalScratch() {
+        SCRATCH.remove();
+    }
 
     /**
      * Extended Hamming `(72, 64)` SEC-DED syndrome tables (`anvil-api-ADR-003` Section 7.2).
@@ -252,10 +263,15 @@ final class LcaSectionCodec {
     };
     @SuppressWarnings({"unchecked", "rawtypes"})
     static final List<String>[] STATIC_CORE_SINGLETON_BIOMES = new List[STATIC_CORE_BIOMES.length];
+    static final int MODERN_PALETTE_DATA_VERSION = 5006;
+
     static final Map<String, Integer> STATIC_CORE_BIOME_TO_ID = new LinkedHashMap<>(128);
     static final byte[][] STATIC_CORE_STATE_NBT_BYTES = new byte[STATIC_CORE_STATES.length][];
     static final byte[][] STATIC_CORE_PROP_NBT_BYTES = new byte[STATIC_CORE_PROP_SUFFIXES.length][];
     static final byte[][] STATIC_CORE_STATE_PROP_NBT_CACHE = new byte[STATIC_CORE_STATES.length * 128][];
+    static final byte[][] STATIC_CORE_STATE_NBT_BYTES_MODERN = new byte[STATIC_CORE_STATES.length][];
+    static final byte[][] STATIC_CORE_PROP_NBT_BYTES_MODERN = new byte[STATIC_CORE_PROP_SUFFIXES.length][];
+    static final byte[][] STATIC_CORE_STATE_PROP_NBT_CACHE_MODERN = new byte[STATIC_CORE_STATES.length * 128][];
     static final byte[][] STATIC_CORE_BIOME_STRING_NBT_BYTES = new byte[STATIC_CORE_BIOMES.length][];
     static final byte[][] STATIC_CORE_SINGLE_BIOME_COMPOUND_NBT_BYTES = new byte[STATIC_CORE_BIOMES.length][];
 
@@ -281,7 +297,8 @@ final class LcaSectionCodec {
     static {
         for (int i = 0; i < STATIC_CORE_PROP_SUFFIXES.length; i++) {
             STATIC_CORE_PROP_TO_ID.put(STATIC_CORE_PROP_SUFFIXES[i], i);
-            STATIC_CORE_PROP_NBT_BYTES[i] = encodePropSuffixToNbtBytes(STATIC_CORE_PROP_SUFFIXES[i]);
+            STATIC_CORE_PROP_NBT_BYTES[i] = encodePropSuffixToNbtBytes(STATIC_CORE_PROP_SUFFIXES[i], false);
+            STATIC_CORE_PROP_NBT_BYTES_MODERN[i] = encodePropSuffixToNbtBytes(STATIC_CORE_PROP_SUFFIXES[i], true);
         }
         for (int i = 0; i < STATIC_CORE_STATES.length; i++) {
             String s = STATIC_CORE_STATES[i];
@@ -289,7 +306,8 @@ final class LcaSectionCodec {
             STATIC_CORE_BASE_NAMES[i] = base;
             STATIC_CORE_SINGLETON_PALETTES[i] = List.of(base);
             STATIC_CORE_STATE_TO_ID.put(s, i);
-            STATIC_CORE_STATE_NBT_BYTES[i] = encodeCanonicalStateToNbtCompoundBytes(base);
+            STATIC_CORE_STATE_NBT_BYTES[i] = encodeCanonicalStateToNbtCompoundBytes(base, false);
+            STATIC_CORE_STATE_NBT_BYTES_MODERN[i] = encodeCanonicalStateToNbtCompoundBytes(base, true);
         }
         for (int i = 0; i < STATIC_CORE_BIOMES.length; i++) {
             String b = STATIC_CORE_BIOMES[i];
@@ -328,7 +346,14 @@ final class LcaSectionCodec {
                     CURVE_TO_YZX[CURVE_H3][h3] = yzx;
                     YZX_TO_CURVE[CURVE_H3][yzx] = h3;
 
-                    YZX_TO_OCTANT6[yzx] = h3 >>> 6;
+                    int octant6 = h3 >>> 6;
+                    YZX_TO_OCTANT6[yzx] = octant6;
+                    for (int bits = 4; bits <= 12; bits++) {
+                        int entriesPerLong = 64 / bits;
+                        int wordIdx = yzx / entriesPerLong;
+                        int bitShift = (yzx % entriesPerLong) * bits;
+                        YZX_BITS_TO_PACKED_LOC[bits][yzx] = (wordIdx << 12) | (bitShift << 6) | octant6;
+                    }
                 }
             }
         }
@@ -336,7 +361,7 @@ final class LcaSectionCodec {
 
     @FunctionalInterface
     private interface ZstdCompressorInvoker {
-        byte[] compress(byte[] raw, int level) throws Throwable;
+        byte[] compress(byte[] raw, int level) throws ReflectiveOperationException;
     }
 
     private static final ZstdCompressorInvoker ZSTD_COMPRESSOR = resolveZstdCompressor();
@@ -641,9 +666,8 @@ final class LcaSectionCodec {
      */
     static long computeSuperblockChecksum64(byte[] buf, int offset) {
         long h = 0x9E3779B97F4A7C15L;
-        ByteBuffer bb = ByteBuffer.wrap(buf, offset, 56);
         for (int i = 0; i < 7; i++) {
-            long k = bb.getLong(offset + (i << 3));
+            long k = (long) LcaRegionReader.LONG_BE_VIEW.get(buf, offset + (i << 3));
             k *= 0xBF58476D1CE4E5B9L;
             k = Long.rotateLeft(k, 31);
             k *= 0x94D049BB133111EBL;
@@ -1492,10 +1516,10 @@ final class LcaSectionCodec {
             int packed = poolPacked[node];
             int adjGap = packed >>> 16;
             int lm1 = packed & 0xFFFF;
-            size44 += 1 + (adjGap >= 15 ? (adjGap - 15 < 240 ? 1 : 2) : 0) + (lm1 >= 15 ? varIntLen(lm1 - 15) : 0);
-            size62 += 1 + (adjGap >= 63 ? (adjGap - 63 < 240 ? 1 : 2) : 0) + (lm1 >= 3 ? varIntLen(lm1 - 3) : 0);
+            size44 += 1 + (adjGap >= 15 ? boundedGap240Len(adjGap - 15) : 0) + (lm1 >= 15 ? varIntLen(lm1 - 15) : 0);
+            size62 += 1 + (adjGap >= 63 ? boundedGap240Len(adjGap - 63) : 0) + (lm1 >= 3 ? varIntLen(lm1 - 3) : 0);
             if (tVox == rCount) {
-                sizeArr += (adjGap < 240) ? 1 : 2;
+                sizeArr += boundedGap240Len(adjGap);
             }
             node = poolNext[node];
         }
@@ -1570,6 +1594,10 @@ final class LcaSectionCodec {
             cur = poolNext[cur];
         }
         return pos;
+    }
+
+    private static int boundedGap240Len(int val) {
+        return val < 240 ? 1 : 2;
     }
 
     private static int writeBoundedGap240(byte[] dst, int pos, int val) {
@@ -2003,8 +2031,8 @@ final class LcaSectionCodec {
             int bits,
             int entriesPerLong
     ) throws CorruptRegionEntryException {
+        int[] yzxToLoc = (bits >= 4 && bits <= 12) ? YZX_BITS_TO_PACKED_LOC[bits] : null;
         long decodedOctreeMask64 = 0L;
-        int[] nextPos = new int[1];
         for (int p = 1; p < paletteLen; p++) {
             if (pos + 2 > limit) {
                 throw new CorruptRegionEntryException("CBIT T6: Truncated minority container header for p=" + p);
@@ -2020,8 +2048,14 @@ final class LcaSectionCodec {
                     throw new CorruptRegionEntryException("CBIT T6: Singleton index out of bounds: " + countOrIdx);
                 }
                 int yzx = curveToYzx[countOrIdx];
-                setPackedVoxel(packedBlockLongs, yzx, pLong, bits, entriesPerLong);
-                decodedOctreeMask64 |= (1L << YZX_TO_OCTANT6[yzx]);
+                if (yzxToLoc != null) {
+                    int loc = yzxToLoc[yzx];
+                    packedBlockLongs[loc >>> 12] |= pLong << ((loc >>> 6) & 63);
+                    decodedOctreeMask64 |= 1L << (loc & 63);
+                } else {
+                    setPackedVoxel(packedBlockLongs, yzx, pLong, bits, entriesPerLong);
+                    decodedOctreeMask64 |= (1L << YZX_TO_OCTANT6[yzx]);
+                }
             } else if (tag == TAG_BITMAP) {
                 if (pos + 512 > limit) {
                     throw new CorruptRegionEntryException("CBIT T6: Truncated TAG_BITMAP container");
@@ -2033,8 +2067,14 @@ final class LcaSectionCodec {
                     for (int bit = 0; bit < 8; bit++) {
                         if ((mask8 & (1 << bit)) != 0) {
                             int yzx = curveToYzx[base + bit];
-                            setPackedVoxel(packedBlockLongs, yzx, pLong, bits, entriesPerLong);
-                            decodedOctreeMask64 |= (1L << YZX_TO_OCTANT6[yzx]);
+                            if (yzxToLoc != null) {
+                                int loc = yzxToLoc[yzx];
+                                packedBlockLongs[loc >>> 12] |= pLong << ((loc >>> 6) & 63);
+                                decodedOctreeMask64 |= 1L << (loc & 63);
+                            } else {
+                                setPackedVoxel(packedBlockLongs, yzx, pLong, bits, entriesPerLong);
+                                decodedOctreeMask64 |= (1L << YZX_TO_OCTANT6[yzx]);
+                            }
                         }
                     }
                 }
@@ -2056,8 +2096,14 @@ final class LcaSectionCodec {
                         throw new CorruptRegionEntryException("CBIT T6: TAG_DELTA_ARRAY cursor overflow: " + cursor);
                     }
                     int yzx = curveToYzx[cursor++];
-                    setPackedVoxel(packedBlockLongs, yzx, pLong, bits, entriesPerLong);
-                    decodedOctreeMask64 |= (1L << YZX_TO_OCTANT6[yzx]);
+                    if (yzxToLoc != null) {
+                        int loc = yzxToLoc[yzx];
+                        packedBlockLongs[loc >>> 12] |= pLong << ((loc >>> 6) & 63);
+                        decodedOctreeMask64 |= 1L << (loc & 63);
+                    } else {
+                        setPackedVoxel(packedBlockLongs, yzx, pLong, bits, entriesPerLong);
+                        decodedOctreeMask64 |= (1L << YZX_TO_OCTANT6[yzx]);
+                    }
                 }
             } else {
                 boolean subMode62 = (countOrIdx & 0x2000) != 0;
@@ -2117,10 +2163,19 @@ final class LcaSectionCodec {
                         throw new CorruptRegionEntryException("CBIT T6: Delta-Roaring run cursor exceeded 4096 ("
                                 + (cursor + runLen) + ")");
                     }
-                    for (int k = 0; k < runLen; k++) {
-                        int yzx = curveToYzx[cursor++];
-                        setPackedVoxel(packedBlockLongs, yzx, pLong, bits, entriesPerLong);
-                        decodedOctreeMask64 |= (1L << YZX_TO_OCTANT6[yzx]);
+                    if (yzxToLoc != null) {
+                        int runEnd = cursor + runLen;
+                        while (cursor < runEnd) {
+                            int loc = yzxToLoc[curveToYzx[cursor++]];
+                            packedBlockLongs[loc >>> 12] |= pLong << ((loc >>> 6) & 63);
+                            decodedOctreeMask64 |= 1L << (loc & 63);
+                        }
+                    } else {
+                        for (int k = 0; k < runLen; k++) {
+                            int yzx = curveToYzx[cursor++];
+                            setPackedVoxel(packedBlockLongs, yzx, pLong, bits, entriesPerLong);
+                            decodedOctreeMask64 |= (1L << YZX_TO_OCTANT6[yzx]);
+                        }
                     }
                 }
             }
@@ -2287,12 +2342,11 @@ final class LcaSectionCodec {
                 Arrays.fill(blk2048, (byte) ((c << 4) | c));
             }
         } else if (blkMode == LIGHT_MODE_GRAY_PLANES) {
-            pos = decodeGrayPlanes(buf, pos, limit, CURVE_TO_YZX[CURVE_H3], arena);
+            decodeGrayPlanes(buf, pos, limit, CURVE_TO_YZX[CURVE_H3], arena);
             blk2048 = packLightNibbles(arena.skyLightNibbles);
         } else {
             if (pos + 2048 > limit) throw new CorruptRegionEntryException("CBIT: Truncated raw BlockLight");
             blk2048 = Arrays.copyOfRange(buf, pos, pos + 2048);
-            pos += 2048;
         }
 
         return new DecodedSection(
@@ -2447,13 +2501,20 @@ final class LcaSectionCodec {
     }
 
     static LinkedHashMap<String, Object> parseCanonicalStateToNbtCompound(String canonicalState) {
+        return parseCanonicalStateToNbtCompound(canonicalState, 0);
+    }
+
+    static LinkedHashMap<String, Object> parseCanonicalStateToNbtCompound(String canonicalState, int dataVersion) {
+        boolean modernKeys = dataVersion >= MODERN_PALETTE_DATA_VERSION;
+        String nameKey = modernKeys ? "id" : "Name";
+        String propsKey = modernKeys ? "properties" : "Properties";
         LinkedHashMap<String, Object> compound = new LinkedHashMap<>(4);
         int bracket = canonicalState.indexOf('[');
         if (bracket < 0 || !canonicalState.endsWith("]")) {
-            compound.put("Name", canonicalState);
+            compound.put(nameKey, canonicalState);
             return compound;
         }
-        compound.put("Name", canonicalState.substring(0, bracket));
+        compound.put(nameKey, canonicalState.substring(0, bracket));
         String propsStr = canonicalState.substring(bracket + 1, canonicalState.length() - 1);
         if (!propsStr.isEmpty()) {
             LinkedHashMap<String, Object> props = new LinkedHashMap<>();
@@ -2469,7 +2530,7 @@ final class LcaSectionCodec {
                 start = comma + 1;
             }
             if (!props.isEmpty()) {
-                compound.put("Properties", props);
+                compound.put(propsKey, props);
             }
         }
         return compound;
@@ -2537,6 +2598,7 @@ final class LcaSectionCodec {
             boolean nonVoxelRoot
     ) {}
 
+    @SuppressWarnings("java:S1199")
     static ResidualTailDecoded unpackResidualSectionAndNbt(
             byte[] frame, int fOff, int residualRelStart, int residualRelEnd, int minSectionY, int sectionCount
     ) throws IOException {
@@ -2811,6 +2873,7 @@ final class LcaSectionCodec {
         final List<String> biomes;
         final List<List<String>> singletonBiomePalettes;
         private volatile byte[][] stateNbtBytes;
+        private volatile byte[][] stateNbtBytesModern;
         private volatile byte[][] biomeStringNbtBytes;
         private volatile byte[][] singleBiomeCompoundNbtBytes;
 
@@ -2845,30 +2908,46 @@ final class LcaSectionCodec {
         }
 
         byte[][] ensureStateNbtBytes() {
-            byte[][] cur = this.stateNbtBytes;
+            return ensureStateNbtBytes(false);
+        }
+
+        byte[][] ensureStateNbtBytes(boolean modernKeys) {
+            byte[][] cur = modernKeys ? this.stateNbtBytesModern : this.stateNbtBytes;
             if (cur != null) {
                 return cur;
             }
             byte[][] built = new byte[canonicalStates.size()][];
-            this.stateNbtBytes = built;
+            if (modernKeys) {
+                this.stateNbtBytesModern = built;
+            } else {
+                this.stateNbtBytes = built;
+            }
             return built;
         }
 
         byte[] stateNbtBytesAt(int globalId) {
-            byte[][] arr = ensureStateNbtBytes();
+            return stateNbtBytesAt(globalId, false);
+        }
+
+        byte[] stateNbtBytesAt(int globalId, boolean modernKeys) {
+            byte[][] arr = ensureStateNbtBytes(modernKeys);
             byte[] b = arr[globalId];
             if (b == null) {
-                b = encodeCanonicalStateToNbtCompoundBytes(canonicalStates.get(globalId));
+                b = encodeCanonicalStateToNbtCompoundBytes(canonicalStates.get(globalId), modernKeys);
                 arr[globalId] = b;
             }
             return b;
         }
 
         byte[][] ensureAllStateNbtBytes() {
-            byte[][] arr = ensureStateNbtBytes();
+            return ensureAllStateNbtBytes(false);
+        }
+
+        byte[][] ensureAllStateNbtBytes(boolean modernKeys) {
+            byte[][] arr = ensureStateNbtBytes(modernKeys);
             for (int i = 0; i < arr.length; i++) {
                 if (arr[i] == null) {
-                    arr[i] = encodeCanonicalStateToNbtCompoundBytes(canonicalStates.get(i));
+                    arr[i] = encodeCanonicalStateToNbtCompoundBytes(canonicalStates.get(i), modernKeys);
                 }
             }
             return arr;
@@ -3878,7 +3957,30 @@ final class LcaSectionCodec {
     }
 
     private static byte[] encodeBaseStateBytesFromFrame(byte[] frame, int pos, int utfLen, boolean mcPrefix) {
+        return encodeBaseStateBytesFromFrame(frame, pos, utfLen, mcPrefix, false);
+    }
+
+    private static byte[] encodeBaseStateBytesFromFrame(
+            byte[] frame, int pos, int utfLen, boolean mcPrefix, boolean modernKeys) {
         int totalUtf = (mcPrefix ? 10 : 0) + utfLen;
+        if (modernKeys) {
+            byte[] out = new byte[7 + totalUtf + 1];
+            out[0] = Nbt.TAG_STRING;
+            out[1] = 0;
+            out[2] = 2;
+            out[3] = 'i';
+            out[4] = 'd';
+            out[5] = (byte) ((totalUtf >>> 8) & 0xFF);
+            out[6] = (byte) (totalUtf & 0xFF);
+            int dst = 7;
+            if (mcPrefix) {
+                System.arraycopy(MINECRAFT_COLON_UTF8, 0, out, dst, 10);
+                dst += 10;
+            }
+            System.arraycopy(frame, pos, out, dst, utfLen);
+            out[out.length - 1] = Nbt.TAG_END;
+            return out;
+        }
         byte[] out = new byte[9 + totalUtf + 1];
         out[0] = Nbt.TAG_STRING;
         out[1] = 0;
@@ -3900,13 +4002,17 @@ final class LcaSectionCodec {
     }
 
     static byte[] encodePropSuffixToNbtBytes(String propSuffix) {
+        return encodePropSuffixToNbtBytes(propSuffix, false);
+    }
+
+    static byte[] encodePropSuffixToNbtBytes(String propSuffix, boolean modernKeys) {
         String propsStr = propSuffix.substring(1, propSuffix.length() - 1);
         byte[] tmp = new byte[256];
         int p = 0;
         tmp[p++] = Nbt.TAG_COMPOUND;
         tmp[p++] = 0;
         tmp[p++] = 10;
-        byte[] propKey = "Properties".getBytes(StandardCharsets.UTF_8);
+        byte[] propKey = (modernKeys ? "properties" : "Properties").getBytes(StandardCharsets.UTF_8);
         System.arraycopy(propKey, 0, tmp, p, 10);
         p += 10;
         int start = 0;
@@ -3947,9 +4053,26 @@ final class LcaSectionCodec {
     }
 
     static byte[] encodeCanonicalStateToNbtCompoundBytes(String canonicalState) {
+        return encodeCanonicalStateToNbtCompoundBytes(canonicalState, false);
+    }
+
+    static byte[] encodeCanonicalStateToNbtCompoundBytes(String canonicalState, boolean modernKeys) {
         int bracket = canonicalState.indexOf('[');
         if (bracket < 0 || !canonicalState.endsWith("]")) {
             byte[] utf = canonicalState.getBytes(StandardCharsets.UTF_8);
+            if (modernKeys) {
+                byte[] out = new byte[7 + utf.length + 1];
+                out[0] = Nbt.TAG_STRING;
+                out[1] = 0;
+                out[2] = 2;
+                out[3] = 'i';
+                out[4] = 'd';
+                out[5] = (byte) ((utf.length >>> 8) & 0xFF);
+                out[6] = (byte) (utf.length & 0xFF);
+                System.arraycopy(utf, 0, out, 7, utf.length);
+                out[out.length - 1] = Nbt.TAG_END;
+                return out;
+            }
             byte[] out = new byte[9 + utf.length + 1];
             out[0] = Nbt.TAG_STRING;
             out[1] = 0;
@@ -3964,12 +4087,13 @@ final class LcaSectionCodec {
             out[out.length - 1] = Nbt.TAG_END;
             return out;
         }
-        byte[] baseNbt = encodeCanonicalStateToNbtCompoundBytes(canonicalState.substring(0, bracket));
+        byte[] baseNbt = encodeCanonicalStateToNbtCompoundBytes(canonicalState.substring(0, bracket), modernKeys);
         String suffix = canonicalState.substring(bracket);
         Integer propId = STATIC_CORE_PROP_TO_ID.get(suffix);
-        byte[] propNbt = (propId != null && STATIC_CORE_PROP_NBT_BYTES[propId] != null)
-                ? STATIC_CORE_PROP_NBT_BYTES[propId]
-                : encodePropSuffixToNbtBytes(suffix);
+        byte[][] propTable = modernKeys ? STATIC_CORE_PROP_NBT_BYTES_MODERN : STATIC_CORE_PROP_NBT_BYTES;
+        byte[] propNbt = (propId != null && propTable[propId] != null)
+                ? propTable[propId]
+                : encodePropSuffixToNbtBytes(suffix, modernKeys);
         return combineBaseStateAndPropNbt(baseNbt, propNbt);
     }
 
@@ -4000,6 +4124,18 @@ final class LcaSectionCodec {
             ParsedHeaderAndDict regionMeta,
             ScratchArena arena
     ) throws CorruptRegionEntryException {
+        return decodeSlabLocalPaletteForNbt(frame, fOff, startRel, limitRel, regionMeta, arena, false);
+    }
+
+    static SlabLocalPaletteNbt decodeSlabLocalPaletteForNbt(
+            byte[] frame,
+            int fOff,
+            int startRel,
+            int limitRel,
+            ParsedHeaderAndDict regionMeta,
+            ScratchArena arena,
+            boolean modernKeys
+    ) throws CorruptRegionEntryException {
         int pos = fOff + startRel;
         int limit = fOff + limitRel;
         int stateCount = readVarInt(frame, pos, limit);
@@ -4009,15 +4145,16 @@ final class LcaSectionCodec {
         }
         byte[][] stateNbt = new byte[stateCount][];
         int[] stateCoreIds = arena.sectionPaletteDictIds;
+        byte[][] coreStateTable = modernKeys ? STATIC_CORE_STATE_NBT_BYTES_MODERN : STATIC_CORE_STATE_NBT_BYTES;
         for (int i = 0; i < stateCount; i++) {
             if (pos >= limit) throw new CorruptRegionEntryException("CBIT T5: Truncated slab-local palette");
             int tag = frame[pos++] & 0xFF;
             if ((tag & 0x80) != 0 || (tag >= 0x60 && tag < 0x80)) {
                 int coreId = ((tag & 0x80) != 0) ? (tag & 0x7F) : (128 + (tag & 0x1F));
-                if (coreId >= STATIC_CORE_STATE_NBT_BYTES.length) {
+                if (coreId >= coreStateTable.length) {
                     throw new CorruptRegionEntryException("CBIT T5: Invalid static core token " + coreId);
                 }
-                stateNbt[i] = STATIC_CORE_STATE_NBT_BYTES[coreId];
+                stateNbt[i] = coreStateTable[coreId];
                 stateCoreIds[i] = coreId;
             } else {
                 int utfLen = readVarInt(frame, pos, limit);
@@ -4025,7 +4162,7 @@ final class LcaSectionCodec {
                 if (utfLen < 0 || pos + utfLen > limit) {
                     throw new CorruptRegionEntryException("CBIT T5: Truncated slab-local string");
                 }
-                stateNbt[i] = encodeBaseStateBytesFromFrame(frame, pos, utfLen, tag == 0x40);
+                stateNbt[i] = encodeBaseStateBytesFromFrame(frame, pos, utfLen, tag == 0x40, modernKeys);
                 stateCoreIds[i] = -1;
                 pos += utfLen;
             }
@@ -4075,6 +4212,8 @@ final class LcaSectionCodec {
 
         int propCount = readVarInt(frame, pos, limit);
         pos += varIntLen(propCount);
+        byte[][] corePropTable = modernKeys ? STATIC_CORE_PROP_NBT_BYTES_MODERN : STATIC_CORE_PROP_NBT_BYTES;
+        byte[][] coreStatePropCache = modernKeys ? STATIC_CORE_STATE_PROP_NBT_CACHE_MODERN : STATIC_CORE_STATE_PROP_NBT_CACHE;
         for (int k = 0; k < propCount; k++) {
             int stateIdx = readVarInt(frame, pos, limit);
             pos += varIntLen(stateIdx);
@@ -4084,20 +4223,20 @@ final class LcaSectionCodec {
             int tag = frame[pos++] & 0xFF;
             if ((tag & 0x80) != 0) {
                 int propId = tag & 0x7F;
-                if (propId >= STATIC_CORE_PROP_NBT_BYTES.length) {
+                if (propId >= corePropTable.length) {
                     throw new CorruptRegionEntryException("CBIT T5: Invalid static property suffix token " + propId);
                 }
                 int coreId = stateCoreIds[stateIdx];
                 if (coreId >= 0) {
                     int cacheIdx = (coreId << 7) | propId;
-                    byte[] cached = STATIC_CORE_STATE_PROP_NBT_CACHE[cacheIdx];
+                    byte[] cached = coreStatePropCache[cacheIdx];
                     if (cached == null) {
-                        cached = combineBaseStateAndPropNbt(stateNbt[stateIdx], STATIC_CORE_PROP_NBT_BYTES[propId]);
-                        STATIC_CORE_STATE_PROP_NBT_CACHE[cacheIdx] = cached;
+                        cached = combineBaseStateAndPropNbt(stateNbt[stateIdx], corePropTable[propId]);
+                        coreStatePropCache[cacheIdx] = cached;
                     }
                     stateNbt[stateIdx] = cached;
                 } else {
-                    stateNbt[stateIdx] = combineBaseStateAndPropNbt(stateNbt[stateIdx], STATIC_CORE_PROP_NBT_BYTES[propId]);
+                    stateNbt[stateIdx] = combineBaseStateAndPropNbt(stateNbt[stateIdx], corePropTable[propId]);
                 }
             } else {
                 int globalId = readVarInt(frame, pos, limit);
@@ -4105,7 +4244,7 @@ final class LcaSectionCodec {
                 if (regionMeta == null || globalId < 0 || globalId >= regionMeta.canonicalStates.size()) {
                     throw new CorruptRegionEntryException("CBIT T7: Slab-local globalStateId " + globalId + " out of range");
                 }
-                stateNbt[stateIdx] = regionMeta.stateNbtBytesAt(globalId);
+                stateNbt[stateIdx] = regionMeta.stateNbtBytesAt(globalId, modernKeys);
             }
         }
         return new SlabLocalPaletteNbt(stateNbt, biomeStrNbt, singleBiomeNbt, tmplNbt);
@@ -4271,6 +4410,7 @@ final class LcaSectionCodec {
      * `TAG_Compound` byte array without allocating intermediate `LinkedHashMap` or `NbtList` trees.
      * Returns `null` if the chunk contains an un-compacted `_lca_boundary_` tag requiring map fallback.
      */
+    @SuppressWarnings({"java:S1168", "java:S1199"})
     static byte[] encodeChunkFrameToNbtBytes(
             ParsedHeaderAndDict meta,
             byte[] frame,
@@ -4422,17 +4562,18 @@ final class LcaSectionCodec {
         byte[][] activeBiomeStrNbt;
         byte[][] activeSingleBiomeCompoundNbt;
         byte[][] activeBiomeTemplateNbt;
+        boolean modernKeys = chunkDataVersion >= MODERN_PALETTE_DATA_VERSION;
 
         if (hasSlabLocalPalette) {
             int paletteLimitRel = findFirstSectionRelStart(sectionRelStarts, sectionCount, residualRelStart);
             SlabLocalPaletteNbt localPal = decodeSlabLocalPaletteForNbt(
-                    frame, fOff, sectionDirEnd, paletteLimitRel, meta, arena);
+                    frame, fOff, sectionDirEnd, paletteLimitRel, meta, arena, modernKeys);
             activeStateNbt = localPal.stateNbtBytes;
             activeBiomeStrNbt = localPal.biomeStringNbtBytes;
             activeSingleBiomeCompoundNbt = localPal.singleBiomeCompoundNbtBytes;
             activeBiomeTemplateNbt = localPal.biomeTemplateNbtBytes;
         } else {
-            activeStateNbt = meta.ensureAllStateNbtBytes();
+            activeStateNbt = meta.ensureAllStateNbtBytes(modernKeys);
             activeBiomeStrNbt = meta.ensureBiomeStringNbtBytes();
             activeSingleBiomeCompoundNbt = meta.ensureSingleBiomeCompoundNbtBytes();
             activeBiomeTemplateNbt = new byte[0][];
@@ -4868,7 +5009,7 @@ final class LcaSectionCodec {
         } else if (blkMode == LIGHT_MODE_GRAY_PLANES) {
             System.arraycopy(BLOCK_LIGHT_2048_HEADER_NBT, 0, out, outPos, BLOCK_LIGHT_2048_HEADER_NBT.length);
             outPos += BLOCK_LIGHT_2048_HEADER_NBT.length;
-            pos = decodeGrayPlanesDirectToPacked2048(buf, pos, limit, CURVE_TO_YZX[CURVE_H3], out, outPos);
+            decodeGrayPlanesDirectToPacked2048(buf, pos, limit, CURVE_TO_YZX[CURVE_H3], out, outPos);
             outPos += 2048;
         } else {
             if (pos + 2048 > limit) throw new CorruptRegionEntryException("CBIT: Truncated raw BlockLight");
@@ -4876,7 +5017,6 @@ final class LcaSectionCodec {
             outPos += BLOCK_LIGHT_2048_HEADER_NBT.length;
             System.arraycopy(buf, pos, out, outPos, 2048);
             outPos += 2048;
-            pos += 2048;
         }
 
         out[outPos++] = Nbt.TAG_END; // End section compound
