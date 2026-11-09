@@ -5,6 +5,19 @@ plugins {
 group = 'net.leaf'
 version = '0.1.1'
 
+['compileClasspath', 'runtimeClasspath', 'testCompileClasspath', 'testRuntimeClasspath'].each { cfg ->
+    configurations.named(cfg) {
+        attributes {
+            attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 21)
+        }
+    }
+}
+
+tasks.named('compileJava', JavaCompile).configure {
+    sourceCompatibility = '17'
+    targetCompatibility = '17'
+}
+
 dependencies {
     api project(':resource:LeafFuzz:leaffuzz-common')
     implementation(project(':bukkit:bukkit-common')) { transitive = false }

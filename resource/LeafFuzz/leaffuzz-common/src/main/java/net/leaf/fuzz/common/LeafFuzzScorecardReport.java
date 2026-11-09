@@ -69,7 +69,7 @@ public record LeafFuzzScorecardReport(
         long elapsedMillis,
         ExecutionTelemetry telemetry,
         List<CausalFinding> causalFindings
-) {
+) implements io.github.dailystruggle.bit.config.FuzzDiagnosticSnapshotSource {
     /**
      * Verdict level for an individual QC stage or overall scorecard.
      */
@@ -1135,5 +1135,154 @@ public record LeafFuzzScorecardReport(
         }
         sb.append('"');
         return sb.toString();
+    }
+
+    @Override
+    public List<FuzzScorecardSummaryRecord> diagnosticFuzzScorecards() {
+        return List.of(new FuzzScorecardSummaryRecord(
+                targetName,
+                platformName,
+                serverVersion,
+                overallVerdict().name(),
+                stage1CommandSurfaceVerdict().name(),
+                stage2BoundaryFuzzVerdict().name(),
+                stage3StallAndExceptionVerdict().name(),
+                stage4MemoryRetentionVerdict().name(),
+                stage5CausalAuditVerdict().name(),
+                indexedJars,
+                auditedCommands,
+                defaultTierCommands,
+                episodesExecuted,
+                distinctArmsProbed
+        ));
+    }
+
+    @Override
+    public List<FuzzWiringFindingRecord> diagnosticFuzzWiringFindings() {
+        if (causalFindings == null || causalFindings.isEmpty()) {
+            return List.of();
+        }
+        List<FuzzWiringFindingRecord> out = new ArrayList<>(causalFindings.size());
+        for (CausalFinding cf : causalFindings) {
+            if (cf != null) {
+                out.add(toFuzzWiringFindingRecord(cf));
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    public static FuzzWiringFindingRecord toFuzzWiringFindingRecord(CausalFinding cf) {
+        String artifactName = cf.artifactName() == null || cf.artifactName().isBlank() ? "unknown" : cf.artifactName().trim();
+        StringBuilder slugSb = new StringBuilder(artifactName.length());
+        String lower = artifactName.toLowerCase(Locale.ROOT);
+        for (int i = 0; i < lower.length(); i++) {
+            char ch = lower.charAt(i);
+            if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+                slugSb.append(ch);
+            }
+        }
+        String slug = slugSb.toString();
+        String artifactId = "plugin:" + (slug.isEmpty() ? "unknown" : slug);
+        String configFilePath = "plugins/" + artifactName + "/config.yml";
+        String yamlKeyPath = extractYamlKeyPath(cf.entryPointSymbol(), cf.declaredSurface());
+        String summary = cf.causalDefect() + " — " + cf.clearsWhen();
+        return new FuzzWiringFindingRecord(
+                artifactId,
+                artifactName,
+                cf.kind().name(),
+                cf.confidenceTier().name(),
+                configFilePath,
+                yamlKeyPath,
+                cf.declaredSurface(),
+                summary
+        );
+    }
+
+    private static String extractYamlKeyPath(String entryPointSymbol, String declaredSurface) {
+        String raw = entryPointSymbol == null ? "" : entryPointSymbol.trim();
+        if (raw.startsWith("config:")) {
+            raw = raw.substring("config:".length()).trim();
+        }
+        if (!raw.isEmpty() && !raw.contains("#") && !raw.contains("/") && !raw.startsWith("<")) {
+            return raw;
+        }
+        String surf = declaredSurface == null ? "" : declaredSurface.trim();
+        int hash = surf.indexOf('#');
+        if (hash >= 0 && hash + 1 < surf.length()) {
+            return surf.substring(hash + 1).trim();
+        }
+        if (surf.startsWith("config.yml:")) {
+            return surf.substring("config.yml:".length()).trim();
+        }
+        return "";
+    }
+
+    @Override
+    public List<FuzzRuntimeHazardRecord> diagnosticFuzzRuntimeHazards() {
+        List<FuzzRuntimeHazardRecord> out = new ArrayList<>();
+        if (leastPrivilegeFindings != null) {
+            for (LeastPrivilegeFinding f : leastPrivilegeFindings) {
+                if (f == null) continue;
+                out.add(new FuzzRuntimeHazardRecord(
+                        f.suspectPluginOrJar(),
+                        "priv:" + f.nodeId(),
+                        "LEAST_PRIVILEGE",
+                        "WARN",
+                        "/" + f.nodeId(),
+                        f.findingKind() + " -> " + f.remediationCommand(),
+                        "commands.yml",
+                        f.nodeId()
+                ));
+            }
+        }
+        if (shrunkReproducers != null) {
+            for (DualAudienceMitigationReport r : shrunkReproducers) {
+                if (r == null) continue;
+                String cmd = r.minimalCommandSequence().isEmpty()
+                        ? r.signatureId()
+                        : String.join(" ; ", r.minimalCommandSequence());
+                out.add(new FuzzRuntimeHazardRecord(
+                        r.suspectJar(),
+                        r.signatureId(),
+                        "BOUNDARY_REPRODUCER",
+                        "FAIL",
+                        cmd,
+                        r.authorReproducerSummary(),
+                        "plugins/" + r.suspectJar() + "/config.yml",
+                        ""
+                ));
+            }
+        }
+        if (faultSignatures != null) {
+            for (FaultSignature sig : faultSignatures) {
+                if (sig == null) continue;
+                out.add(new FuzzRuntimeHazardRecord(
+                        sig.suspectJar(),
+                        sig.signatureId(),
+                        "MAIN_THREAD_HAZARD",
+                        "FAIL",
+                        sig.signatureId(),
+                        sig.topPluginFrame() + " (occurrences=" + sig.occurrences() + ")",
+                        "plugins/" + sig.suspectJar() + "/config.yml",
+                        ""
+                ));
+            }
+        }
+        if (retentionFindings != null) {
+            for (ClassRetentionFinding rf : retentionFindings) {
+                if (rf == null) continue;
+                out.add(new FuzzRuntimeHazardRecord(
+                        rf.owningJar(),
+                        "retention:" + rf.className(),
+                        "MEMORY_RETENTION",
+                        "FAIL",
+                        "quit_lt1s / post-GC checkpoint",
+                        rf.formatSummaryLine(),
+                        "plugins/" + rf.owningJar() + "/config.yml",
+                        ""
+                ));
+            }
+        }
+        return List.copyOf(out);
     }
 }

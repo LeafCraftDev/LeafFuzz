@@ -721,47 +721,21 @@ public final class NmsEmbeddedPlayerSession {
           try {
               ClassLoader cl = serverPlayer.getClass().getClassLoader();
               Object level = serverPlayer.getClass().getMethod("serverLevel").invoke(serverPlayer);
-              if (level == null) {
+              Object chunkSource = level != null
+                      ? level.getClass().getMethod("getChunkSource").invoke(level)
+                      : null;
+              if (chunkSource == null) {
                   return;
               }
               int[] off = step.targetBlockOffset();
               int bx = step.x() + off[0];
               int by = Math.max(-60, Math.min(310, step.y() + off[1]));
               int bz = step.z() + off[2];
-              Object chunkSource = level.getClass().getMethod("getChunkSource").invoke(level);
-              if (chunkSource == null) {
-                  return;
-              }
               Object loadedChunk = chunkSource.getClass()
                       .getMethod("getChunkNow", int.class, int.class)
                       .invoke(chunkSource, bx >> 4, bz >> 4);
-              if (loadedChunk == null) {
-                  return;
-              }
-              Class<?> blockPosCls = Class.forName("net.minecraft.core.BlockPos", true, cl);
-              Object pos = blockPosCls.getConstructor(int.class, int.class, int.class).newInstance(bx, by, bz);
-              Object origState = loadedChunk.getClass().getMethod("getBlockState", blockPosCls).invoke(loadedChunk, pos);
-              if (origState != null) {
-                  Class<?> blockStateCls = Class.forName(
-                          "net.minecraft.world.level.block.state.BlockState",
-                          true,
-                          cl
-                  );
-                  for (var m : loadedChunk.getClass().getMethods()) {
-                      if ("setBlockState".equals(m.getName())
-                              && m.getParameterCount() >= 2
-                              && m.getParameterTypes()[0].isAssignableFrom(blockPosCls)
-                              && m.getParameterTypes()[1].isAssignableFrom(blockStateCls)) {
-                          if (m.getParameterCount() == 2) {
-                              m.invoke(loadedChunk, pos, origState);
-                          } else if (m.getParameterCount() == 3 && m.getParameterTypes()[2] == boolean.class) {
-                              m.invoke(loadedChunk, pos, origState, false);
-                          } else if (m.getParameterCount() == 3 && m.getParameterTypes()[2] == int.class) {
-                              m.invoke(loadedChunk, pos, origState, 0);
-                          }
-                          break;
-                      }
-                  }
+              if (loadedChunk != null) {
+                  invokeLoadedChunkSetBlockState(cl, loadedChunk, bx, by, bz);
               }
           } catch (Throwable t) {
               if (oracle != null) {
@@ -770,6 +744,31 @@ public final class NmsEmbeddedPlayerSession {
                           : t;
                   oracle.recordThrowable(cause, "Reversible NMS block micro-skill exception");
               }
+          }
+      }
+
+      private static void invokeLoadedChunkSetBlockState(
+              ClassLoader cl,
+              Object loadedChunk,
+              int bx,
+              int by,
+              int bz
+      ) throws ReflectiveOperationException {
+          Class<?> blockPosCls = Class.forName("net.minecraft.core.BlockPos", true, cl);
+          Object pos = blockPosCls.getConstructor(int.class, int.class, int.class).newInstance(bx, by, bz);
+          Object origState = loadedChunk.getClass().getMethod("getBlockState", blockPosCls).invoke(loadedChunk, pos);
+          if (origState == null) {
+              return;
+          }
+          Class<?> blockStateCls = Class.forName("net.minecraft.world.level.block.state.BlockState", true, cl);
+          try {
+              loadedChunk.getClass()
+                      .getMethod("setBlockState", blockPosCls, blockStateCls, int.class)
+                      .invoke(loadedChunk, pos, origState, 0);
+          } catch (NoSuchMethodException e) {
+              loadedChunk.getClass()
+                      .getMethod("setBlockState", blockPosCls, blockStateCls, boolean.class)
+                      .invoke(loadedChunk, pos, origState, false);
           }
       }
 

@@ -22,7 +22,8 @@ import java.nio.file.Path;
  * @trace REQ-SLEUTH-FUZZ-005
  * @trace S-005
  */
-public final class PaperLeafFuzzPlugin extends JavaPlugin {
+public final class PaperLeafFuzzPlugin extends JavaPlugin
+        implements io.github.dailystruggle.bit.config.FuzzDiagnosticSnapshotSource {
 
     private BukkitPluginServerAccessor accessor;
     private LeafFuzzRuntime runtime;
@@ -116,5 +117,20 @@ public final class PaperLeafFuzzPlugin extends JavaPlugin {
 
     public PaperRestartCoordinator restartCoordinator() {
         return restartCoordinator;
+    }
+
+    @Override
+    public java.util.List<FuzzScorecardSummaryRecord> diagnosticFuzzScorecards() {
+        return runtime != null ? runtime.diagnosticFuzzScorecards() : java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<FuzzWiringFindingRecord> diagnosticFuzzWiringFindings() {
+        return runtime != null ? runtime.diagnosticFuzzWiringFindings() : java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<FuzzRuntimeHazardRecord> diagnosticFuzzRuntimeHazards() {
+        return runtime != null ? runtime.diagnosticFuzzRuntimeHazards() : java.util.List.of();
     }
 }

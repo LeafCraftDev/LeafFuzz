@@ -26,7 +26,7 @@ ASCII punctuation only, concrete benchmark numbers and honest caveats).
 
 I built it from the behavior fuzzer in [`LeafRTP`](../../../LeafRTP/docs/publishing/FRONT_PAGE.md) - the tool that caught the pre-3.3.0 disconnected-player retention bug in `LeafRTP` - so server owners and plugin authors can vet any plugin or update in three steps without external bot harnesses or heap profilers.
 
-One jar for Paper and Spigot (1.20+), Folia (1.21+), Fabric (1.21+), and NeoForge (1.21+), up to 26.3. It also runs from a terminal without a server for batch jar screening (`java -jar {{jar}} triage --input-dir <dir>`) or as a standalone load tester (`java -jar {{jar}} swarm ...`).
+One jar for Paper and Spigot (1.20+), Folia (1.21+), Fabric (26.1+), and NeoForge (26.1+). It also runs from a terminal without a server for batch jar screening (`java -jar {{jar}} triage --input-dir <dir>`) or as a standalone load tester (`java -jar {{jar}} swarm ...`).
 
 ![LeafFuzz 5-stage automated QC verification, 0.000% false-positive leak detection, and 500-player bot stress summary](../assets/leaffuzz-benchmark-comparison.png)
 
@@ -35,11 +35,11 @@ One jar for Paper and Spigot (1.20+), Folia (1.21+), Fabric (1.21+), and NeoForg
 **Vets one plugin, a list of plugins, or a staging server in one command (`/fuzz check target=<Name>`) - producing an in-game book scorecard (`/fuzz report`) and a Markdown report with ready-to-paste `LuckPerms` permission fixes and 1-line bug reproducers.**
 
 - [**Easy**](#install): 3-step workflow - drop `{{jar}}` into `plugins/` or `mods/`, run `/fuzz check target=<PluginOrMod>`, and read the in-game book scorecard (`/fuzz report`) or `reports/<target>-qc-report.md`.
-- [**Safe**](#how-it-works): built-in command denylist (`stop`, `restart`, `op`, `deop`, `ban`, `kick`, `reload`, `whitelist`, `save-all`), target-scoped isolation, and zero synchronous chunk loads.
+- [**Safe**](#how-it-works): built-in administrative command denylist, a disposable-marker gate for full `target=all` checks, target-scoped isolation, and zero synchronous chunk loads.
 - [**Permission scanner**](#features): finds every admin or state-changing command accidentally left open to non-op players across Bukkit and Brigadier trees, outputting ready-to-paste `LuckPerms` and `commands.yml` fixes.
 - [**Leak detector**](#performance): compares background post-GC memory snapshots against an idle control window to blame the exact `.jar` and Java class leaking departed player sessions while ignoring normal bounded caches.
 - [**Bot stress**](#features): spawns up to 500 synthetic in-game test players (`players=auto`) across `default` and `op` tiers to test player-only commands, GUI menu item-stealing bugs, movement, and mid-countdown disconnects.
-- [**One jar**](#install): runs on Paper, Spigot, Folia, Fabric, and NeoForge (1.20 to 26.3), plus standalone CLI batch triage (`java -jar {{jar}} triage`) and swarm mode (`java -jar {{jar}} swarm`).
+- [**One jar**](#install): runs on Paper/Spigot (1.20+), Folia (1.21+), Fabric/NeoForge (26.1+), plus standalone CLI batch triage (`java -jar {{jar}} triage`) and swarm mode (`java -jar {{jar}} swarm`).
 
 <details>
 <summary><b>More highlights</b></summary>
@@ -66,7 +66,7 @@ These work out of the box on a staging server or local test instance:
 
 ## Install
 
-**Requirements:** Paper or Spigot 1.20+, Folia 1.21+, Fabric 1.21+, or NeoForge 1.21+, up to 26.3. Java 17+ (Java 21+ on 1.20.5+, Java 25 on 26.x).
+**Requirements:** Paper or Spigot 1.20+, Folia 1.21+, Fabric or NeoForge 26.1+. Java 17+ (Java 21+ on 1.20.5+, Java 25 on 26.x).
 
 1. Drop `{{jar}}` into `plugins/` (Paper, Spigot, Folia) or `mods/` (Fabric, NeoForge) and start the server (or run `java -jar {{jar}} triage --input-dir <dir>` / `java -jar {{jar}} swarm` directly from a terminal).
 2. Run `/fuzz check target=<PluginOrModName>` (for example `/fuzz check target=RTP episodes=24` or `/fuzz check target=RTP,LeafSleep episodes=24`).
@@ -151,6 +151,13 @@ I built `{{name}}` to bring that exact workflow inside the server JVM in a singl
 
 ---
 
+## Server changes, data sharing, and scanner notes
+
+- **Whole-server checks:** With `check.requireDisposableForAll: true` (the default), a full `/fuzz check target=all` is refused unless `.bench-disposable` exists in the LeafFuzz data directory (`plugins/LeafFuzz/` on Paper/Folia or `config/leaffuzz/` on Fabric/NeoForge) or the server root. This is an explicit opt-in marker, not an ownership check; setting the option to `false` disables the guard.
+- **File changes:** A normal `/fuzz check` does not rename or rewrite other plugin or mod JARs. The separately opt-in multi-boot campaign can rename other JARs to `.jar.sleuth-disabled` and stop or restart the server according to its configured strategy. Back up the server and use a disposable staging copy for that campaign; `/fuzz reset scope=campaign` restores archived JARs.
+- **Optional AI calls:** `llmAudit.llmAuditEnabled` is `false` by default. When enabled with a provider, LeafFuzz may send the target plugin name, proven fault ID, top stack-frame name, minimized reproducer commands, lifecycle shape, and extracted Jminor causal slices to the configured Gemini, OpenAI-compatible, Anthropic, or Ollama endpoint. Use `llmAudit.llmEndpoint` and `llmAudit.llmApiKeyEnv` to control the endpoint and API key source; a remote provider receives the listed data.
+- **Why scanners may flag the JAR:** LeafFuzz includes static-analysis rule identifiers such as `SEC-FORCE-OP-BACKDOOR` and `SEC-COVERT-CLASSLOADER-DROPPER`, reflective NMS fake-player code, and a bundled Mineflayer harness. These are analyzer and test components; review the [source repository](https://github.com/DailyStruggle/RTP) when a scanner flags them.
+
 ## Commands, configuration, and FAQ
 
 Operational commands, permissions, configuration keys, common operator questions, and support channels:
@@ -184,8 +191,8 @@ Operational commands, permissions, configuration keys, common operator questions
 | `check.defaultEpisodes` | `250` | Default UCB1 episode count when `episodes=<n>` is omitted from `/fuzz check` (`1..100000`) |
 | `check.defaultPlayers` | `1` | Default concurrent player roster (`1..500`, or `"auto"` / `"ramp"` to ramp until unstable) |
 | `check.slowTickThresholdMs` | `100.0` | Main-thread tick duration threshold (ms) for slow-tick stall capture (`stall:`) |
-| `check.requireDisposableForAll` | `true` | Safety guard requiring confirmation before whole-server sweeps (`target=all`) |
-| `check.extraDenylist` | `[]` | Extra command prefixes excluded from fuzzing alongside `DEFAULT_DENYLIST` |
+| `check.requireDisposableForAll` | `true` | Requires `.bench-disposable` in the LeafFuzz data directory or server root before a full `target=all` check |
+| `check.extraDenylist` | `[]` | Extra command patterns merged with the shared denylist and blocked before synthetic dispatch; built-in dispatch additions include `save-all`, `save-off`, `timings`, and `spark` |
 | `campaign.restartStrategy` | `"AUTO"` | Multi-boot campaign restart strategy (`AUTO`, `NONE`, `SPIGOT_RESTART`, `SUPERVISOR_STOP`) |
 | `campaign.maxRestartRetries` | `3` | Maximum restart retries before isolating a crashing archive |
 | `llmAudit.llmAuditEnabled` | `false` | Optional AST-grounded LLM fault explanations and advisory causal chain audit (`OFF` by default) |
@@ -205,10 +212,10 @@ A: During Stage 2, `LeafFuzz` spawns in-JVM synthetic players across both `defau
 A: `LeafFuzz` uses explicit `name=value` parameter syntax so parameter order never causes silent misparses (for example `/fuzz check target=RTP episodes=24 players=auto` or `/fuzz check target=RTP stage=causal`), and also accepts `/fuzz check <Target> [episodes]` as a positional shorthand.
 
 **Q: Will `/fuzz check` accidentally run `/stop`, `/restart`, `/ban`, or `/op`?**
-A: No. An immutable built-in denylist (`stop`, `restart`, `reload`, `op`, `deop`, `ban`, `ban-ip`, `pardon`, `kick`, `whitelist`, `save-all`, `save-off`, `timings`, `spark`) blocks dangerous administrative commands at both command-discovery time and right before execution, and you can add custom prefixes under `check.extraDenylist` in `config.yml`.
+A: The built-in command-surface rules block administrative and state-mutating roots and subcommands, including stop/restart, operator changes, bans and pardons, whitelist changes, and tick controls. Before any synthetic command dispatch on Paper/Folia, Fabric, or NeoForge, LeafFuzz also blocks `save-all`, `save-off`, `timings`, and `spark`; add more command patterns under `check.extraDenylist` in `config.yml`.
 
 **Q: Does `LeafFuzz` make any outbound network connections or modify other plugin jars?**
-A: Not during normal use. `/fuzz check` is 100% read-only on `plugins/*.jar` and `mods/*.jar` (scanning zip headers and bytecode off-thread) and makes zero outbound network connections by default (`llmAudit.llmAuditEnabled` is `false` unless you explicitly configure an API key or local Ollama endpoint). Archive quarantine (`.jar.sleuth-disabled`) only runs if you explicitly start an opt-in multi-boot campaign, and `/fuzz reset scope=campaign` restores all archives immediately.
+A: The optional LLM feature makes no network calls while disabled; when enabled, the data sent to its configured provider is listed above. Ordinary checks do not rename other plugin or mod JARs, but the opt-in multi-boot campaign can rename them to `.jar.sleuth-disabled` and stop or restart the server; use it only on a backed-up disposable staging copy.
 
 </details>
 

@@ -430,17 +430,7 @@ public final class LeafFuzzPaperEpisodeRunner
             if (cleanCmd.isEmpty()) {
                 continue;
             }
-            // Enforce DEFAULT_DENYLIST safety check
-            String lower = cleanCmd.trim().toLowerCase(Locale.ROOT);
-            if (lower.equals("stop")
-                    || lower.startsWith("stop ")
-                    || lower.equals("restart")
-                    || lower.startsWith("restart ")
-                    || lower.startsWith("op ")
-                    || lower.startsWith("deop ")
-                    || lower.startsWith("ban")
-                    || lower.startsWith("kick ")
-                    || lower.startsWith("reload")) {
+            if (runtime.isDispatchDenied(cleanCmd)) {
                 continue;
             }
 
@@ -1975,17 +1965,23 @@ public final class LeafFuzzPaperEpisodeRunner
                     runtime.recordBlockSkillExecution();
                     observedTokens.add("effect:block_interact:" + selectedSkill);
                 }
-            } finally {
-                if (savedData != null) {
-                    try {
-                        targetBlock.setBlockData(savedData, false);
-                    } catch (Throwable ignored) {
-                    }
-                }
+              } finally {
+                  if (savedData != null) {
+                      try {
+                          targetBlock.setBlockData(savedData, false);
+                      } catch (Throwable restoreErr) {
+                          if (oracle != null) {
+                              oracle.recordThrowable(restoreErr, "Restore BlockData after micro-skill");
+                          }
+                      }
+                  }
+              }
+          } catch (Throwable t) {
+              if (oracle != null) {
+                  oracle.recordThrowable(t, "Reversible world micro-skill (" + selectedSkill + ")");
+              }
             }
-        } catch (Throwable ignored) {
         }
-    }
 
     static int countMatchingMenuIconInPlayerInventory(
             Player player,

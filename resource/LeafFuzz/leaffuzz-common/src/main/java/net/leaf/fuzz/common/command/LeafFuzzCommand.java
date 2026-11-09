@@ -362,7 +362,7 @@ public final class LeafFuzzCommand implements TreeCommand {
             super(
                     "check",
                     "leaffuzz.admin",
-                    "Run the 4-stage automated QC pass (or a specific stage via stage=).",
+                    "Run the 5-stage automated QC pass (or a specific stage via stage=).",
                     parent
             );
             addParameter("target", createTargetParameter());
@@ -399,6 +399,15 @@ public final class LeafFuzzCommand implements TreeCommand {
         }
 
         private boolean executeFullQcPass(UUID callerId, String target, int episodes, int players) {
+            Optional<String> guardRejection = runtime.disposableGuardRejection(target);
+            if (guardRejection.isPresent()) {
+                String message = runtime.config().messages().badParameter()
+                        .replace("[param]", "target")
+                        .replace("[value]", target)
+                        + " " + guardRejection.get();
+                sendReply(callerId, message, true);
+                return true;
+            }
             if (!runtime.checkRunning().compareAndSet(false, true)) {
                 sendReply(callerId, runtime.config().messages().busy(), true);
                 return true;
@@ -409,7 +418,7 @@ public final class LeafFuzzCommand implements TreeCommand {
                         : Math.max(1, players) + " concurrent player(s)";
                 sendReply(
                         callerId,
-                        "&7Running 4-stage QC check for [&a" + target + "&7] (&f" + episodes
+                        "&7Running 5-stage QC check for [&a" + target + "&7] (&f" + episodes
                                 + " &7episodes, &b" + playerDesc
                                 + " &7across tick-paced batches + post-GC retention screen)...",
                         false
@@ -435,7 +444,7 @@ public final class LeafFuzzCommand implements TreeCommand {
                                         BookMenuSpec.Fragment.plain(" "),
                                         BookMenuSpec.Fragment.runCommand(
                                                 "&b&l[↻ Re-Run Check]",
-                                                "&eRe-run 4-stage QC check for &f" + card.targetName() + "\n&a/" + name + " check target=" + card.targetName(),
+                                                "&eRe-run 5-stage QC check for &f" + card.targetName() + "\n&a/" + name + " check target=" + card.targetName(),
                                                 "/" + name + " check target=" + card.targetName()
                                         )
                                 ));

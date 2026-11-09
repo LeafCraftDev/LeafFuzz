@@ -28,21 +28,33 @@ java {
 
 dependencies {
     implementation project(':resource:LeafFuzz:leaffuzz-common')
-    api project(':resource:LeafFuzz:leaffuzz-paper')
+    implementation(project(':resource:LeafFuzz:leaffuzz-paper')) { transitive = false }
     implementation(project(':bukkit:bukkit-common')) { transitive = false }
 
     if (findProject(':resource:LeafFuzz:leaffuzz-fabric') != null) {
-        api(project(':resource:LeafFuzz:leaffuzz-fabric')) { transitive = false }
+        implementation(project(':resource:LeafFuzz:leaffuzz-fabric')) { transitive = false }
         implementation(project(':fabric:fabric-common-unobf')) { transitive = false }
         implementation(project(':effects-api:effects-api-fabric-unobf')) { transitive = false }
     }
     if (findProject(':resource:LeafFuzz:leaffuzz-neoforge') != null) {
-        api(project(':resource:LeafFuzz:leaffuzz-neoforge')) { transitive = false }
+        implementation(project(':resource:LeafFuzz:leaffuzz-neoforge')) { transitive = false }
         implementation(project(':neoforge:neoforge-v26_1_R1')) { transitive = false }
         implementation(project(':neoforge:neoforge-common')) { transitive = false }
     }
-}
 
+    // Register only the LeafFuzz carrier/common jars as UnusedTracker roots without
+    // recursing into leaffuzz-common's upstream ProjectDependency api graph.
+    api files({
+        [
+                rootProject.project(':resource:LeafFuzz:leaffuzz-common'),
+                rootProject.project(':resource:LeafFuzz:leaffuzz-paper'),
+                rootProject.findProject(':resource:LeafFuzz:leaffuzz-fabric'),
+                rootProject.findProject(':resource:LeafFuzz:leaffuzz-neoforge'),
+        ].findAll { it != null }.collect { p ->
+            p.tasks.named('jar').get().archiveFile.get().asFile
+        }
+    })
+}
 shadowJar {
     archiveBaseName.set('LeafFuzz')
     archiveClassifier.set('')
@@ -64,11 +76,15 @@ shadowJar {
     exclude 'org/jetbrains/annotations/**'
     exclude 'org/intellij/lang/annotations/**'
     exclude 'META-INF/maven/**'
+    exclude 'META-INF/leaf-sdk/**'
     exclude 'META-INF/versions/*/module-info.class'
-
-    minimize {
-        exclude(project(':resource:LeafFuzz:leaffuzz-common'))
+    exclude { details ->
+        details.path.startsWith('io/github/dailystruggle/helpers/stresstestrtp/') &&
+                !details.name.startsWith('ConsoleWatcher') &&
+                !details.name.startsWith('LeakProbe')
     }
+
+    minimize()
 }
 
 tasks.named('jar') { enabled = false }

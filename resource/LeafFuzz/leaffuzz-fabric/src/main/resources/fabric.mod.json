@@ -6,7 +6,11 @@
   "description": "Cross-platform in-JVM QC, command-tree fuzzing, and post-GC memory leak screener.",
   "authors": ["leaf"],
   "license": "MIT",
-  "environment": "*",
+  "contact": {
+    "sources": "https://github.com/DailyStruggle/RTP",
+    "issues": "https://github.com/DailyStruggle/RTP/issues"
+  },
+  "environment": "server",
   "entrypoints": {
     "main": ["net.leaf.fuzz.fabric.FabricLeafFuzzMod"]
   },

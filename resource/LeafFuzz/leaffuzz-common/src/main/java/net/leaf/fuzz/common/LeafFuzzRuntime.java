@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
@@ -75,7 +76,7 @@ import java.util.logging.Level;
  * @trace S-005
  * @trace S-007
  */
-public final class LeafFuzzRuntime implements AutoCloseable {
+public final class LeafFuzzRuntime implements AutoCloseable, io.github.dailystruggle.bit.config.FuzzDiagnosticSnapshotSource {
 
     /** Sentinel value for {@code players=auto} / {@code players=ramp} capacity discovery. */
     public static final int AUTO_RAMP_PLAYERS = -1;
@@ -84,6 +85,13 @@ public final class LeafFuzzRuntime implements AutoCloseable {
             "leaffuzz",
             "leafsleuth",
             "stresstestrtp"
+    );
+
+    private static final List<String> LEAFFUZZ_DISPATCH_DENYLIST = List.of(
+            "save-all",
+            "save-off",
+            "timings",
+            "spark"
     );
 
     private final ServerAccessor accessor;
@@ -96,6 +104,8 @@ public final class LeafFuzzRuntime implements AutoCloseable {
     private final List<BotStepRecord> recentBotSteps = new CopyOnWriteArrayList<>();
 
     private volatile LeafFuzzConfig config = LeafFuzzConfig.defaults();
+    private volatile CommandSurfaceAuditor.Denylist dispatchDenylist =
+            new CommandSurfaceAuditor.Denylist(LEAFFUZZ_DISPATCH_DENYLIST);
     private volatile List<PersonaProfile> personaCatalog = PersonaPolicyBotActor.defaultPersonaCatalog();
     private volatile JarClassOwnershipIndex ownershipIndex = JarClassOwnershipIndex.empty();
     private volatile FuzzCampaignStateStore campaignStateStore;
@@ -180,6 +190,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
     public void load() {
         Path root = accessor.getRootFolder();
         this.config = LeafFuzzConfig.load(root);
+        refreshDispatchDenylist();
         this.faultOracle.setSlowTickThresholdMs(this.config.slowTickThresholdMs());
         this.campaignStateStore = FuzzCampaignStateStore.forDataFolder(root);
         if (root != null) {
@@ -1058,6 +1069,68 @@ public final class LeafFuzzRuntime implements AutoCloseable {
                 currentCausalGraphReports(),
                 sc == null ? List.of() : List.of(sc)
         );
+    }
+
+    @Override
+    public List<FuzzScorecardSummaryRecord> diagnosticFuzzScorecards() {
+        LeafFuzzScorecardReport sc = this.latestScorecard;
+        if (sc != null) {
+            return sc.diagnosticFuzzScorecards();
+        }
+        List<CausalGraphReport> reports = currentCausalGraphReports();
+        if (reports.isEmpty()) {
+            return List.of();
+        }
+        boolean hasCausalWarn = reports.stream()
+                .anyMatch(r -> r != null && r.findings() != null && !r.findings().isEmpty());
+        String s5 = hasCausalWarn ? "WARN" : "PASS";
+        return List.of(new FuzzScorecardSummaryRecord(
+                "all",
+                accessor != null ? accessor.getPlatform() : "paper",
+                accessor != null ? accessor.getServerVersion() : "unknown",
+                s5,
+                "PASS",
+                "PASS",
+                "PASS",
+                "PASS",
+                s5,
+                reports.size(),
+                0,
+                0,
+                0,
+                0
+        ));
+    }
+
+    @Override
+    public List<FuzzWiringFindingRecord> diagnosticFuzzWiringFindings() {
+        List<FuzzWiringFindingRecord> out = new ArrayList<>();
+        Set<String> seenKeys = new LinkedHashSet<>();
+        LeafFuzzScorecardReport sc = this.latestScorecard;
+        if (sc != null) {
+            for (FuzzWiringFindingRecord wf : sc.diagnosticFuzzWiringFindings()) {
+                if (wf != null && seenKeys.add(wf.artifactId() + "::" + wf.kind() + "::" + wf.declaredSurface())) {
+                    out.add(wf);
+                }
+            }
+        }
+        for (CausalGraphReport report : currentCausalGraphReports()) {
+            if (report == null || report.findings() == null) continue;
+            for (CausalFinding cf : report.findings()) {
+                if (cf == null) continue;
+                FuzzWiringFindingRecord wf = LeafFuzzScorecardReport.toFuzzWiringFindingRecord(cf);
+                if (seenKeys.add(wf.artifactId() + "::" + wf.kind() + "::" + wf.declaredSurface())) {
+                    out.add(wf);
+                }
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    @Override
+    public List<FuzzRuntimeHazardRecord> diagnosticFuzzRuntimeHazards() {
+        LeafFuzzScorecardReport sc = this.latestScorecard;
+        return sc != null ? sc.diagnosticFuzzRuntimeHazards() : List.of();
     }
 
     /**
@@ -2107,7 +2180,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
     }
 
     /**
-     * Executes the 4-stage automated QC check ({@code /fuzz check <target>}) across one or more
+     * Executes the 5-stage automated QC check ({@code /fuzz check <target>}) across one or more
      * target plugins/mods (comma-separated or {@code "all"}) and writes the Markdown scorecard
      * to {@code <rootFolder>/reports/<target>-qc-report.md}.
      *
@@ -2120,7 +2193,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
     }
 
     /**
-     * Executes the 4-stage automated QC check ({@code /fuzz check <target>}) with a concurrent
+     * Executes the 5-stage automated QC check ({@code /fuzz check <target>}) with a concurrent
      * player survival roster of {@code players} simultaneous online bots dispersed across an
      * Archimedean spiral ({@code S-005}).
      *
@@ -2130,6 +2203,10 @@ public final class LeafFuzzRuntime implements AutoCloseable {
      * @return completed {@link LeafFuzzScorecardReport}
      */
     public LeafFuzzScorecardReport runQcCheck(String targetFilter, int episodes, int players) {
+        Optional<String> guardRejection = disposableGuardRejection(targetFilter);
+        if (guardRejection.isPresent()) {
+            throw new IllegalStateException(guardRejection.get());
+        }
         long t0 = System.currentTimeMillis();
         String effTarget = (targetFilter == null || targetFilter.isBlank()) ? "all" : targetFilter.trim();
         this.activeTargetFilter = effTarget;
@@ -2286,7 +2363,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
     }
 
     /**
-     * Executes the 4-stage automated QC check asynchronously across server ticks when a platform
+     * Executes the 5-stage automated QC check asynchronously across server ticks when a platform
      * {@link io.github.dailystruggle.server.api.TaskScheduler} is available, running episode batches
      * on the main thread, allowing server ticks to advance between batches so delayed warmup/async
      * callbacks fire after {@code quit_lt1s}, and capturing post-GC {@link ClassRetentionScreener}
@@ -2306,7 +2383,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
     }
 
     /**
-     * Executes the 4-stage automated QC check asynchronously with a concurrent player survival
+     * Executes the 5-stage automated QC check asynchronously with a concurrent player survival
      * roster of {@code players} simultaneous online bots dispersed across an Archimedean spiral.
      *
      * @param targetFilter one or more comma-separated plugin/mod names or {@code "all"}
@@ -2320,6 +2397,10 @@ public final class LeafFuzzRuntime implements AutoCloseable {
             int players,
             Consumer<LeafFuzzScorecardReport> onComplete
     ) {
+        Optional<String> guardRejection = disposableGuardRejection(targetFilter);
+        if (guardRejection.isPresent()) {
+            throw new IllegalStateException(guardRejection.get());
+        }
         int rawPlayers = (players == 0) ? this.config.defaultPlayers() : players;
         boolean autoRamp = (rawPlayers == AUTO_RAMP_PLAYERS);
         int effPlayers = autoRamp
@@ -2638,17 +2719,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
             if (cleanCmd.isEmpty()) {
                 continue;
             }
-            // Double-check DEFAULT_DENYLIST before dispatching any command
-            String lower = cleanCmd.trim().toLowerCase(Locale.ROOT);
-            if (lower.equals("stop")
-                    || lower.startsWith("stop ")
-                    || lower.equals("restart")
-                    || lower.startsWith("restart ")
-                    || lower.startsWith("op ")
-                    || lower.startsWith("deop ")
-                    || lower.startsWith("ban")
-                    || lower.startsWith("kick ")
-                    || lower.startsWith("reload")) {
+            if (isDispatchDenied(cleanCmd)) {
                 continue;
             }
 
@@ -2940,6 +3011,7 @@ public final class LeafFuzzRuntime implements AutoCloseable {
             return errors;
         }
         this.config = LeafFuzzConfig.load(root);
+        refreshDispatchDenylist();
         this.faultOracle.setSlowTickThresholdMs(this.config.slowTickThresholdMs());
         refreshJarOwnershipIndexAsync();
         return List.of();
@@ -2951,6 +3023,52 @@ public final class LeafFuzzRuntime implements AutoCloseable {
 
     public LeafFuzzConfig config() {
         return config;
+    }
+
+    public boolean isDispatchDenied(String commandLine) {
+        return dispatchDenylist.matchCommandLine(commandLine, null).isPresent();
+    }
+
+    public Optional<String> disposableGuardRejection(String target) {
+        if (!config.requireDisposableForAll()
+                || !BrigadierDispatcherInspector.parseTargetSelectors(target).isEmpty()) {
+            return Optional.empty();
+        }
+        Path dataFolder = accessor.getRootFolder();
+        if (hasDisposableMarker(dataFolder)) {
+            return Optional.empty();
+        }
+        Path configOrPluginsDir = dataFolder != null ? dataFolder.toAbsolutePath().getParent() : null;
+        Path serverRoot = configOrPluginsDir != null ? configOrPluginsDir.getParent() : null;
+        String dataMarker = dataFolder == null
+                ? "<LeafFuzz data folder>/.bench-disposable"
+                : dataFolder.resolve(".bench-disposable").toString();
+        String rootMarker = serverRoot == null
+                ? "<server root>/.bench-disposable"
+                : serverRoot.resolve(".bench-disposable").toString();
+        return Optional.of(
+                "Whole-server checks require a disposable staging marker: create "
+                        + dataMarker + " or " + rootMarker + "."
+        );
+    }
+
+    private void refreshDispatchDenylist() {
+        List<String> entries = new ArrayList<>(LEAFFUZZ_DISPATCH_DENYLIST);
+        entries.addAll(config.extraDenylist());
+        dispatchDenylist = new CommandSurfaceAuditor.Denylist(entries);
+    }
+
+    private static boolean hasDisposableMarker(Path dataFolder) {
+        if (dataFolder == null) {
+            return false;
+        }
+        Path absoluteDataFolder = dataFolder.toAbsolutePath();
+        if (Files.isRegularFile(absoluteDataFolder.resolve(".bench-disposable"))) {
+            return true;
+        }
+        Path configOrPluginsDir = absoluteDataFolder.getParent();
+        Path serverRoot = configOrPluginsDir != null ? configOrPluginsDir.getParent() : null;
+        return serverRoot != null && Files.isRegularFile(serverRoot.resolve(".bench-disposable"));
     }
 
     public JarClassOwnershipIndex ownershipIndex() {

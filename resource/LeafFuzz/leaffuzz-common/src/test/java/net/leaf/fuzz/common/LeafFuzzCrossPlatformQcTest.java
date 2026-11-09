@@ -51,6 +51,7 @@ import java.util.zip.ZipOutputStream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -62,7 +63,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>Multi-format archive scanning in {@link JarClassOwnershipIndex} across Paper ({@code paper-plugin.yml}),
  *       Fabric ({@code fabric.mod.json}), and NeoForge ({@code META-INF/neoforge.mods.toml}).</li>
  *   <li>Reflective Brigadier command-tree extraction and target filtering in {@link BrigadierDispatcherInspector}.</li>
- *   <li>End-to-end 4-stage {@code /fuzz check <target>} execution, {@code ddmin} reproducer shrinking,
+ *   <li>End-to-end 5-stage {@code /fuzz check <target>} execution, {@code ddmin} reproducer shrinking,
  *       post-GC Bonferroni OLS leak screening, and Markdown scorecard export.</li>
  *   <li>{@link LeafFuzzBitSuite} PBIT/CBIT/IBIT self-test execution.</li>
  * </ul>
@@ -730,7 +731,7 @@ class LeafFuzzCrossPlatformQcTest {
 
     @Test
     @DisplayName("REQ-SLEUTH-FUZZ-004 & S-005: /fuzz check players=100 and players=auto disperse bots on an Archimedean spiral and ramp to instability without a special target")
-    void concurrentHundredPlayerSwarmAndRampToInstabilityWithoutTarget(@TempDir Path tempDir) {
+    void concurrentHundredPlayerSwarmAndRampToInstabilityWithoutTarget(@TempDir Path tempDir) throws IOException {
         // 1. Verify 100-player Archimedean spiral dispersion covers >= 85 distinct chunks
         java.util.Set<String> uniqueSpiralChunks = new java.util.HashSet<>();
         for (int i = 0; i < 100; i++) {
@@ -771,6 +772,7 @@ class LeafFuzzCrossPlatformQcTest {
 
         // 2. Stable 100-player survival run (`/fuzz check players=100` on target=all)
         runtime.setPlatformMsptSupplier(() -> 18.5);
+        Files.writeString(tempDir.resolve(".bench-disposable"), "disposable\n", StandardCharsets.UTF_8);
         LeafFuzzScorecardReport passCard = runtime.runQcCheck("all", 8, 100);
         assertEquals(100, passCard.telemetry().targetConcurrentPlayers());
         assertEquals(100, passCard.telemetry().peakConcurrentPlayers());
@@ -2089,6 +2091,12 @@ class LeafFuzzCrossPlatformQcTest {
         assertTrue(enrichedKernel.contains("lockCommandInConfig")
                         && enrichedKernel.contains("stageCommandsYmlOverride"),
                 "LeafFuzz UML tab kernel must expose 1-click lockCommandInConfig -> stageCommandsYmlOverride handoff");
+
+        assertEquals(1, scorecard.diagnosticFuzzScorecards().size());
+        assertEquals("FAIL", scorecard.diagnosticFuzzScorecards().get(0).overallVerdict());
+        assertEquals(1, scorecard.diagnosticFuzzWiringFindings().size());
+        assertEquals("CAUSAL_DEAD_CONFIG_KEY", scorecard.diagnosticFuzzWiringFindings().get(0).kind());
+        assertEquals(2, scorecard.diagnosticFuzzRuntimeHazards().size());
     }
 
     @Test
@@ -2148,6 +2156,75 @@ class LeafFuzzCrossPlatformQcTest {
                     "Stepping a 16-bot mixed explorer/builder swarm must execute mining/building micro-skills"
             );
             swarm.teardownAll();
+        }
+    }
+
+    @Test
+    @DisplayName("ADR-125 & leaffuzz-ADR-001: Runtime blocks dangerous dispatches and requires disposable opt-in for target=all")
+    void runtimeEnforcesDispatchDenylistAndDisposableGuard(@TempDir Path tempDir) throws IOException {
+        Path configPath = tempDir.resolve("config.yml");
+        Files.writeString(configPath, """
+                check:
+                  requireDisposableForAll: true
+                  extraDenylist:
+                    - "rtp secret"
+                """, StandardCharsets.UTF_8);
+        FakeServerAccessor accessor = new FakeServerAccessor(
+                tempDir,
+                new ArrayList<>(),
+                new AtomicReference<>()
+        );
+
+        try (LeafFuzzRuntime runtime = new LeafFuzzRuntime(accessor)) {
+            runtime.load();
+
+            assertTrue(runtime.isDispatchDenied("stop"));
+            assertTrue(runtime.isDispatchDenied("/minecraft:stop"));
+            assertTrue(runtime.isDispatchDenied("ban-ip player"));
+            assertTrue(runtime.isDispatchDenied("save-all"));
+            assertTrue(runtime.isDispatchDenied("save-off"));
+            assertTrue(runtime.isDispatchDenied("timings"));
+            assertTrue(runtime.isDispatchDenied("spark"));
+            assertTrue(runtime.isDispatchDenied("rtp secret"));
+            assertFalse(runtime.isDispatchDenied("rtp"));
+
+            assertTrue(runtime.disposableGuardRejection("all").isPresent());
+            assertTrue(runtime.disposableGuardRejection(null).isPresent());
+            assertTrue(runtime.disposableGuardRejection("*").isPresent());
+            assertTrue(runtime.disposableGuardRejection("ExamplePlugin,all").isPresent());
+            assertThrows(IllegalStateException.class, () -> runtime.runQcCheck("all", 1, 1));
+            assertThrows(IllegalStateException.class, () -> runtime.runQcCheckAsync("all", 1, 1, null));
+            assertTrue(runtime.disposableGuardRejection("ExamplePlugin").isEmpty());
+
+            Files.writeString(tempDir.resolve(".bench-disposable"), "disposable\n", StandardCharsets.UTF_8);
+            assertTrue(runtime.disposableGuardRejection("all").isEmpty());
+            Files.delete(tempDir.resolve(".bench-disposable"));
+
+            Files.writeString(configPath, """
+                    check:
+                      requireDisposableForAll: false
+                      extraDenylist:
+                        - "warp secret"
+                    """, StandardCharsets.UTF_8);
+            assertTrue(runtime.reloadAndValidate().isEmpty());
+            assertTrue(runtime.disposableGuardRejection("all").isEmpty());
+            assertFalse(runtime.isDispatchDenied("rtp secret"));
+            assertTrue(runtime.isDispatchDenied("warp secret"));
+        }
+
+        Path serverRoot = tempDir.resolve("server");
+        Path dataFolder = serverRoot.resolve("plugins").resolve("LeafFuzz");
+        Files.createDirectories(dataFolder);
+        FakeServerAccessor nestedAccessor = new FakeServerAccessor(
+                dataFolder,
+                new ArrayList<>(),
+                new AtomicReference<>()
+        );
+        try (LeafFuzzRuntime nestedRuntime = new LeafFuzzRuntime(nestedAccessor)) {
+            nestedRuntime.load();
+            assertTrue(nestedRuntime.disposableGuardRejection("all").isPresent());
+            Files.writeString(serverRoot.resolve(".bench-disposable"), "disposable\n", StandardCharsets.UTF_8);
+            assertTrue(nestedRuntime.disposableGuardRejection("all").isEmpty());
         }
     }
 }

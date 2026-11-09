@@ -23,8 +23,8 @@ Configuration files are generated on first server startup under `plugins/LeafFuz
 | `check.defaultEpisodes` | Integer | `250` | Default number of UCB1 synthetic persona bot episodes executed when `episodes=<n>` is omitted from `/fuzz check`. Valid range: `1..100000`. |
 | `check.defaultPlayers` | Integer \| String | `1` | Default concurrent player survival roster size (`1..500`, or `"auto"` / `"ramp"` to progressively ramp concurrent players until instability) dispersed across an Archimedean spiral when `players=` is omitted from `/fuzz check`. |
 | `check.slowTickThresholdMs` | Number | `100.0` | Main-thread tick duration threshold in milliseconds (`>= 10.0`) above which `LogAndStallSignatureOracle` captures a slow-tick stack trace (`stall:`) outside JVM GC pause windows. |
-| `check.requireDisposableForAll` | Boolean | `true` | Safety guard for whole-server sweeps (`target=all`). |
-| `check.extraDenylist` | List\<String\> | `[]` | Additional command prefixes excluded from Stage 2 fuzzing alongside the built-in `DEFAULT_DENYLIST` (`stop`, `restart`, `op`, `deop`, `ban`, `kick`, `reload`, `whitelist`, `save-all`). |
+| `check.requireDisposableForAll` | Boolean | `true` | Blocks full `target=all` checks unless `.bench-disposable` exists in the LeafFuzz data directory or server root; this marker is an explicit opt-in, not ownership verification. |
+| `check.extraDenylist` | List\<String\> | `[]` | Additional command patterns merged with the shared denylist and blocked before synthetic dispatch across Paper/Folia, Fabric, and NeoForge; dispatch also blocks `save-all`, `save-off`, `timings`, and `spark`. |
 | `campaign.restartStrategy` | String | `"AUTO"` | Multi-boot campaign restart strategy (`"AUTO"`, `"NONE"`, `"SPIGOT_RESTART"`, `"SUPERVISOR_STOP"`). |
 | `campaign.maxRestartRetries` | Integer | `3` | Maximum crash/restart retries (`1..20`) before `FuzzCampaignStateStore` halts or isolates a crashing archive. |
 | `llmAudit.llmAuditEnabled` | Boolean | `false` | Enables optional AST-grounded root-cause explanations and advisory `Jminor` causal chain auditing via `LlmCausalChainAuditor`. Makes zero network calls when `false`. |

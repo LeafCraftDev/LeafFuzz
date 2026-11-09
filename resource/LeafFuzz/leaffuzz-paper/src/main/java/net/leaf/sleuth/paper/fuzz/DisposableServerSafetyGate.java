@@ -11,9 +11,9 @@ import java.util.Objects;
  * Staging environment opt-in check for active in-JVM QA calibration campaigns
  * ({@code ADR-125}, {@code leafsleuth-ADR-006}).
  *
- * <p>Requires both a disposable-staging marker file ({@code plugins/LeafSleuth/.bench-disposable}
+ * <p>Requires both a disposable-staging marker file ({@code plugins/LeafFuzz/.bench-disposable}
  * or server-root {@code .bench-disposable}) and offline mode ({@code online-mode=false}) before
- * {@code /sleuth fuzz start} is permitted to execute synthetic command episodes.
+ * a staging stress run may execute synthetic command episodes.
  *
  * @governedBy ADR-125
  * @governedBy ADR-129
@@ -49,7 +49,7 @@ public final class DisposableServerSafetyGate {
     /**
      * Evaluates whether the server environment satisfies staging opt-in requirements.
      *
-     * @param pluginDataFolder {@code plugins/LeafSleuth} data directory
+     * @param pluginDataFolder {@code plugins/LeafFuzz} data directory
      * @param server           Bukkit/Paper server instance (nullable in headless tests)
      * @return {@link GateDecision} indicating whether active episodes are permitted
      */
@@ -68,7 +68,7 @@ public final class DisposableServerSafetyGate {
     /**
      * Evaluates whether {@code pluginDataFolder} and {@code onlineMode} satisfy staging opt-in requirements.
      *
-     * @param pluginDataFolder {@code plugins/LeafSleuth} data directory
+     * @param pluginDataFolder {@code plugins/LeafFuzz} data directory
      * @param onlineMode       whether {@code online-mode=true} is active on the server
      * @return {@link GateDecision} indicating whether active episodes are permitted
      */
@@ -76,7 +76,7 @@ public final class DisposableServerSafetyGate {
         if (!hasDisposableMarker(pluginDataFolder)) {
             return new GateDecision(
                     false,
-                    "Missing staging opt-in marker (create plugins/LeafSleuth/.bench-disposable on a disposable staging server)."
+                    "Missing staging opt-in marker (create plugins/LeafFuzz/.bench-disposable on a disposable staging server)."
             );
         }
         if (onlineMode) {
@@ -89,10 +89,10 @@ public final class DisposableServerSafetyGate {
     }
 
     /**
-     * Checks whether {@code plugins/LeafSleuth/.bench-disposable} or a server-root disposable
+     * Checks whether {@code plugins/LeafFuzz/.bench-disposable} or a server-root disposable
      * marker exists.
      *
-     * @param pluginDataFolder {@code plugins/LeafSleuth} directory
+     * @param pluginDataFolder {@code plugins/LeafFuzz} directory
      * @return {@code true} if a disposable marker file exists
      */
     public static boolean hasDisposableMarker(Path pluginDataFolder) {
