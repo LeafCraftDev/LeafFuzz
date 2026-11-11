@@ -2210,6 +2210,15 @@ class LeafFuzzCrossPlatformQcTest {
             assertTrue(runtime.disposableGuardRejection("all").isEmpty());
             assertFalse(runtime.isDispatchDenied("rtp secret"));
             assertTrue(runtime.isDispatchDenied("warp secret"));
+
+            Files.writeString(configPath, """
+                    check:
+                      defaultPlayers: invalid
+                    """, StandardCharsets.UTF_8);
+            assertEquals(
+                    List.of("config.yml:defaultPlayers must be in [1, 500] or 'auto'/'ramp'"),
+                    LeafFuzzConfig.validateDirectory(tempDir)
+            );
         }
 
         Path serverRoot = tempDir.resolve("server");

@@ -287,7 +287,12 @@ public record LeafFuzzConfig(
                 String rawPlayers = parseStringScalar(text, "defaultPlayers", "1");
                 String trimmedPlayers = rawPlayers == null ? "1" : rawPlayers.trim().toLowerCase(Locale.ROOT);
                 if (!"auto".equals(trimmedPlayers) && !"ramp".equals(trimmedPlayers)) {
-                    int players = parseIntScalar(text, "defaultPlayers", -999);
+                    int players;
+                    try {
+                        players = Integer.parseInt(trimmedPlayers);
+                    } catch (NumberFormatException ignored) {
+                        players = -999;
+                    }
                     if (players <= 0 || players > 500) {
                         errors.add("config.yml:defaultPlayers must be in [1, 500] or 'auto'/'ramp'");
                     }

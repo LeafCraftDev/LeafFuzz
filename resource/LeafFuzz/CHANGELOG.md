@@ -2,21 +2,28 @@
 
 All notable changes to `LeafFuzz` are documented in this file.
 
-## [0.1.1] - 2026-11-05
+## [Unreleased]
+
+## [0.1.1] - Unreleased
 
 ### Added
 - Headless Pass 1 zero-server static batch and single-submission triage CLI (`LeafFuzzBatchTriageRunner`: `java -jar LeafFuzz-0.1.1.jar triage (--input-dir <dir> | --jar <file.jar>) [--max-pass 200] [--threads <n>] [--out-json <f>] [--out-csv <f>] [--out-md <f>] [--fail-on-reject]`, alias `scan`) with `< 0.5%` empirical false-positive rate, composite delivery scoring, Folia/Fabric Jar-in-Jar causal tracing, constant-pool companion dependency inference (`Vault`, `PlaceholderAPI`, `WorldGuard`, `LuckPerms`), and deterministic `CONFIRMED_FOLIA_CLAIM_VIOLATION` / `CONFIRMED_MALICIOUS_BACKDOOR_SINK` rejection gates (`REQ-FUZZ-TRIAGE-001`..`004`).
 - In-memory per-slice BIT verification harness (`SliceBitHarness`, `LeafFuzzRuntime#auditSliceBit`, `FUZZ-CBIT-004`) executing isolated PBIT/CBIT/IBIT checks per causal slice via `EphemeralSliceClassLoader` and `InMemorySliceBitSession` without mutating `.jar` files on disk (`7/7 PASS` offline, `10/10 PASS` live).
-- Self-contained `LeafConfig` `Plugin UML` workspace tab and per-key `configKeyBadges` export (`LeafFuzzRuntime#buildLeafConfigWorkspaceExtension`, registered automatically in `PaperLeafFuzzPlugin` when `LeafConfig` is installed).
+- `:config-bit-api` `FuzzDiagnosticSnapshotSource` diagnostic telemetry implementation across `LeafFuzzRuntime`, `LeafFuzzScorecardReport`, and `PaperLeafFuzzPlugin` alongside the self-contained `LeafConfig` `Plugin UML` workspace tab and per-key `configKeyBadges` export (`LeafFuzzRuntime#buildLeafConfigWorkspaceExtension`, registered automatically in `PaperLeafFuzzPlugin` when `LeafConfig` is installed).
 - Dedicated `:bytecode-api` static 18-rule CWE, causal Folia runtime exception (`FOLIA_CAUSAL_EXCEPTION`), causal force-OP/backdoor and stage-2 classloader dropper (`SEC-FORCE-OP-BACKDOOR` / `CWE-269`, `SEC-COVERT-CLASSLOADER-DROPPER` / `CWE-494`), and cross-platform parity analyzers (`BytecodeCweAnalyzers`, `BytecodeParityAnalyzers`, `BytecodeCausalGraphScanner`, `SchemaInferrer`, `ServerConfigAtlas`) detecting shared-state concurrency hazards (`ClassSharedStateHazard`), synchronous I/O hops (`SyncIoHop`), and directed fuzz targets (`DirectedFuzzTarget`).
+- Reversible Stage 2 synthetic bot world-mutation micro-skills (`PersonaPolicyBotActor`, `LeafFuzzPaperEpisodeRunner`, `NmsEmbeddedPlayerSession`, `bench-swarm.js`) covering exploration (`rtp_or_anchor`), mining (`harvest_nearest`), and building (`place_wall_ring`) actions with automatic block-state restoration and fault oracle recording.
 - Bundled default `config.yml` and `messages.yml` resources in `leaffuzz-common` so fresh installs unpack complete commented defaults on first boot.
 
 ### Changed
 - Renamed Stage 5 from *"Claim-Delivery Audit"* (`stage=claims`, `auditClaimDelivery`, `stage5ClaimDeliveryVerdict`) to *"Bytecode & Config Causal Audit"* (`stage=causal`, `auditCausalDelivery`, `stage5CausalAuditVerdict`, `BytecodeCausalGraphScanner.CausalFinding`) across `/fuzz check stage=causal`, `/fuzz report` (`LeafFuzzMenuBuilder`), and exported scorecards (`LeafFuzzScorecardReport`), while retaining `stage=claims` as a backward-compatible alias in `LeafFuzzCommand`.
+- Enforced the `check.requireDisposableForAll` (default `true`) safety gate in `LeafFuzzRuntime` and `LeafFuzzCommand` across all platforms (`Paper`, `Spigot`, `Folia`, `Fabric`, `NeoForge`), blocking `target=all` / `*` whole-server fuzz runs unless an explicit `.bench-disposable` opt-in marker file is present in the `LeafFuzz` data directory or server root, and expanded the default synthetic dispatch denylist to block `save-all`, `save-off`, `timings`, and `spark` alongside `check.extraDenylist` patterns.
 - Shortened built-in synthetic persona prefixes (`LF_Expl`, `LF_Cmd`, `LF_Gui`, `LF_Red`, `LF_Sort`, `LF_Hop`, `LF_perm`, `LF_Idle`) and centralized indexed bot name formatting in `PersonaPolicyBotActor#actorName(int)` so multi-bot swarm names (`_1.._500`) never exceed Minecraft's 16-character username limit.
+- Aligned `leaffuzz-fabric` (`fabric.mod.json`), `leaffuzz-neoforge` (`neoforge.mods.toml`), and storefront documentation to the `MC 26.1+` official mod-loader baseline and compiled `leaffuzz-paper` to the Java 17 bytecode baseline (`classfile 61`, `ADR-113`).
 
 ### Fixed
 - Moved `/fuzz reset` (including `.jar.sleuth-disabled` campaign archive restoration) and `/fuzz reload` (`config.yml`, `messages.yml`, `personas.jsonl`, and JAR ownership re-indexing) onto `accessor.scheduler().runAsync(...)` so disk I/O never blocks the server tick thread (`S-005`).
+- Fixed `LeafFuzzConfig#validateDirectory` rejecting partial `config.yml` files that omit `defaultPlayers` during `/fuzz reload` instead of falling back to the default `1` (matching `LeafFuzzConfig#parse`).
+- Isolated `io.papermc.paper.command.brigadier.CommandSourceStack` lookups inside `PaperCommandTreeInspector` so Stage 1 command-tree inspection degrades cleanly on plain Spigot servers without throwing `NoClassDefFoundError`.
 - Added a `badParameterInFlight` guard in `LeafFuzzCommand` so invalid `name=value` parameters reject the command cleanly instead of falling through to default execution.
 - Synchronized `NodeBandit` UCB1 arm updates and `PersonaPolicyBotActor` state updates (`volatile` counters and synchronized `recordOutcome`) for concurrent multi-player swarm runs.
 
