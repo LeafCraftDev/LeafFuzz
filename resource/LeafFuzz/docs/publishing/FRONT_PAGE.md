@@ -10,7 +10,9 @@ ASCII punctuation only, concrete benchmark numbers and honest caveats).
 
 <div align="center">
 
+<!-- not: bbb -->
 ![LeafFuzz: 1-command plugin security, permission-leak scanner, memory-leak detector, and 500-bot stress tester](../assets/leaffuzz-header-banner.png)
+<!-- /not -->
 
 # {{name}}: 1-Command Plugin Security, Permission-Leak Scanner & Memory-Leak Detector
 
@@ -28,7 +30,9 @@ I built it from the behavior fuzzer in [`LeafRTP`](../../../LeafRTP/docs/publish
 
 One jar for Paper and Spigot (1.20+), Folia (1.21+), Fabric (26.1+), and NeoForge (26.1+). It also runs from a terminal without a server for batch jar screening (`java -jar {{jar}} triage --input-dir <dir>`) or as a standalone load tester (`java -jar {{jar}} swarm ...`).
 
+<!-- not: bbb -->
 ![LeafFuzz 5-stage automated QC verification, 0.000% false-positive leak detection, and 500-player bot stress summary](../assets/leaffuzz-benchmark-comparison.png)
+<!-- /not -->
 
 ### The short version
 
@@ -121,7 +125,9 @@ All archive ownership indexing, synthetic persona evaluation, bytecode causal sc
 
 ### 3-step workflow and 5-stage QC pipeline
 
+<!-- not: bbb -->
 ![LeafFuzz 3-step plugin vetting and 5-stage automated QC architecture](../assets/leaffuzz-architecture-workflow.png)
+<!-- /not -->
 
 Each `/fuzz check` run pairs server-owner workarounds with developer-ready bug reproducers:
 - **For server owners & network operators:** Stage 1 and Stage 3 output copy-pasteable `LuckPerms` permission revokes and `commands.yml` overrides so you can lock down an exposed subcommand or isolate a lagging `.jar` immediately without waiting on an upstream patch.
