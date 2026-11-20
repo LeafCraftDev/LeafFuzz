@@ -15,11 +15,12 @@ check:
   # @range: 10.0..10000.0
   slowTickThresholdMs: 100.0
 
-  # Safety guard requiring a .bench-disposable marker file for whole-server sweeps (/fuzz check target=all).
+  # Full target=all checks require .bench-disposable in the LeafFuzz data folder or server root.
   # @type: boolean
   requireDisposableForAll: true
 
-  # Additional command prefixes excluded from Stage 2 fuzzing alongside the built-in DEFAULT_DENYLIST (stop, restart, op, deop, ban, kick, reload, whitelist, save-all).
+  # Additional command patterns blocked before synthetic dispatch across supported loaders.
+  # Built-in dispatch rules also block save-all, save-off, timings, and spark.
   # @type: list
   extraDenylist: []
 

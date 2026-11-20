@@ -3,7 +3,7 @@
 // The installable multi-loader artifact is produced by
 // `:resource:LeafFuzz:leaffuzz-plugin` as `LeafFuzz-<version>.jar`.
 group = 'net.leaf'
-version = '0.1.0'
+version = '0.1.1'
 
 jar.enabled = false
 

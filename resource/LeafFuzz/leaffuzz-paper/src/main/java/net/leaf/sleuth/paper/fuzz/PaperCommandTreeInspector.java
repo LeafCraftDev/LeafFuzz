@@ -90,8 +90,31 @@ public final class PaperCommandTreeInspector {
     private static final int MAX_BRIGADIER_DEPTH = 12;
     private static final Pattern USAGE_SUBCOMMANDS = Pattern.compile("<([a-zA-Z0-9_|:-]{2,120})>");
     private static final Predicate<?> DEFAULT_BRIGADIER_REQUIREMENT = resolveDefaultBrigadierRequirement();
+    private static final java.util.logging.Logger LOGGER =
+            java.util.logging.Logger.getLogger(PaperCommandTreeInspector.class.getName());
+    private static volatile boolean paperSourceStackUnavailable;
 
     private PaperCommandTreeInspector() {
+    }
+
+    private static TierCommandSender createTierSenderInternal(
+            Server server,
+            PluginManager pluginManager,
+            boolean op
+    ) {
+        if (!paperSourceStackUnavailable) {
+            try {
+                return PaperTierCommandSender.create(server, pluginManager, op);
+            } catch (Throwable t) {
+                paperSourceStackUnavailable = true;
+                LOGGER.log(
+                        java.util.logging.Level.FINE,
+                        "Paper CommandSourceStack unavailable; falling back to Bukkit TierCommandSender",
+                        t
+                );
+            }
+        }
+        return new TierCommandSender(server, pluginManager, op);
     }
 
     /**
@@ -143,9 +166,8 @@ public final class PaperCommandTreeInspector {
         Map<String, CommandNode<?>> brigadierRoots = extractBrigadierRootChildren(server, explicitDispatcher);
         PluginManager pm = safePluginManager(server);
 
-        TierCommandSender defaultSender = new TierCommandSender(server, pm, false);
-        TierCommandSender opSender = new TierCommandSender(server, pm, true);
-
+        TierCommandSender defaultSender = createTierSenderInternal(server, pm, false);
+        TierCommandSender opSender = createTierSenderInternal(server, pm, true);
         List<RawCommandNode> defaultRoots = new ArrayList<>();
         List<RawCommandNode> opRoots = new ArrayList<>();
 
@@ -291,7 +313,7 @@ public final class PaperCommandTreeInspector {
         if (permission == null || permission.isBlank()) {
             return true;
         }
-        TierCommandSender sender = new TierCommandSender(null, pluginManager, isOp);
+        TierCommandSender sender = createTierSenderInternal(null, pluginManager, isOp);
         try {
             return evaluatePermissionExpression(permission, sender);
         } finally {
@@ -300,7 +322,7 @@ public final class PaperCommandTreeInspector {
     }
 
     public static CommandSender createTierSender(Server server, PluginManager pluginManager, boolean isOp) {
-        return new TierCommandSender(server, pluginManager, isOp);
+        return createTierSenderInternal(server, pluginManager, isOp);
     }
 
     private static boolean testBukkitCommandPermission(Command bukkitCmd, TierCommandSender tierSender) {
@@ -946,11 +968,12 @@ public final class PaperCommandTreeInspector {
     }
 
     /**
-     * Direct compile-time {@link CommandSender} and {@link CommandSourceStack} implementation
-     * for {@code default} ({@code isOp = false}) and {@code op} ({@code isOp = true}) evaluation
-     * with zero reflection or dynamic proxies.
+     * Direct compile-time {@link CommandSender} implementation for {@code default}
+     * ({@code isOp = false}) and {@code op} ({@code isOp = true}) evaluation
+     * with zero reflection or dynamic proxies, safe on plain Spigot where
+     * {@link CommandSourceStack} is absent.
      */
-    static final class TierCommandSender implements CommandSender, CommandSourceStack, ServerOperator {
+    static class TierCommandSender implements CommandSender, ServerOperator {
         private final Server server;
         private final PluginManager pluginManager;
         private final boolean op;
@@ -1040,32 +1063,7 @@ public final class PaperCommandTreeInspector {
 
         @Override
         public Component name() {
-            return Component.text(getName());
-        }
-
-        @Override
-        public Location getLocation() {
             return null;
-        }
-
-        @Override
-        public CommandSender getSender() {
-            return this;
-        }
-
-        @Override
-        public Entity getExecutor() {
-            return null;
-        }
-
-        @Override
-        public CommandSourceStack withLocation(Location location) {
-            return this;
-        }
-
-        @Override
-        public CommandSourceStack withExecutor(Entity executor) {
-            return this;
         }
 
         @Override
@@ -1382,6 +1380,50 @@ public final class PaperCommandTreeInspector {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Paper {@link CommandSourceStack}-capable extension of {@link TierCommandSender},
+     * loaded only on servers where Paper Brigadier APIs are present on the classpath.
+     */
+    static final class PaperTierCommandSender extends TierCommandSender implements CommandSourceStack {
+        PaperTierCommandSender(Server server, PluginManager pluginManager, boolean op) {
+            super(server, pluginManager, op);
+        }
+
+        static TierCommandSender create(Server server, PluginManager pluginManager, boolean op) {
+            return new PaperTierCommandSender(server, pluginManager, op);
+        }
+
+        @Override
+        public Component name() {
+            return Component.text(getName());
+        }
+
+        @Override
+        public Location getLocation() {
+            return null;
+        }
+
+        @Override
+        public CommandSender getSender() {
+            return this;
+        }
+
+        @Override
+        public Entity getExecutor() {
+            return null;
+        }
+
+        @Override
+        public CommandSourceStack withLocation(Location location) {
+            return this;
+        }
+
+        @Override
+        public CommandSourceStack withExecutor(Entity executor) {
+            return this;
         }
     }
 }

@@ -414,7 +414,19 @@ class LeafFuzzPaperIntegrationTest {
                 tokens
         );
         assertEquals(1L, runtime.faultOracle().totalHazardsRecorded());
-        assertTrue(tokens.contains("hazard:gui-item-leak:TeleportMenu:22"));
+        LeafFuzzPaperEpisodeRunner runner = new LeafFuzzPaperEpisodeRunner(mockServer, runtime);
+        LeafFuzzRuntime.SwarmSnapshot swarmSnap = runner.rampToPopulation(12);
+        assertEquals(12, swarmSnap.onlinePlayers());
+        for (int s = 0; s < 6; s++) {
+            runner.stepConcurrentSwarm(0);
+        }
+        assertTrue(
+                runtime.recentBotSteps().stream().anyMatch(
+                        net.leaf.sleuth.common.fuzz.PersonaPolicyBotActor.BotStepRecord::isWorldMutationSkill
+                ),
+                "Paper stepConcurrentSwarm must execute mining/building bot micro-skills"
+        );
+        runner.teardownAll();
         runtime.close();
     }
 

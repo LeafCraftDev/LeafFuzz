@@ -22,7 +22,8 @@ import java.nio.file.Path;
  * @trace REQ-SLEUTH-FUZZ-005
  * @trace S-005
  */
-public final class PaperLeafFuzzPlugin extends JavaPlugin {
+public final class PaperLeafFuzzPlugin extends JavaPlugin
+        implements io.github.dailystruggle.bit.config.FuzzDiagnosticSnapshotSource {
 
     private BukkitPluginServerAccessor accessor;
     private LeafFuzzRuntime runtime;
@@ -83,7 +84,24 @@ public final class PaperLeafFuzzPlugin extends JavaPlugin {
                         resumed -> this.runtime.runQcCheck("all", Math.max(1, resumed.targetEpisodes() - resumed.completedEpisodes()))
                 )
         );
+        registerWithLeafConfigWorkspaceIfPresent();
         getLogger().info("LeafFuzz (Paper/Folia) enabled. Run /fuzz check <PluginName|all> to run a 4-stage QC pass.");
+    }
+
+    private void registerWithLeafConfigWorkspaceIfPresent() {
+        try {
+            org.bukkit.plugin.Plugin leafConfig = getServer().getPluginManager().getPlugin("LeafConfig");
+            if (leafConfig != null && leafConfig.isEnabled()) {
+                var runtimeGetter = leafConfig.getClass().getMethod("runtime");
+                Object cfgRuntime = runtimeGetter.invoke(leafConfig);
+                if (cfgRuntime != null) {
+                    var ingestMethod = cfgRuntime.getClass().getMethod("ingestPeerWorkspaceExtension", Object.class);
+                    ingestMethod.invoke(cfgRuntime, this.runtime);
+                }
+            }
+        } catch (Throwable ex) {
+            getLogger().log(java.util.logging.Level.WARNING, "[LeafFuzz] Failed to register Plugin UML workspace tab with LeafConfig", ex);
+        }
     }
 
     @Override
@@ -99,5 +117,20 @@ public final class PaperLeafFuzzPlugin extends JavaPlugin {
 
     public PaperRestartCoordinator restartCoordinator() {
         return restartCoordinator;
+    }
+
+    @Override
+    public java.util.List<FuzzScorecardSummaryRecord> diagnosticFuzzScorecards() {
+        return runtime != null ? runtime.diagnosticFuzzScorecards() : java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<FuzzWiringFindingRecord> diagnosticFuzzWiringFindings() {
+        return runtime != null ? runtime.diagnosticFuzzWiringFindings() : java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<FuzzRuntimeHazardRecord> diagnosticFuzzRuntimeHazards() {
+        return runtime != null ? runtime.diagnosticFuzzRuntimeHazards() : java.util.List.of();
     }
 }

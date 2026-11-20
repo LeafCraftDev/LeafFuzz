@@ -4,8 +4,11 @@ license = "MIT"
 
 [[mods]]
 modId = "leaffuzz"
-version = "0.1.0"
+version = "0.1.1"
 displayName = "LeafFuzz"
+displayURL = "https://github.com/DailyStruggle/RTP"
+authors = "leaf"
+issueTrackerURL = "https://github.com/DailyStruggle/RTP/issues"
 description = "Cross-platform in-JVM QC, command-tree fuzzing, and post-GC memory leak screener."
 
 [[dependencies.leaffuzz]]

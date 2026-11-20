@@ -350,6 +350,81 @@ class PaperCommandTreeInspectorTest {
         assertEquals("warps.default", setFinding.declaredPermission());
     }
 
+    @Test
+    @DisplayName("REQ-SLEUTH-FUZZ-003: PaperCommandTreeInspector degrades cleanly on plain Spigot when CommandSourceStack and Adventure are absent and emits Java 17 bytecode")
+    void degradesCleanlyOnPlainSpigotWithoutPaperCommandSourceStackAndEmitsJava17Bytecode() throws Exception {
+        ClassLoader parent = PaperCommandTreeInspector.class.getClassLoader();
+        ClassLoader spigotOnlyLoader = new ClassLoader(parent) {
+            @Override
+            protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                if (name.startsWith("io.papermc.paper.") || name.startsWith("net.kyori.adventure.")) {
+                    throw new ClassNotFoundException("Absent on plain Spigot: " + name);
+                }
+                if (name.startsWith("net.leaf.sleuth.paper.fuzz.PaperCommandTreeInspector")) {
+                    Class<?> loaded = findLoadedClass(name);
+                    if (loaded == null) {
+                        String resourcePath = name.replace('.', '/') + ".class";
+                        try (java.io.InputStream in = parent.getResourceAsStream(resourcePath)) {
+                            if (in == null) {
+                                throw new ClassNotFoundException(name);
+                            }
+                            byte[] bytes = in.readAllBytes();
+                            loaded = defineClass(name, bytes, 0, bytes.length);
+                        } catch (java.io.IOException e) {
+                            throw new ClassNotFoundException(name, e);
+                        }
+                    }
+                    if (resolve) {
+                        resolveClass(loaded);
+                    }
+                    return loaded;
+                }
+                return super.loadClass(name, resolve);
+            }
+        };
+
+        Class<?> isolatedInspector = Class.forName(
+                PaperCommandTreeInspector.class.getName(),
+                true,
+                spigotOnlyLoader
+        );
+        PluginManager pm = mock(PluginManager.class);
+        Permission pubPerm = new Permission("spigotplugin.public", PermissionDefault.TRUE);
+        Permission adminPerm = new Permission("spigotplugin.admin", PermissionDefault.OP);
+        when(pm.getPermission("spigotplugin.public")).thenReturn(pubPerm);
+        when(pm.getPermission("spigotplugin.admin")).thenReturn(adminPerm);
+        when(pm.getPermissions()).thenReturn(Set.of(pubPerm, adminPerm));
+
+        Map<String, Command> known = new LinkedHashMap<>();
+        known.put("spigotpub", simpleBukkitCommand("spigotpub", "spigotplugin.public"));
+        known.put("spigotadmin", simpleBukkitCommand("spigotadmin", "spigotplugin.admin"));
+        CommandMap commandMap = mock(CommandMap.class);
+        when(commandMap.getKnownCommands()).thenReturn(known);
+        Server server = mock(Server.class);
+        when(server.getCommandMap()).thenReturn(commandMap);
+        when(server.getPluginManager()).thenReturn(pm);
+
+        @SuppressWarnings("unchecked")
+        Map<String, List<RawCommandNode>> tierGraphs = (Map<String, List<RawCommandNode>>) isolatedInspector
+                .getMethod("inspectTierCommandGraphs", Server.class)
+                .invoke(null, server);
+
+        Set<String> defaultNames = tierGraphs.get("default").stream().map(RawCommandNode::name).collect(Collectors.toSet());
+        Set<String> opNames = tierGraphs.get("op").stream().map(RawCommandNode::name).collect(Collectors.toSet());
+        assertEquals(Set.of("spigotpub"), defaultNames);
+        assertEquals(Set.of("spigotpub", "spigotadmin"), opNames);
+
+        // Verify compiled classfile major version is 61 (Java 17)
+        try (java.io.InputStream in = parent.getResourceAsStream(
+                PaperCommandTreeInspector.class.getName().replace('.', '/') + ".class");
+             java.io.DataInputStream dis = new java.io.DataInputStream(in)) {
+            assertEquals(0xCAFEBABE, dis.readInt());
+            dis.readUnsignedShort(); // minor
+            int major = dis.readUnsignedShort();
+            assertEquals(61, major, "leaffuzz-paper classes must compile to Java 17 bytecode (classfile 61)");
+        }
+    }
+
     private static Command simpleBukkitCommand(String name, String permission) {
         Command cmd = new Command(name) {
             @Override

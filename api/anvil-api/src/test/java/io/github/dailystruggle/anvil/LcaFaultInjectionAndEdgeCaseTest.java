@@ -80,6 +80,8 @@ class LcaFaultInjectionAndEdgeCaseTest {
     private static final class QuotaFaultInjectingFileChannel extends FileChannel {
         private final FileChannel delegate;
         private final AtomicLong maxQuotaBytes;
+        private final AtomicLong positionalReadCalls = new AtomicLong();
+        private final AtomicLong sizeCalls = new AtomicLong();
 
         QuotaFaultInjectingFileChannel(FileChannel delegate, long initialQuotaBytes) {
             this.delegate = delegate;
@@ -88,6 +90,14 @@ class LcaFaultInjectionAndEdgeCaseTest {
 
         void setMaxQuotaBytes(long quotaBytes) {
             this.maxQuotaBytes.set(quotaBytes);
+        }
+
+        long positionalReadCalls() {
+            return positionalReadCalls.get();
+        }
+
+        long sizeCalls() {
+            return sizeCalls.get();
         }
 
         @Override
@@ -124,6 +134,7 @@ class LcaFaultInjectionAndEdgeCaseTest {
 
         @Override
         public long size() throws IOException {
+            sizeCalls.incrementAndGet();
             return delegate.size();
         }
 
@@ -150,6 +161,7 @@ class LcaFaultInjectionAndEdgeCaseTest {
 
         @Override
         public int read(ByteBuffer dst, long position) throws IOException {
+            positionalReadCalls.incrementAndGet();
             return delegate.read(dst, position);
         }
 
@@ -201,6 +213,8 @@ class LcaFaultInjectionAndEdgeCaseTest {
         try (LcaRegionWriter.LcaLiveArchive init = LcaRegionWriter.createEmptyLiveArchive(
                 lcaFile, 0, 0, -4, 24, 4671, modeB, LcaRegionReader.STORAGE_KIND_REGION_VOXEL, 1024)) {
             init.saveChunkCoW(0, 0, buildTestChunk(0, 0, "minecraft:stone", 2));
+            assertTrue(init.toByteArray().length > 0);
+            assertTrue(init.liveBuffer().length > 0);
             init.flush();
         }
 
@@ -219,12 +233,10 @@ class LcaFaultInjectionAndEdgeCaseTest {
             quotaCh.setMaxQuotaBytes(baselineFileSize + 128);
 
             // 1. Attempt a chunk save via DataOutputStream#close -> must throw checked IOException (not UncheckedIOException)
-            IOException ex1 = assertThrows(IOException.class, () -> {
-                try (DataOutputStream out = archive.getChunkDataOutputStream(1, 0)) {
-                    byte[] nbt = Nbt.writeNamedRoot("", buildTestChunk(1, 0, "minecraft:deepslate", 4));
-                    out.write(nbt);
-                }
-            });
+            byte[] nbt = Nbt.writeNamedRoot("", buildTestChunk(1, 0, "minecraft:deepslate", 4));
+            DataOutputStream out = archive.getChunkDataOutputStream(1, 0);
+            out.write(nbt);
+            IOException ex1 = assertThrows(IOException.class, out::close);
             assertTrue(ex1.getMessage().contains("ENOSPC"), ex1.getMessage());
 
             // Verify rollback of activeByteLength, telemetry, and on-disk file size + footer canary
@@ -260,6 +272,7 @@ class LcaFaultInjectionAndEdgeCaseTest {
         byte[] finalBytes = Files.readAllBytes(lcaFile);
         LcaRegionReader.RecoveryReport report = LcaRegionReader.healRegionBitRot(finalBytes);
         assertEquals(0, report.secDedHealedPointers() + report.slabScanReconstructedPointers());
+        LcaRegionReader.clearThreadLocalScratch();
     }
 
     @Test
@@ -552,6 +565,57 @@ class LcaFaultInjectionAndEdgeCaseTest {
             assertEquals(0, Files.readAllBytes(modeAFile)[0x0B] & 8,
                     "On-disk superblock flag must remain Mode A even when new chunks are written with zstdLevel=6");
 
+            // 3b. Crash-recover a Mode B chunk (2,0) AND a Mode A chunk (1,0) inside the Mode A file
+            //     (also inject a 1-bit flip into the Mode B chunk's uncompressed header word 0 to verify per-slab SEC-DED healing)
+            byte[] mixedModeABytes = Files.readAllBytes(modeAFile);
+            long ptr20BeforeCrash = ByteBuffer.wrap(mixedModeABytes).getLong(LcaRegionReader.POINTER_DIRECTORY_OFFSET + 16);
+            int slab20ByteOff = (int) ((ptr20BeforeCrash >>> 29) << LcaRegionReader.SLAB_SHIFT);
+            mixedModeABytes[slab20ByteOff] ^= 0x40; // 1-bit flip in Mode B self-tag magic inside Mode A file
+            ByteBuffer.wrap(mixedModeABytes).putLong(LcaRegionReader.POINTER_DIRECTORY_OFFSET + 8, 0xCAFE_BABE_DEAD_BEEFL);
+            ByteBuffer.wrap(mixedModeABytes).putLong(LcaRegionReader.POINTER_DIRECTORY_OFFSET + 16, 0xDEAD_BEEF_CAFE_BABEL);
+
+            // Verify healRegionBitRot reconstructs mixed Mode A (codec1=0) and Mode B (codec1=1) pointers per slab
+            byte[] mixedForBitRotHeal = Arrays.copyOf(mixedModeABytes, mixedModeABytes.length);
+            LcaRegionReader.RecoveryReport mixedReport = LcaRegionReader.healRegionBitRot(mixedForBitRotHeal);
+            assertEquals(2, mixedReport.slabScanReconstructedPointers(),
+                    "healRegionBitRot must reconstruct both Mode A chunk (1,0) and Mode B chunk (2,0)");
+            assertEquals(1, mixedReport.chunkHeaderSecDedHealedWords(),
+                    "healRegionBitRot must heal the 1-bit flip in Mode B chunk (2,0) header inside Mode A file");
+            AnvilReader.ChunkEntry healed10 = LcaRegionReader.INSTANCE.readChunk(mixedForBitRotHeal, 1, 0);
+            AnvilReader.ChunkEntry healed20 = LcaRegionReader.INSTANCE.readChunk(mixedForBitRotHeal, 2, 0);
+            assertNotNull(healed10);
+            assertNotNull(healed20);
+            assertEquals(3, healed10.compressionType, "healRegionBitRot must preserve codec1=0 on Mode A chunk (1,0)");
+            assertEquals(5, healed20.compressionType, "healRegionBitRot must preserve codec1=1 on Mode B chunk (2,0)");
+            assertEquals(106L, ((Number) healed20.root.get("LastUpdate")).longValue());
+
+            // Verify open-time crash recovery reconstructs the Mode B chunk inside the Mode A file
+            byte[] crashedMixedModeA = Arrays.copyOf(mixedModeABytes, mixedModeABytes.length + 256);
+            Arrays.fill(crashedMixedModeA, mixedModeABytes.length - 8, crashedMixedModeA.length, (byte) 0x5A);
+            Files.write(modeAFile, crashedMixedModeA);
+            LcaRegionReader.invalidateFileCache(modeAFile);
+
+            try (LcaRegionFileStorage defaultStorage = new LcaRegionFileStorage(tempDir)) {
+                LcaRegionWriter.LcaLiveArchive recoveredMixed = defaultStorage.getOrOpenRegion(0, 0, false);
+                assertNotNull(recoveredMixed);
+                assertEquals(1, recoveredMixed.liveChunkHeaderHealedWords(),
+                        "Open-time slab scan must heal 1-bit flip on Mode B chunk (2,0) header without touching Mode A slabs");
+                assertEquals(2, recoveredMixed.liveSlabScanReconstructions(),
+                        "Both Mode A chunk (1,0) and Mode B chunk (2,0) pointers must be reconstructed on open");
+
+                AnvilReader.ChunkEntry rec00 = recoveredMixed.readChunkEntry(0, 0);
+                AnvilReader.ChunkEntry rec10 = recoveredMixed.readChunkEntry(1, 0);
+                AnvilReader.ChunkEntry rec20 = recoveredMixed.readChunkEntry(2, 0);
+                assertNotNull(rec00);
+                assertNotNull(rec10);
+                assertNotNull(rec20);
+                assertEquals(3, rec00.compressionType, "Chunk (0,0) remains Mode A");
+                assertEquals(3, rec10.compressionType, "Reconstructed Mode A chunk (1,0) must have codec1=0");
+                assertEquals(5, rec20.compressionType, "Reconstructed Mode B chunk (2,0) in Mode A file must have codec1=1");
+                assertEquals(110L, ((Number) rec10.root.get("LastUpdate")).longValue());
+                assertEquals(106L, ((Number) rec20.root.get("LastUpdate")).longValue());
+            }
+
             // Now open a Mode B file with preferredZstdLevel = 0 (switch new writes to Mode A 0-LZ) and 22
             Path modeBFile = tempDir.resolve("r.1.0.lca");
             try (LcaRegionWriter.LcaLiveArchive modeB22 = LcaRegionWriter.createEmptyLiveArchive(
@@ -563,7 +627,7 @@ class LcaFaultInjectionAndEdgeCaseTest {
                     "Mode B file created with zstdLevel=22 must have DEFAULT_ZSTD1 set in superblock");
 
             try (LcaRegionWriter.LcaLiveArchive modeBWithLevel0 = LcaRegionWriter.openLiveArchive(modeBFile, 0)) {
-                modeBWithLevel0.saveChunkCoW(1, 0, buildTestChunk(33, 0, "minecraft:granite", 5));
+                modeBWithLevel0.saveChunkCoW(1, 0, buildTestChunk(33, 0, "minecraft:granite", 7));
                 modeBWithLevel0.flush();
 
                 AnvilReader.ChunkEntry c00 = modeBWithLevel0.readChunkEntry(0, 0);
@@ -575,6 +639,174 @@ class LcaFaultInjectionAndEdgeCaseTest {
             }
             assertEquals(8, Files.readAllBytes(modeBFile)[0x0B] & 8,
                     "On-disk superblock flag must remain Mode B even when new chunks are written with zstdLevel=0");
+
+            // 3c. Crash-recover a Mode A chunk (1,0) and Mode B chunk (0,0) inside the Mode B file
+            byte[] mixedModeBBytes = Files.readAllBytes(modeBFile);
+            ByteBuffer.wrap(mixedModeBBytes).putLong(LcaRegionReader.POINTER_DIRECTORY_OFFSET, 0xCAFE_BABE_DEAD_BEEFL);
+            ByteBuffer.wrap(mixedModeBBytes).putLong(LcaRegionReader.POINTER_DIRECTORY_OFFSET + 8, 0xDEAD_BEEF_CAFE_BABEL);
+            byte[] crashedMixedModeB = Arrays.copyOf(mixedModeBBytes, mixedModeBBytes.length + 256);
+            Arrays.fill(crashedMixedModeB, mixedModeBBytes.length - 8, crashedMixedModeB.length, (byte) 0x5A);
+            Files.write(modeBFile, crashedMixedModeB);
+            LcaRegionReader.invalidateFileCache(modeBFile);
+
+            try (LcaRegionWriter.LcaLiveArchive recoveredModeB = LcaRegionWriter.openLiveArchive(modeBFile)) {
+                assertEquals(0, recoveredModeB.liveChunkHeaderHealedWords(),
+                        "Mode B file slab scan must not false-heal Mode A interior slabs");
+                assertEquals(2, recoveredModeB.liveSlabScanReconstructions());
+                AnvilReader.ChunkEntry c00 = recoveredModeB.readChunkEntry(0, 0);
+                AnvilReader.ChunkEntry c10 = recoveredModeB.readChunkEntry(1, 0);
+                assertNotNull(c00);
+                assertNotNull(c10);
+                assertEquals(5, c00.compressionType, "Reconstructed Mode B chunk (0,0) in Mode B file must have codec1=1");
+                assertEquals(3, c10.compressionType, "Reconstructed Mode A chunk (1,0) in Mode B file must have codec1=0");
+                assertEquals(105L, ((Number) c00.root.get("LastUpdate")).longValue());
+                assertEquals(107L, ((Number) c10.root.get("LastUpdate")).longValue());
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Benchmark & Verify: Out-of-cache 16k-border open syscalls, LRU promotion, and header cache eviction")
+    void benchmarkOutOfCacheRegionOpenAndLruPromotion(@TempDir Path tempDir) throws IOException {
+        Path fullRegion = tempDir.resolve("r.0.0.lca");
+        LinkedHashMap<String, Object> baseChunk = buildTestChunk(0, 0, "minecraft:stone", 3);
+        try (LcaRegionWriter.LcaLiveArchive init = LcaRegionWriter.createEmptyLiveArchive(
+                fullRegion, 0, 0, -4, 24, 4671, 0, LcaRegionReader.STORAGE_KIND_REGION_VOXEL, 4096)) {
+            for (int cz = 0; cz < 32; cz++) {
+                for (int cx = 0; cx < 32; cx++) {
+                    baseChunk.put("xPos", cx);
+                    baseChunk.put("zPos", cz);
+                    init.saveChunkInitial(cx, cz, baseChunk);
+                }
+            }
+            init.flush();
+        }
+
+        long fsize = Files.size(fullRegion);
+        try (FileChannel raw = FileChannel.open(fullRegion, StandardOpenOption.READ, StandardOpenOption.WRITE);
+             QuotaFaultInjectingFileChannel counted = new QuotaFaultInjectingFileChannel(raw, Long.MAX_VALUE)) {
+            long t0 = System.nanoTime();
+            try (LcaRegionWriter.LcaLiveArchive reopened = new LcaRegionWriter.LcaLiveArchive(
+                    fullRegion, counted, (int) fsize, 0)) {
+                long openNs = System.nanoTime() - t0;
+                System.out.printf("[BENCH-OPEN] 1024-chunk clean open: %.2f us | pread calls=%d | size calls=%d%n",
+                        openNs / 1000.0, counted.positionalReadCalls(), counted.sizeCalls());
+                assertEquals(2L, counted.positionalReadCalls(),
+                        "Clean SEC-DED-verified 1024-chunk open must only read header prefix + 8B footer canary (2 pread calls)");
+                assertEquals(0L, counted.sizeCalls(),
+                        "Clean SEC-DED-verified 1024-chunk open must not call ch.size() per chunk");
+                assertTrue(reopened.hasChunk(31, 31));
+            }
+        }
+
+        // Measure 200 sequential re-opens of the 1024-chunk region
+        long tLoop0 = System.nanoTime();
+        for (int iter = 0; iter < 200; iter++) {
+            try (LcaRegionWriter.LcaLiveArchive reopened = LcaRegionWriter.openLiveArchive(fullRegion, 0)) {
+                assertTrue(reopened.hasChunk(iter & 31, (iter >>> 5) & 31));
+            }
+        }
+        long loopNs = System.nanoTime() - tLoop0;
+        System.out.printf("[BENCH-OPEN-LOOP] 200 x 1024-chunk openLiveArchive: %.2f us/open (total %.2f ms)%n",
+                (loopNs / 1000.0) / 200.0, loopNs / 1_000_000.0);
+
+        // Verify Second-Chance Clock LRU promotion keeps hot region (0,0) resident when cold regions overflow cache
+        Path lruDir = tempDir.resolve("lru-test");
+        Files.createDirectories(lruDir);
+        try (LcaRegionFileStorage lruStorage = new LcaRegionFileStorage(
+                lruDir, LcaRegionReader.STORAGE_KIND_REGION_VOXEL, -4, 24, 4671, 0, false, false, 2, 0.35)) {
+            LcaRegionWriter.LcaLiveArchive r0 = lruStorage.getOrOpenRegion(0, 0, true);
+            r0.saveChunkCoW(0, 0, buildTestChunk(0, 0, "minecraft:stone", 2));
+            LcaRegionWriter.LcaLiveArchive r1 = lruStorage.getOrOpenRegion(1, 0, true);
+            r1.saveChunkCoW(0, 0, buildTestChunk(32, 0, "minecraft:dirt", 2));
+
+            // Touch r1 via getOrOpenRegion(1,0) after r0 gets demoted by r2, or promote r0 before opening r2:
+            // Clear r1's initial recency bit by sweeping with r2, after re-promoting r0
+            LcaRegionWriter.LcaLiveArchive r2 = lruStorage.getOrOpenRegion(2, 0, true);
+            r2.saveChunkCoW(0, 0, buildTestChunk(64, 0, "minecraft:oak_planks", 2));
+            // Touch r1 so r1 gets promoted, then open r3 -> r2 (unpromoted) must be evicted while r1 stays open
+            assertTrue(lruStorage.doesChunkExist(32, 0));
+            LcaRegionWriter.LcaLiveArchive r3 = lruStorage.getOrOpenRegion(3, 0, true);
+            assertNotNull(r3);
+            assertTrue(r1.isChannelOpen(), "Recently accessed region (1,0) must be promoted and remain open");
+            assertFalse(r2.isChannelOpen(), "Unpromoted region (2,0) must be evicted before promoted region (1,0)");
+        }
+    }
+
+    @Test
+    @DisplayName("Concurrent Chunky-style multi-worker reads and dictionary growth never publish stale cachedParsedDict (CBIT T7)")
+    void concurrentChunkyStyleWriteAndReadDoesNotPublishStaleSlabLocalGlobalStateIdDict(@TempDir Path tempDir) throws Exception {
+        Path regionFile = tempDir.resolve("r.0.5.lca");
+        try (LcaRegionWriter.LcaLiveArchive archive = LcaRegionWriter.openOrCreateLiveArchive(
+                regionFile, 0, 5, -4, 24, 5023, 1, LcaRegionReader.STORAGE_KIND_REGION_VOXEL)) {
+            archive.saveChunkCoW(0, 0, buildTestChunk(0, 160, "minecraft:stone", 4));
+
+            java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean(true);
+            java.util.concurrent.atomic.AtomicReference<Throwable> readerError =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            Thread[] readers = new Thread[4];
+            for (int t = 0; t < readers.length; t++) {
+                readers[t] = new Thread(() -> {
+                    while (running.get() && readerError.get() == null) {
+                        try {
+                            byte[] nbt = archive.readChunkNbtBytes(0, 0);
+                            if (nbt == null || nbt.length == 0) {
+                                readerError.compareAndSet(null, new AssertionError("Null NBT on (0,0)"));
+                            }
+                        } catch (Throwable ex) {
+                            readerError.compareAndSet(null, ex);
+                        }
+                    }
+                }, "lca-reader-" + t);
+                readers[t].setDaemon(true);
+                readers[t].start();
+            }
+
+            try {
+                int stateCounter = 0;
+                for (int round = 0; round < 60 && readerError.get() == null; round++) {
+                    int rx = 1 + (round % 30);
+                    int rz = 1 + ((round / 30) % 30);
+                    LinkedHashMap<String, Object> chunk = buildTestChunk(rx, 160 + rz, "minecraft:stone", 2);
+                    @SuppressWarnings("unchecked")
+                    Nbt.NbtList sections = (Nbt.NbtList) chunk.get("sections");
+                    @SuppressWarnings("unchecked")
+                    LinkedHashMap<String, Object> sec0 = (LinkedHashMap<String, Object>) sections.items.get(0);
+                    @SuppressWarnings("unchecked")
+                    LinkedHashMap<String, Object> bs = (LinkedHashMap<String, Object>) sec0.get("block_states");
+                    @SuppressWarnings("unchecked")
+                    Nbt.NbtList pal = (Nbt.NbtList) bs.get("palette");
+                    for (int k = 0; k < 4; k++) {
+                        int id = ++stateCounter;
+                        LinkedHashMap<String, Object> entry = new LinkedHashMap<>();
+                        entry.put("Name", "minecraft:stone_brick_slab[type=bottom,waterlogged=true,ruin_id=" + id + "]");
+                        pal.items.add(entry);
+                    }
+                    int[] yzx = new int[4096];
+                    for (int i = 0; i < 4096; i++) {
+                        yzx[i] = i % pal.items.size();
+                    }
+                    bs.put("data", LcaSectionCodec.packBlockLongs(yzx, pal.items.size()));
+
+                    byte[] preEncoded = archive.encodeChunkPayloadForSlab(rx, rz, chunk);
+                    archive.commitPreEncodedChunkCoW(rx, rz, preEncoded);
+                    // Give concurrent readers a micro-window to finish publishing any stale snapshot before reading (rx, rz)
+                    Thread.yield();
+                    byte[] decoded = archive.readChunkNbtBytes(rx, rz);
+                    assertNotNull(decoded);
+                    assertTrue(decoded.length > 64);
+                }
+            } finally {
+                running.set(false);
+                for (Thread r : readers) {
+                    r.join(5000);
+                }
+            }
+            if (readerError.get() != null) {
+                fail("Concurrent reader failed", readerError.get());
+            }
+            byte[] finalRead = archive.readChunkNbtBytes(22, 2);
+            assertNotNull(finalRead);
         }
     }
 }

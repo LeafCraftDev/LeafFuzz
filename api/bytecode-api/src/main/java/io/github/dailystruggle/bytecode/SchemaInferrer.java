@@ -1,6 +1,6 @@
-package io.github.dailystruggle.rtp.common.bit.config.atlas;
+package io.github.dailystruggle.bytecode;
 
-import io.github.dailystruggle.rtp.common.bit.config.DirectiveSchemaParser;
+import io.github.dailystruggle.bit.config.DirectiveSchemaParser;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -34,7 +34,7 @@ public final class SchemaInferrer {
             "(?i)(?:between|range(?:\\s+of)?|from)\\s+(-?\\d+(?:\\.\\d+)?)\\s+(?:and|to|\\.\\.|-)\\s+(-?\\d+(?:\\.\\d+)?)"
     );
     private static final Pattern COMMENT_PAREN_RANGE_RE = Pattern.compile(
-            "\\(\\s*(-?\\d+(?:\\.\\d+)?)\\s*(?:\\.\\.|\\s+-\\s+)\\s*(-?\\d+(?:\\.\\d+)?)\\s*\\)"
+            "\\(\\s*+(-?\\d++(?:\\.\\d++)?)\\s*+(?:\\.\\.|-)\\s*+(-?\\d++(?:\\.\\d++)?)\\s*+\\)"
     );
     private static final Pattern INTEGER_LITERAL_RE = Pattern.compile("^-?\\d+$");
     private static final Pattern FLOAT_LITERAL_RE = Pattern.compile("^-?\\d+\\.\\d+$");
@@ -285,7 +285,7 @@ public final class SchemaInferrer {
                 || "true".equalsIgnoreCase(valStr)
                 || "false".equalsIgnoreCase(valStr);
 
-        // 2. Options resolution: explicit @options > comment regex > bytecode enum constants (only for non-numeric/non-boolean values)
+        // 2. Options resolution: explicit @options > comment regex > bytecode enum constants > built-in engine enums (only for non-numeric/non-boolean values)
         Set<String> resolvedOptions = new LinkedHashSet<>(explicit.options());
         if (resolvedOptions.isEmpty() && !joinedComment.isEmpty()) {
             resolvedOptions.addAll(extractCommentOptions(joinedComment));
@@ -293,6 +293,9 @@ public final class SchemaInferrer {
         if (resolvedOptions.isEmpty() && !isNumericLiteral && !isBooleanLiteral
                 && bytecodeOptions != null && !bytecodeOptions.isEmpty()) {
             resolvedOptions.addAll(bytecodeOptions);
+        }
+        if (resolvedOptions.isEmpty() && !isNumericLiteral && !isBooleanLiteral) {
+            resolvedOptions.addAll(resolveBuiltinEngineEnumOptions(keyPath, rawValue));
         }
 
         // 3. Range resolution: explicit @range > comment regex > key-suffix non-negative floor
@@ -327,11 +330,11 @@ public final class SchemaInferrer {
             } else if (isDurationSuffix(leaf)) {
                 type = "integer";
                 if (unit == null) unit = inferDurationUnit(leaf);
-                if (rangeMin == null) rangeMin = 0.0;
+                if (rangeMin == null) rangeMin = "-1".equals(valStr) ? -1.0 : 0.0;
             } else if (isCountOrDistanceSuffix(leaf)) {
                 type = "integer";
                 if (unit == null) unit = inferDistanceUnit(leaf);
-                if (rangeMin == null && !isCoordinateAxis(leaf)) rangeMin = 0.0;
+                if (rangeMin == null && !isCoordinateAxis(leaf)) rangeMin = "-1".equals(valStr) ? -1.0 : 0.0;
             } else if (isRatioOrChanceSuffix(leaf)) {
                 type = "double";
                 if (rangeMin == null && (leaf.contains("chance") || leaf.contains("percent") || leaf.contains("probability"))) {
@@ -532,9 +535,12 @@ public final class SchemaInferrer {
                 }
             }
             for (BytecodeConfigScanner.KeyCallSite cs : safeSites) {
-                if (!cs.guardPredicates().isEmpty()) {
+                List<String> nonOptionGuards = cs.guardPredicates().stream()
+                        .filter(g -> !g.startsWith("enum: ") && !g.startsWith("match == "))
+                        .toList();
+                if (!nonOptionGuards.isEmpty()) {
                     score += 0.05;
-                    evidence.add("+5% [Pass 2] Bytecode guard/clamp predicate: `" + String.join(", ", cs.guardPredicates()) + "`");
+                    evidence.add("+5% [Pass 2] Bytecode guard/clamp predicate: `" + String.join(", ", nonOptionGuards) + "`");
                     break;
                 }
             }
@@ -928,102 +934,102 @@ public final class SchemaInferrer {
                     + (defVal != null && !defVal.isEmpty() && !defVal.equals("default") ? " (matches default)." : "."));
         }
 
-        // 2. Category-specific player impact when changed
-        if (leaf.contains("chance") || leaf.contains("probability") || leaf.contains("percent")) {
-            String subject = humanizeSubject(kLow, leaf, "chance", "probability", "percent");
-            String maxStr = (schema.rangeMax() != null && schema.rangeMax() > 1.0) ? "100%" : "1.0 (100%)";
-            bullets.add("If increased (toward " + maxStr + "): " + capitalize(subject)
-                    + " triggers on a higher percentage of hits/actions (at " + maxStr + ", it triggers every single time).");
-            bullets.add("If decreased (toward 0.0 / 0%): " + capitalize(subject)
-                    + " triggers less often; setting 0.0 disables the effect completely.");
-            return bullets;
-        }
+        List<String> adjustmentBullets = new ArrayList<>();
 
-        if (isIntervalOrCooldown(leaf)) {
-            if (kLow.contains("hopper") || kLow.contains("transfer")) {
-                bullets.add("If increased (e.g. 16-20 ticks / 0.8s-1.0s): Hoppers pause longer between transfers — player sorting systems move items slower, but chunk tick (MSPT) lag drops significantly.");
-                bullets.add("If decreased (e.g. 1-4 ticks / 0.05s-0.2s): Hoppers move items much faster for high-speed player sorters, at the cost of higher server tick usage.");
-            } else if (kLow.contains("spawn") || kLow.contains("wave") || kLow.contains("arena") || kLow.contains("mob")) {
-                bullets.add("If increased (higher ticks/seconds): Longer breather between mob/boss spawns — gives players more time to heal and clear waves, and lowers active mob counts.");
-                bullets.add("If decreased (lower ticks/seconds): Waves spawn rapidly back-to-back, making combat much harder for players and increasing entity tick load.");
-            } else if (kLow.contains("teleport") || kLow.contains("rtp") || kLow.contains("warmup")) {
-                bullets.add("If increased: Players must stand still longer after running the command before teleporting.");
-                bullets.add("If decreased (0): Players teleport immediately with no warmup countdown.");
-            } else {
-                String subject = humanizeSubject(kLow, leaf, "ticks", "seconds", "ms", "cooldown", "interval", "delay");
-                bullets.add("If increased: Longer wait between " + subject + " actions (slower pace for players, lower server CPU/tick load).");
-                bullets.add("If decreased: Shorter wait — " + subject + " runs more frequently (faster response, higher server tick cost).");
-            }
-            return bullets;
-        }
-
-        if (leaf.contains("duration") || leaf.contains("timeout") || leaf.contains("ttl")) {
-            String subject = humanizeSubject(kLow, leaf, "seconds", "ticks", "duration", "timeout");
-            if (kLow.contains("tag") || kLow.contains("combat") || kLow.contains("pvp")) {
-                bullets.add("If increased (e.g. 20-60s): Players stay combat-tagged longer after taking or dealing a hit before they can safely log out or teleport.");
-                bullets.add("If decreased (e.g. 0-5s): Combat restrictions wear off sooner after a fight ends (0 disables combat tagging).");
-            } else {
-                bullets.add("If increased: " + capitalize(subject) + " lasts longer before expiring.");
-                bullets.add("If decreased: " + capitalize(subject) + " expires sooner (0 disables the timer).");
-            }
-            return bullets;
-        }
-
-        if (leaf.contains("multiplier") || leaf.contains("scale") || leaf.contains("factor")) {
-            String subject = humanizeSubject(kLow, leaf, "multiplier", "scale", "factor");
-            bullets.add("If increased (higher multiplier): Scales " + subject + " up (e.g. 2.0 = double strength/health per player), making encounters tougher.");
-            bullets.add("If decreased (closer to 1.0 or lower): Reduces " + subject + " scaling (1.0 = unscaled base value).");
-            return bullets;
-        }
-
-        if (leaf.contains("batch") || leaf.contains("amount") || leaf.contains("max") || leaf.contains("limit") || leaf.contains("cap") || leaf.contains("count")) {
-            String subject = humanizeSubject(kLow, leaf, "max", "limit", "cap", "count", "per", "batch");
-            if (kLow.contains("hopper") || kLow.contains("item")) {
-                bullets.add("If increased (e.g. 32-64 items): Moves larger stacks in a single transfer cycle, speeding up bulk chest/hopper throughput.");
-                bullets.add("If decreased (e.g. 1-4 items): Moves fewer items per cycle (1 = vanilla single-item hopper transfer).");
-            } else {
-                bullets.add("If increased: Raises the cap on " + subject + ", allowing more concurrent items/entities/tasks.");
-                bullets.add("If decreased: Tightens the cap on " + subject + " to conserve server memory and tick time.");
-            }
-            return bullets;
-        }
-
-        if ("enum".equals(schema.inferredType()) || !schema.options().isEmpty()) {
-            for (String opt : schema.options()) {
-                boolean isCur = opt.equalsIgnoreCase(val);
-                bullets.add(opt + (isCur ? " (Current): " : ": ") + explainEnumConstantForPlayers(opt, kLow));
-            }
-            return bullets;
-        }
-
+        // 2. Category-specific player impact when changed (discrete & spatial types first, then tunable numeric categories)
         if ("boolean".equals(schema.inferredType())) {
             String subject = humanizeSubject(kLow, leaf, "enable", "enabled", "allow", "deny");
             if (leaf.startsWith("deny") || leaf.startsWith("cancel") || leaf.startsWith("prevent")) {
                 String action = humanizeSubject(leaf, leaf, "deny", "cancel", "prevent");
-                bullets.add("true: Cancels/blocks " + action + " for players in this region or mode.");
-                bullets.add("false: Allows players to perform " + action + " normally.");
+                adjustmentBullets.add("true: Cancels/blocks " + action + " for players in this region or mode.");
+                adjustmentBullets.add("false: Allows players to perform " + action + " normally.");
             } else {
-                bullets.add("true: Turns on " + subject + " in-game.");
-                bullets.add("false: Turns off " + subject + " so the feature is skipped.");
+                adjustmentBullets.add("true: Turns on " + subject + " in-game.");
+                adjustmentBullets.add("false: Turns off " + subject + " so the feature is skipped.");
             }
-            return bullets;
-        }
-
-        if (schema.spatialGizmo() != SpatialGizmoKind.NONE) {
+        } else if ("enum".equals(schema.inferredType()) || !schema.options().isEmpty()) {
+            for (String opt : schema.options()) {
+                boolean isCur = opt.equalsIgnoreCase(val);
+                adjustmentBullets.add(opt + (isCur ? " (Current): " : ": ") + explainEnumConstantForPlayers(opt, kLow));
+            }
+        } else if (schema.spatialGizmo() != SpatialGizmoKind.NONE) {
             if (schema.spatialGizmo() == SpatialGizmoKind.RADIUS || schema.spatialGizmo() == SpatialGizmoKind.INNER_RADIUS) {
-                bullets.add("If increased: Expands the region/protection boundary further outward across the world map.");
-                bullets.add("If decreased: Shrinks the active zone tightly around its center coordinate.");
+                adjustmentBullets.add("If increased: Expands the region/protection boundary further outward across the world map.");
+                adjustmentBullets.add("If decreased: Shrinks the active zone tightly around its center coordinate.");
             } else if (schema.spatialGizmo() == SpatialGizmoKind.WORLD_REFERENCE) {
-                bullets.add("Changing world name: Moves this region, arena, or protection rule to the target Minecraft world.");
+                adjustmentBullets.add("Changing world name: Moves this region, arena, or protection rule to the target Minecraft world.");
             } else {
-                bullets.add("Changing coordinate: Shifts the center anchor point of this zone on the 2D world map.");
+                adjustmentBullets.add("Changing coordinate: Shifts the center anchor point of this zone on the 2D world map.");
             }
-            return bullets;
+        } else if (numVal != null && !isStructuralNumericIdentifier(leaf)) {
+            if (leaf.contains("chance") || leaf.contains("probability") || leaf.contains("percent")) {
+                String subject = humanizeSubject(kLow, leaf, "chance", "probability", "percent");
+                String maxStr = (schema.rangeMax() != null && schema.rangeMax() > 1.0) ? "100%" : "1.0 (100%)";
+                adjustmentBullets.add("If increased (toward " + maxStr + "): " + capitalize(subject)
+                        + " triggers on a higher percentage of hits/actions (at " + maxStr + ", it triggers every single time).");
+                adjustmentBullets.add("If decreased (toward 0.0 / 0%): " + capitalize(subject)
+                        + " triggers less often; setting 0.0 disables the effect completely.");
+            } else if (isIntervalOrCooldown(leaf)) {
+                if (kLow.contains("hopper") || kLow.contains("transfer")) {
+                    adjustmentBullets.add("If increased (e.g. 16-20 ticks / 0.8s-1.0s): Hoppers pause longer between transfers — player sorting systems move items slower, but chunk tick (MSPT) lag drops significantly.");
+                    adjustmentBullets.add("If decreased (e.g. 1-4 ticks / 0.05s-0.2s): Hoppers move items much faster for high-speed player sorters, at the cost of higher server tick usage.");
+                } else if (kLow.contains("spawn") || kLow.contains("wave") || kLow.contains("arena") || kLow.contains("mob")) {
+                    adjustmentBullets.add("If increased (higher ticks/seconds): Longer breather between mob/boss spawns — gives players more time to heal and clear waves, and lowers active mob counts.");
+                    adjustmentBullets.add("If decreased (lower ticks/seconds): Waves spawn rapidly back-to-back, making combat much harder for players and increasing entity tick load.");
+                } else if (kLow.contains("teleport") || kLow.contains("rtp") || kLow.contains("warmup")) {
+                    adjustmentBullets.add("If increased: Players must stand still longer after running the command before teleporting.");
+                    adjustmentBullets.add("If decreased (0): Players teleport immediately with no warmup countdown.");
+                } else {
+                    String subject = humanizeSubject(kLow, leaf, "ticks", "seconds", "ms", "cooldown", "interval", "delay");
+                    adjustmentBullets.add("If increased: Longer wait between " + subject + " actions (slower pace for players, lower server CPU/tick load).");
+                    adjustmentBullets.add("If decreased: Shorter wait — " + subject + " runs more frequently (faster response, higher server tick cost).");
+                }
+            } else if (leaf.contains("duration") || leaf.contains("timeout") || leaf.contains("ttl")) {
+                String subject = humanizeSubject(kLow, leaf, "seconds", "ticks", "duration", "timeout");
+                if (kLow.contains("tag") || kLow.contains("combat") || kLow.contains("pvp")) {
+                    adjustmentBullets.add("If increased (e.g. 20-60s): Players stay combat-tagged longer after taking or dealing a hit before they can safely log out or teleport.");
+                    adjustmentBullets.add("If decreased (e.g. 0-5s): Combat restrictions wear off sooner after a fight ends (0 disables combat tagging).");
+                } else {
+                    adjustmentBullets.add("If increased: " + capitalize(subject) + " lasts longer before expiring.");
+                    adjustmentBullets.add("If decreased: " + capitalize(subject) + " expires sooner (0 disables the timer).");
+                }
+            } else if (leaf.contains("multiplier") || leaf.contains("scale") || leaf.contains("factor")) {
+                String subject = humanizeSubject(kLow, leaf, "multiplier", "scale", "factor");
+                adjustmentBullets.add("If increased (higher multiplier): Scales " + subject + " up (e.g. 2.0 = double strength/health per player), making encounters tougher.");
+                adjustmentBullets.add("If decreased (closer to 1.0 or lower): Reduces " + subject + " scaling (1.0 = unscaled base value).");
+            } else if (leaf.contains("batch") || leaf.contains("amount") || leaf.contains("max") || leaf.contains("min")
+                    || leaf.contains("limit") || leaf.contains("cap") || leaf.contains("count")
+                    || leaf.contains("size") || leaf.contains("threads") || leaf.contains("workers")) {
+                String subject = humanizeSubject(kLow, leaf, "max", "min", "limit", "cap", "count", "per", "batch");
+                if (kLow.contains("hopper") || kLow.contains("item")) {
+                    adjustmentBullets.add("If increased (e.g. 32-64 items): Moves larger stacks in a single transfer cycle, speeding up bulk chest/hopper throughput.");
+                    adjustmentBullets.add("If decreased (e.g. 1-4 items): Moves fewer items per cycle (1 = vanilla single-item hopper transfer).");
+                } else {
+                    adjustmentBullets.add("If increased: Raises the cap on " + subject + ", allowing more concurrent items/entities/tasks.");
+                    adjustmentBullets.add("If decreased: Tightens the cap on " + subject + " to conserve server memory and tick time.");
+                }
+            } else if (leaf.contains("radius") || leaf.contains("distance") || leaf.contains("range")
+                    || "blocks".equals(schema.unit()) || "chunks".equals(schema.unit())) {
+                String subject = humanizeSubject(kLow, leaf, "blocks", "chunks");
+                adjustmentBullets.add("If increased: Expands the " + subject + " distance/range further outward.");
+                adjustmentBullets.add("If decreased: Restricts the " + subject + " to a tighter range.");
+            }
         }
 
-        bullets.add("If increased: Raises the " + humanizeSubject(kLow, leaf) + " threshold applied by the plugin.");
-        bullets.add("If decreased: Lowers the " + humanizeSubject(kLow, leaf) + " threshold.");
+        if (adjustmentBullets.isEmpty()) {
+            return List.of();
+        }
+
+        bullets.addAll(adjustmentBullets);
         return bullets;
+    }
+
+    private static boolean isStructuralNumericIdentifier(String leaf) {
+        return leaf.equals("version") || leaf.endsWith("-version")
+                || leaf.equals("port") || leaf.endsWith("-port")
+                || leaf.equals("seed") || leaf.endsWith("-seed")
+                || leaf.equals("id") || leaf.endsWith("-id")
+                || leaf.equals("protocol") || leaf.endsWith("-protocol");
     }
 
     private static String resolveEffectiveDefault(
@@ -1151,6 +1157,9 @@ public final class SchemaInferrer {
         if (pass >= 2 && sites != null) {
             for (BytecodeConfigScanner.KeyCallSite cs : sites) {
                 for (String g : cs.guardPredicates()) {
+                    if (g.startsWith("enum: ") || g.startsWith("match == ")) {
+                        continue;
+                    }
                     if (g.startsWith("clamp ") || g.startsWith("capacity ")) {
                         String item = "`" + g + "`";
                         if (!parts.contains(item) && parts.size() < 3) {
@@ -1485,11 +1494,24 @@ public final class SchemaInferrer {
     static String normalizeCamelToHyphen(String s) {
         if (s == null || s.isEmpty()) return "";
         String pre = s.replace("PvP", "Pvp").replace("PVP", "Pvp");
-        String split = pre
-                .replaceAll("([a-z0-9])([A-Z])", "$1-$2")
-                .replaceAll("([A-Z]+)([A-Z][a-z])", "$1-$2")
-                .replace('_', '-');
-        return split.toLowerCase(Locale.ROOT);
+        StringBuilder out = new StringBuilder(pre.length() + 8);
+        for (int i = 0; i < pre.length(); i++) {
+            char c = pre.charAt(i);
+            if (c == '_') {
+                out.append('-');
+                continue;
+            }
+            if (Character.isUpperCase(c) && i > 0) {
+                char prev = pre.charAt(i - 1);
+                boolean prevLowerOrDigit = Character.isLowerCase(prev) || Character.isDigit(prev);
+                boolean nextLower = (i + 1 < pre.length()) && Character.isLowerCase(pre.charAt(i + 1));
+                if (prevLowerOrDigit || (Character.isUpperCase(prev) && nextLower)) {
+                    out.append('-');
+                }
+            }
+            out.append(Character.toLowerCase(c));
+        }
+        return out.toString();
     }
 
     private static String humanizeConceptPhrase(String kLow, String leaf, String... stripTokens) {
@@ -1557,6 +1579,7 @@ public final class SchemaInferrer {
     private static List<String> formatCallSites(List<BytecodeConfigScanner.KeyCallSite> sites) {
         List<String> out = new ArrayList<>();
         for (BytecodeConfigScanner.KeyCallSite s : sites) {
+            if (out.size() >= 16) break;
             String fb = s.codeFallbackValue() != null ? (", default=" + s.codeFallbackValue()) : "";
             String guards = !s.guardPredicates().isEmpty() ? (" [" + String.join(", ", s.guardPredicates()) + "]") : "";
             String desc = simpleClass(s.className()) + "#" + s.methodName() + " -> " + s.getterMethod() + "(key" + fb + ")" + guards;
@@ -1570,9 +1593,11 @@ public final class SchemaInferrer {
     private static List<String> formatFieldFlows(List<BytecodeConfigScanner.KeyCallSite> sites) {
         List<String> out = new ArrayList<>();
         for (BytecodeConfigScanner.KeyCallSite s : sites) {
+            if (out.size() >= 16) break;
             if (s.assignedField() != null && !s.downstreamMethods().isEmpty()) {
                 List<String> simpleDown = new ArrayList<>();
                 for (String dm : s.downstreamMethods()) {
+                    if (simpleDown.size() >= 8) break;
                     simpleDown.add(simpleClass(dm));
                 }
                 String flow = "this." + s.assignedField() + " -> " + String.join(", ", simpleDown);
@@ -1696,21 +1721,36 @@ public final class SchemaInferrer {
         return ReloadTier.PLUGIN_RELOAD;
     }
 
+    private static final Pattern OPTION_SPLIT_RE = Pattern.compile("[,|/]");
+    private static final Pattern OPTION_TOKEN_RE = Pattern.compile("^[A-Za-z0-9_.-]+$");
+
     private static List<String> extractCommentOptions(String comment) {
         Matcher m = COMMENT_OPTIONS_RE.matcher(comment);
         if (!m.find()) {
             return List.of();
         }
-        String rawGroup = m.group(1);
-        String[] parts = rawGroup.split("[,|/]|\\s+or\\s+");
+        String rawGroup = m.group(1).replace(" or ", ",");
+        String[] parts = OPTION_SPLIT_RE.split(rawGroup);
         List<String> out = new ArrayList<>();
         for (String p : parts) {
-            String cleaned = p.trim().replaceAll("^['\"`]+|['\"`.]+$", "").trim();
-            if (cleaned.length() >= 2 && cleaned.length() <= 40 && cleaned.matches("^[A-Za-z0-9_.-]+$")) {
+            String cleaned = stripOptionDelimiters(p.trim());
+            if (cleaned.length() >= 2 && cleaned.length() <= 40 && OPTION_TOKEN_RE.matcher(cleaned).matches()) {
                 out.add(cleaned);
             }
         }
         return out.size() >= 2 ? out : List.of();
+    }
+
+    private static String stripOptionDelimiters(String s) {
+        int start = 0;
+        int end = s.length();
+        while (start < end && (s.charAt(start) == '\'' || s.charAt(start) == '"' || s.charAt(start) == '`')) {
+            start++;
+        }
+        while (end > start && (s.charAt(end - 1) == '\'' || s.charAt(end - 1) == '"' || s.charAt(end - 1) == '`' || s.charAt(end - 1) == '.')) {
+            end--;
+        }
+        return s.substring(start, end).trim();
     }
 
     private static double[] extractCommentRange(String comment) {
@@ -1760,9 +1800,119 @@ public final class SchemaInferrer {
                 || "biome".equals(leaf) || "sound".equals(leaf) || "particle".equals(leaf)
                 || "enchantment".equals(leaf) || "entity-type".equals(leaf) || "entitytype".equals(leaf);
     }
-
     private static String normalizeRegistryName(String leaf) {
         return "entitytype".equals(leaf) ? "entity-type" : leaf;
+    }
+
+    /**
+     * Resolves well-known external Bukkit, Minecraft, or JDK enum constants when bytecode
+     * invokes {@code EnumType.valueOf(String)} on an API enum outside the plugin JAR.
+     */
+    public static List<String> resolveKnownExternalEnumConstants(String binaryOrFqnEnumName, String sampleValue) {
+        if (binaryOrFqnEnumName == null || binaryOrFqnEnumName.isBlank()) {
+            return List.of();
+        }
+        String norm = binaryOrFqnEnumName.replace('/', '.').trim();
+        int lastSep = Math.max(norm.lastIndexOf('.'), norm.lastIndexOf('$'));
+        String simple = (lastSep >= 0 ? norm.substring(lastSep + 1) : norm).toLowerCase(Locale.ROOT);
+        List<String> upper = switch (simple) {
+            case "difficulty" -> List.of("PEACEFUL", "EASY", "NORMAL", "HARD");
+            case "gamemode" -> List.of("SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR");
+            case "environment" -> List.of("NORMAL", "NETHER", "THE_END", "CUSTOM");
+            case "barcolor" -> List.of("PINK", "BLUE", "RED", "GREEN", "YELLOW", "PURPLE", "WHITE");
+            case "barstyle" -> List.of("SOLID", "SEGMENTED_6", "SEGMENTED_10", "SEGMENTED_12", "SEGMENTED_20");
+            case "eventpriority" -> List.of("LOWEST", "LOW", "NORMAL", "HIGH", "HIGHEST", "MONITOR");
+            case "timeunit" -> List.of("MILLISECONDS", "SECONDS", "MINUTES", "HOURS", "DAYS");
+            default -> List.of();
+        };
+        if (upper.isEmpty()) {
+            return List.of();
+        }
+        return adaptEnumCaseToSample(upper, sampleValue);
+    }
+
+    /**
+     * Resolves built-in vanilla / Bukkit / Paper / proxy engine enumeration options for standard
+     * configuration keys (such as {@code difficulty}, {@code gamemode}, {@code environment},
+     * {@code level-type}) while preserving lowercase vs uppercase style from {@code rawValue}.
+     */
+    public static List<String> resolveBuiltinEngineEnumOptions(String keyPath, Object rawValue) {
+        if (keyPath == null || keyPath.isBlank()) {
+            return List.of();
+        }
+        String leaf = normalizeCamelToHyphen(extractLeaf(keyPath));
+        String valStr = rawValue == null ? "" : String.valueOf(rawValue).trim();
+
+        if ("difficulty".equals(leaf) || "server-difficulty".equals(leaf) || "world-difficulty".equals(leaf)
+                || (leaf.endsWith("-difficulty") && matchesAnyIgnoreCase(valStr, List.of("PEACEFUL", "EASY", "NORMAL", "HARD")))) {
+            List<String> base = List.of("PEACEFUL", "EASY", "NORMAL", "HARD");
+            if (valStr.isEmpty() || matchesAnyIgnoreCase(valStr, base)) {
+                return adaptEnumCaseToSample(base, valStr);
+            }
+        }
+        if ("gamemode".equals(leaf) || "game-mode".equals(leaf)
+                || "default-gamemode".equals(leaf) || "default-game-mode".equals(leaf)) {
+            List<String> base = List.of("SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR");
+            if (valStr.isEmpty() || matchesAnyIgnoreCase(valStr, base)) {
+                return adaptEnumCaseToSample(base, valStr);
+            }
+        }
+        if ("environment".equals(leaf) || "world-environment".equals(leaf)
+                || ("dimension".equals(leaf) && matchesAnyIgnoreCase(valStr, List.of("NORMAL", "NETHER", "THE_END", "CUSTOM")))) {
+            List<String> base = List.of("NORMAL", "NETHER", "THE_END", "CUSTOM");
+            if (valStr.isEmpty() || matchesAnyIgnoreCase(valStr, base)) {
+                return adaptEnumCaseToSample(base, valStr);
+            }
+        }
+        if ("level-type".equals(leaf)) {
+            if (valStr.startsWith("minecraft:") || isLowerCaseSample(valStr)) {
+                return List.of(
+                        "minecraft:normal",
+                        "minecraft:flat",
+                        "minecraft:large_biomes",
+                        "minecraft:amplified",
+                        "minecraft:single_biome_surface"
+                );
+            }
+            return List.of("NORMAL", "FLAT", "LARGE_BIOMES", "AMPLIFIED", "SINGLE_BIOME_SURFACE");
+        }
+        if ("region-file-compression".equals(leaf)) {
+            return List.of("deflate", "lz4", "none");
+        }
+        if ("player-info-forwarding-mode".equals(leaf) || "forwarding-mode".equals(leaf)) {
+            return adaptEnumCaseToSample(List.of("NONE", "LEGACY", "BUNGEEGUARD", "MODERN"), valStr);
+        }
+        return List.of();
+    }
+
+    private static boolean matchesAnyIgnoreCase(String val, List<String> candidates) {
+        if (val == null || val.isEmpty()) return false;
+        for (String c : candidates) {
+            if (c.equalsIgnoreCase(val)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isLowerCaseSample(String sampleValue) {
+        if (sampleValue == null || sampleValue.isEmpty()) return false;
+        boolean hasLower = false;
+        for (int i = 0; i < sampleValue.length(); i++) {
+            char ch = sampleValue.charAt(i);
+            if (Character.isUpperCase(ch)) return false;
+            if (Character.isLowerCase(ch)) hasLower = true;
+        }
+        return hasLower;
+    }
+
+    private static List<String> adaptEnumCaseToSample(List<String> upperOptions, String sampleValue) {
+        if (isLowerCaseSample(sampleValue)) {
+            List<String> lower = new ArrayList<>(upperOptions.size());
+            for (String opt : upperOptions) {
+                lower.add(opt.toLowerCase(Locale.ROOT));
+            }
+            return List.copyOf(lower);
+        }
+        return upperOptions;
     }
 
     private static boolean isDurationSuffix(String leaf) {
@@ -1827,7 +1977,7 @@ public final class SchemaInferrer {
     }
 
     private static final Pattern UNSAFE_DISPLAY_LITERAL_RE = Pattern.compile(
-            "(?i)(?:ignore\\s+(?:all\\s+)?(?:previous|prior|above)\\s+instructions|system\\s+prompt|you\\s+are\\s+now|<\\s*\\/?\\s*(?:script|iframe|img|svg|object|embed|style)\\b[^>]*>|javascript:|onerror\\s*=)"
+            "(?i)(?:ignore\\s++(?:all\\s++)?(?:previous|prior|above)\\s++instructions|system\\s++prompt|you\\s++are\\s++now|<\\s*+(?:/\\s*+)?(?:script|iframe|img|svg|object|embed|style)\\b[^>]*+>|javascript:|onerror\\s*+=)"
     );
 
     static String sanitizeDisplayLiteral(String raw) {

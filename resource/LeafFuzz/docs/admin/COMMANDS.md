@@ -8,8 +8,8 @@
 
 | Command | Parameters | Default Permission | Description |
 |---|---|---|---|
-| `/fuzz` | `[target=<Plugin\|Mod\|A,B\|all>] [episodes=<1..100000>] [players=<auto\|ramp\|1..500>] [stage=<all\|commands\|fuzz\|faults\|leaks\|claims\|snapshot>]` | `leaffuzz.admin` (`op`) | With no parameters, opens the interactive in-game written-book scorecard (`/fuzz report`). When `target=`, `episodes=`, `players=`, or `stage=` is provided (for example `/fuzz players=auto` or `/fuzz target=RTP episodes=24`), runs `/fuzz check` directly. |
-| `/fuzz check` | `[target=<Plugin\|Mod\|A,B\|all>] [episodes=<1..100000>] [players=<auto\|ramp\|1..500>] [stage=<all\|commands\|fuzz\|faults\|leaks\|claims\|snapshot>]` | `leaffuzz.admin` (`op`) | Runs the 5-stage automated QC pass (`stage=all`, default) with a concurrent player roster dispersed across an Archimedean spiral (`players=100` or `players=auto` to ramp until the server becomes unstable) or a specific stage (`stage=commands`, `stage=fuzz`, `stage=faults`, `stage=leaks`, `stage=claims`, `stage=snapshot`) and writes status-leading `reports/<target>-qc-report.md`, `reports/<target>-qc-data.yml`, and `reports/<target>-qc-data.json` for BuiltByBit / Modrinth moderation evidence. Also accepts positional shorthand `/fuzz check <Target> [episodes]`. |
+| `/fuzz` | `[target=<Plugin\|Mod\|A,B\|all>] [episodes=<1..100000>] [players=<auto\|ramp\|1..500>] [stage=<all\|commands\|fuzz\|faults\|leaks\|causal\|snapshot>]` | `leaffuzz.admin` (`op`) | With no parameters, opens the interactive in-game written-book scorecard (`/fuzz report`). When `target=`, `episodes=`, `players=`, or `stage=` is provided (for example `/fuzz players=auto` or `/fuzz target=RTP episodes=24`), runs `/fuzz check` directly. |
+| `/fuzz check` | `[target=<Plugin\|Mod\|A,B\|all>] [episodes=<1..100000>] [players=<auto\|ramp\|1..500>] [stage=<all\|commands\|fuzz\|faults\|leaks\|causal\|snapshot>]` | `leaffuzz.admin` (`op`) | Runs the 5-stage automated QC pass (`stage=all`, default) with a concurrent player roster dispersed across an Archimedean spiral (`players=100` or `players=auto` to ramp until the server becomes unstable) or a specific stage (`stage=commands`, `stage=fuzz`, `stage=faults`, `stage=leaks`, `stage=causal`, `stage=snapshot`) and writes status-leading `reports/<target>-qc-report.md`, `reports/<target>-qc-data.yml`, and `reports/<target>-qc-data.json` for BuiltByBit / Modrinth moderation evidence. Also accepts positional shorthand `/fuzz check <Target> [episodes]`. |
 | `/fuzz report` | *(none)* | `leaffuzz.admin` (`op`) | Opens the interactive in-game written-book scorecard (`LeafFuzzMenuBuilder`) for the latest QC check, or prints a formatted chat scorecard on console. |
 | `/fuzz reset` | `[scope=<all\|faults\|leaks\|campaign>]` | `leaffuzz.admin` (`op`) | Clears recorded exception/stall/hazard signatures (`faults`), post-GC histogram checkpoints (`leaks`), and/or persisted campaign state and `.jar.sleuth-disabled` archives (`campaign`). Defaults to `scope=all`. |
 | `/fuzz test` | *(none)* | `leaffuzz.admin` (`op`) | Executes all `[FUZZ bit]` PBIT, CBIT, IBIT, and live-server (`FUZZ-LIVE-*`) self-test components off-thread. |
@@ -21,12 +21,12 @@
 
 | `stage=` Value | Behavior |
 |---|---|
-| `all` *(default)* | Executes the full 5-stage automated QC pass (Command Surface Audit, Persona Bot & Swarm Fuzzing, Main-Thread Stall/Hazard & Exception Attribution, Post-GC Class Retention Screen, and First/Second-Order Claim Delivery Audit) and writes `reports/<target>-qc-report.md` (`.yml` / `.json`). |
+| `all` *(default)* | Executes the full 5-stage automated QC pass (Command Surface Audit, Persona Bot & Swarm Fuzzing, Main-Thread Stall/Hazard & Exception Attribution, Post-GC Class Retention Screen, and First/Second-Order Bytecode & Causal Audit) and writes `reports/<target>-qc-report.md` (`.yml` / `.json`). |
 | `commands` | Runs Stage 1 only: audits live Brigadier & Bukkit command trees (augmented with white-box bytecode subcommand hints) for `default` vs `op` exposure and prints ready-to-paste LuckPerms mitigations. |
 | `fuzz` | Runs the full QC pass focused on Stage 2 synthetic player boundary & lifecycle fuzzing. |
 | `faults` | Inspects Stage 3 attributed exception (`exc:`), slow-tick stall (`stall:`), and synchronous main-thread hazard (`hazard:`) signatures filtered by `target=`. |
 | `leaks` | Runs Stage 4 Bonferroni-corrected OLS class retention screening across captured post-GC checkpoints for `target=`. |
-| `claims` | Runs Stage 5 zero-classloading bytecode & config causal graph audit (`BytecodeCausalGraphScanner` + optional `LlmCausalChainAuditor`), reporting Order-1 and Order-2 `Claims: <X> -> Does Not Deliver: <Y>` findings. |
+| `causal` | Runs Stage 5 zero-classloading bytecode & config causal graph audit (`BytecodeCausalGraphScanner` + optional `LlmCausalChainAuditor`), reporting Order-1 and Order-2 `<DeclaredSurface> -> <CausalDefect>` findings. |
 | `snapshot` | Captures an immediate off-thread post-GC `GC.class_histogram` checkpoint (`manual-<n>`) for manual retention comparison. |
 
 ---
@@ -44,10 +44,21 @@ java -jar LeafFuzz.jar swarm --host 127.0.0.1 --port 25565 --players 100 --no-ra
 
 # Extract the bundled Mineflayer bench-swarm.js script to disk
 java -jar LeafFuzz.jar extract-mineflayer --out ./bench-swarm.js
+
+# Pass 1 zero-server static batch triage (filter 2,000 submission JARs down to <= 200 with < 0.5% FPR)
+java -jar LeafFuzz.jar triage --input-dir ./submissions --max-pass 200 --out-json triage.json --out-csv triage.csv --out-md triage.md
 ```
 
 | CLI Flag | Default | Description |
 |---|---|---|
+| `triage` / `scan` | *(subcommand)* | Runs headless Pass 1 zero-server static bytecode batch triage across `--input-dir`, applying closed-world causal hard-reject checks (validated to `< 0.5%` empirical FPR on real-world corpora) and inferring constant-pool companion dependencies (`Vault`, `PlaceholderAPI`, `WorldGuard`, etc.) with zero penalty. |
+| `--input-dir <dir>` / `-i` | *(required for `triage`)* | Directory of candidate plugin/mod `.jar` submissions to scan off-thread. |
+| `--max-pass <n>` | `200` | Maximum number of top-ranked valid archives promoted to `SHORTLIST_PASS` (remaining valid archives are marked `DEFERRED_RANK`). |
+| `--threads <n>` / `-t` | `availableProcessors` | Parallel worker thread count (`1..64`) for `triage`. |
+| `--out-json <path>` | *(none)* | Writes the machine-readable JSON triage leaderboard and inferred dependency manifest for Pass 2 server provisioning. |
+| `--out-csv <path>` | *(none)* | Writes the RFC 4180 CSV triage leaderboard. |
+| `--out-md <path>` | *(none)* | Writes the human-readable Markdown triage leaderboard report. |
+| `--strict-s004-s005` / `--no-strict-s004-s005` | `true` | Controls whether `CONFIRMED (100%)` `S-004` (swallowed I/O exception) and `S-005` (async worker main-thread world mutation) proofs trigger immediate `REJECT`. |
 | `--host <host>` / `-H` | `127.0.0.1` | Target Minecraft server hostname or IP address. |
 | `--port <port>` / `-p` | `25565` | Target Minecraft server TCP port (`1..65535`). |
 | `--players <auto\|ramp\|1..500>` / `-n` | `100` (`auto`) | Target concurrent offline-mode TCP bot sockets dispersed across an Archimedean spiral. |

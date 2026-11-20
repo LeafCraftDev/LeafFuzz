@@ -70,7 +70,7 @@ public final class FabricLeafFuzzMod implements ModInitializer {
                     }
                 }
         );
-        accessor.logger().info("LeafFuzz (Fabric) initialized. Run /fuzz check <mod|all> for a 4-stage QC pass.");
+        accessor.logger().info("LeafFuzz (Fabric) initialized. Run /fuzz check <mod|all> for a 5-stage QC pass.");
     }
 
     private EpisodeOutcome runFabricPersonaEpisode(
@@ -97,16 +97,7 @@ public final class FabricLeafFuzzMod implements ModInitializer {
             if (cleanCmd.isEmpty()) {
                 continue;
             }
-            String lower = cleanCmd.trim().toLowerCase(Locale.ROOT);
-            if (lower.equals("stop")
-                    || lower.startsWith("stop ")
-                    || lower.equals("restart")
-                    || lower.startsWith("restart ")
-                    || lower.startsWith("op ")
-                    || lower.startsWith("deop ")
-                    || lower.startsWith("ban")
-                    || lower.startsWith("kick ")
-                    || lower.startsWith("reload")) {
+            if (runtime.isDispatchDenied(cleanCmd)) {
                 continue;
             }
 

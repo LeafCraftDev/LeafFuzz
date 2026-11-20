@@ -604,103 +604,175 @@ public final class NmsEmbeddedPlayerSession {
             );
         }
 
-        @Override
-        public synchronized LeafFuzzRuntime.SwarmSnapshot stepConcurrentSwarm(int churnCount) {
-            if (activeActors.isEmpty()) {
-                return new LeafFuzzRuntime.SwarmSnapshot(0, 0, 0, 0, 0);
-            }
-            Object mcServer = mcServerSupplier.get();
-            LogAndStallSignatureOracle oracle = runtime.faultOracle();
-            int actions = 0;
-            for (int i = 0; i < activeActors.size(); i++) {
-                PersonaPolicyBotActor bot = activeActors.get(i);
-                PersonaPolicyBotActor.BotStepRecord step = bot.stepAutonomousPolicy();
-                runtime.recordPlatformBotStep(step);
-                markChunkNeighborhood(bot.x() >> 4, bot.z() >> 4);
-                actions++;
-                NmsEmbeddedPlayerSession live = i < activeSessions.size() ? activeSessions.get(i) : null;
-                if (live != null) {
-                    live.sendMovePacket(
-                            step.x() + 0.5,
-                            step.y(),
-                            step.z() + 0.5,
-                            step.yawDeg(),
-                            step.pitchDeg(),
-                            oracle
-                    );
-                }
-            }
-            int toChurn = Math.max(0, Math.min(activeActors.size(), churnCount));
-            for (int c = 0; c < toChurn; c++) {
-                int idx = Math.floorMod(churnCursor++, activeActors.size());
-                NmsEmbeddedPlayerSession oldLive = idx < activeSessions.size() ? activeSessions.get(idx) : null;
-                if (oldLive != null) {
-                    oldLive.disconnect(oracle);
-                }
-                runtime.retentionScreener().recordPlayerDeparture();
-                boolean op = (idx & 7) == 0;
-                PersonaPolicyBotActor replacement = runtime.spawnPersonaBotActor(op ? "op" : "default");
-                SpiralAnchor anchor = assignSpiralAnchor(replacement, idx);
-                markChunkNeighborhood(anchor.chunkX(), anchor.chunkZ());
-                NmsEmbeddedPlayerSession newLive = trySpawnOnMinecraftServer(
-                        mcServer,
-                        replacement,
-                        op,
-                        2000 + churnCursor
-                );
-                activeActors.set(idx, replacement);
-                if (idx < activeSessions.size()) {
-                    activeSessions.set(idx, newLive);
-                }
-            }
-            runtime.resetTickStartNanos();
-            WorldCensus census = sampleWorldCensus(mcServer, activeActors.size());
-            return new LeafFuzzRuntime.SwarmSnapshot(
-                    Math.max(activeActors.size(), census.onlinePlayers()),
-                    Math.max(activeChunks.size(), census.loadedChunks()),
-                    Math.max(activeActors.size() * 2, census.trackedEntities()),
-                    actions,
-                    toChurn
-            );
-        }
+          @Override
+          public synchronized LeafFuzzRuntime.SwarmSnapshot stepConcurrentSwarm(int churnCount) {
+              if (activeActors.isEmpty()) {
+                  return new LeafFuzzRuntime.SwarmSnapshot(0, 0, 0, 0, 0);
+              }
+              Object mcServer = mcServerSupplier.get();
+              LogAndStallSignatureOracle oracle = runtime.faultOracle();
+              int actions = 0;
+              for (int i = 0; i < activeActors.size(); i++) {
+                  PersonaPolicyBotActor bot = activeActors.get(i);
+                  PersonaPolicyBotActor.BotStepRecord step = bot.stepAutonomousPolicy();
+                  runtime.recordPlatformBotStep(step);
+                  if (step.isWorldMutationSkill()) {
+                      runtime.recordBlockSkillExecution();
+                  }
+                  markChunkNeighborhood(bot.x() >> 4, bot.z() >> 4);
+                  actions++;
+                  NmsEmbeddedPlayerSession live = i < activeSessions.size() ? activeSessions.get(i) : null;
+                  if (live != null) {
+                      live.sendMovePacket(
+                              step.x() + 0.5,
+                              step.y(),
+                              step.z() + 0.5,
+                              step.yawDeg(),
+                              step.pitchDeg(),
+                              oracle
+                      );
+                      if (step.isWorldMutationSkill()) {
+                          live.applyReversibleBlockMicroSkill(step, oracle);
+                      }
+                  }
+              }
+              int toChurn = Math.max(0, Math.min(activeActors.size(), churnCount));
+              for (int c = 0; c < toChurn; c++) {
+                  int idx = Math.floorMod(churnCursor++, activeActors.size());
+                  NmsEmbeddedPlayerSession oldLive = idx < activeSessions.size() ? activeSessions.get(idx) : null;
+                  if (oldLive != null) {
+                      oldLive.disconnect(oracle);
+                  }
+                  runtime.retentionScreener().recordPlayerDeparture();
+                  boolean op = (idx & 7) == 0;
+                  PersonaPolicyBotActor replacement = runtime.spawnPersonaBotActor(op ? "op" : "default");
+                  SpiralAnchor anchor = assignSpiralAnchor(replacement, idx);
+                  markChunkNeighborhood(anchor.chunkX(), anchor.chunkZ());
+                  NmsEmbeddedPlayerSession newLive = trySpawnOnMinecraftServer(
+                          mcServer,
+                          replacement,
+                          op,
+                          2000 + churnCursor
+                  );
+                  activeActors.set(idx, replacement);
+                  if (idx < activeSessions.size()) {
+                      activeSessions.set(idx, newLive);
+                  }
+              }
+              runtime.resetTickStartNanos();
+              WorldCensus census = sampleWorldCensus(mcServer, activeActors.size());
+              return new LeafFuzzRuntime.SwarmSnapshot(
+                      Math.max(activeActors.size(), census.onlinePlayers()),
+                      Math.max(activeChunks.size(), census.loadedChunks()),
+                      Math.max(activeActors.size() * 2, census.trackedEntities()),
+                      actions,
+                      toChurn
+              );
+          }
 
-        @Override
-        public synchronized LeafFuzzRuntime.SwarmSnapshot captureSnapshot() {
-            Object mcServer = mcServerSupplier.get();
-            WorldCensus census = sampleWorldCensus(mcServer, activeActors.size());
-            return new LeafFuzzRuntime.SwarmSnapshot(
-                    Math.max(activeActors.size(), census.onlinePlayers()),
-                    Math.max(activeChunks.size(), census.loadedChunks()),
-                    Math.max(activeActors.size() * 2, census.trackedEntities()),
-                    0,
-                    0
-            );
-        }
+          @Override
+          public synchronized LeafFuzzRuntime.SwarmSnapshot captureSnapshot() {
+              Object mcServer = mcServerSupplier.get();
+              WorldCensus census = sampleWorldCensus(mcServer, activeActors.size());
+              return new LeafFuzzRuntime.SwarmSnapshot(
+                      Math.max(activeActors.size(), census.onlinePlayers()),
+                      Math.max(activeChunks.size(), census.loadedChunks()),
+                      Math.max(activeActors.size() * 2, census.trackedEntities()),
+                      0,
+                      0
+              );
+          }
 
-        @Override
-        public synchronized void teardownAll() {
-            LogAndStallSignatureOracle oracle = runtime.faultOracle();
-            for (NmsEmbeddedPlayerSession s : activeSessions) {
-                if (s != null) {
-                    s.disconnect(oracle);
-                }
-                runtime.retentionScreener().recordPlayerDeparture();
-            }
-            activeSessions.clear();
-            activeActors.clear();
-            activeChunks.clear();
-        }
+          @Override
+          public synchronized void teardownAll() {
+              LogAndStallSignatureOracle oracle = runtime.faultOracle();
+              for (NmsEmbeddedPlayerSession s : activeSessions) {
+                  if (s != null) {
+                      s.disconnect(oracle);
+                  }
+                  runtime.retentionScreener().recordPlayerDeparture();
+              }
+              activeSessions.clear();
+              activeActors.clear();
+              activeChunks.clear();
+          }
 
-        private void markChunkNeighborhood(int cx, int cz) {
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    activeChunks.add((cx + dx) + "," + (cz + dz));
-                }
-            }
-        }
-    }
+          private synchronized void markChunkNeighborhood(int cx, int cz) {
+              for (int dx = -1; dx <= 1; dx++) {
+                  for (int dz = -1; dz <= 1; dz++) {
+                      activeChunks.add((cx + dx) + "," + (cz + dz));
+                  }
+              }
+          }
+      }
 
-    private Object resolvePacketListener() {
+      /**
+       * Executes a reversible in-memory block read/write on the player's already-loaded chunk
+       * ({@code S-005} safe via {@code getChunkNow}) when a mining or building micro-skill is
+       * selected.
+       */
+      public void applyReversibleBlockMicroSkill(
+              PersonaPolicyBotActor.BotStepRecord step,
+              LogAndStallSignatureOracle oracle
+      ) {
+          if (disconnected || serverPlayer == null || step == null || !step.isWorldMutationSkill()) {
+              return;
+          }
+          try {
+              ClassLoader cl = serverPlayer.getClass().getClassLoader();
+              Object level = serverPlayer.getClass().getMethod("serverLevel").invoke(serverPlayer);
+              Object chunkSource = level != null
+                      ? level.getClass().getMethod("getChunkSource").invoke(level)
+                      : null;
+              if (chunkSource == null) {
+                  return;
+              }
+              int[] off = step.targetBlockOffset();
+              int bx = step.x() + off[0];
+              int by = Math.max(-60, Math.min(310, step.y() + off[1]));
+              int bz = step.z() + off[2];
+              Object loadedChunk = chunkSource.getClass()
+                      .getMethod("getChunkNow", int.class, int.class)
+                      .invoke(chunkSource, bx >> 4, bz >> 4);
+              if (loadedChunk != null) {
+                  invokeLoadedChunkSetBlockState(cl, loadedChunk, bx, by, bz);
+              }
+          } catch (Throwable t) {
+              if (oracle != null) {
+                  Throwable cause = (t instanceof InvocationTargetException ite && ite.getCause() != null)
+                          ? ite.getCause()
+                          : t;
+                  oracle.recordThrowable(cause, "Reversible NMS block micro-skill exception");
+              }
+          }
+      }
+
+      private static void invokeLoadedChunkSetBlockState(
+              ClassLoader cl,
+              Object loadedChunk,
+              int bx,
+              int by,
+              int bz
+      ) throws ReflectiveOperationException {
+          Class<?> blockPosCls = Class.forName("net.minecraft.core.BlockPos", true, cl);
+          Object pos = blockPosCls.getConstructor(int.class, int.class, int.class).newInstance(bx, by, bz);
+          Object origState = loadedChunk.getClass().getMethod("getBlockState", blockPosCls).invoke(loadedChunk, pos);
+          if (origState == null) {
+              return;
+          }
+          Class<?> blockStateCls = Class.forName("net.minecraft.world.level.block.state.BlockState", true, cl);
+          try {
+              loadedChunk.getClass()
+                      .getMethod("setBlockState", blockPosCls, blockStateCls, int.class)
+                      .invoke(loadedChunk, pos, origState, 0);
+          } catch (NoSuchMethodException e) {
+              loadedChunk.getClass()
+                      .getMethod("setBlockState", blockPosCls, blockStateCls, boolean.class)
+                      .invoke(loadedChunk, pos, origState, false);
+          }
+      }
+
+      private Object resolvePacketListener() {
         try {
             return serverPlayer.getClass().getField("connection").get(serverPlayer);
         } catch (Throwable ignored) {
