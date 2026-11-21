@@ -378,6 +378,7 @@ if (!excludeNeoforge) {
 
 // Standalone helper plugins (no rtp-api / rtp-core dependency).
 // See helpers/PeriodicWorldSaver/README.md for the directory rationale.
+include 'helpers:FlightSpeedHelper'
 // Black-box stress-test driver for /rtp-style commands. Drives RTP, RTP-Pro,
 // and competitor plugins under identical workloads to fill the front-page
 // comparison table. See helpers/StressTestRTP/README.md and ADR-122.

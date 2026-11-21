@@ -4,7 +4,7 @@ All notable changes to `LeafFuzz` are documented in this file.
 
 ## [Unreleased]
 
-## [0.1.1] - Unreleased
+## [0.1.1] - 2026-11-11
 
 ### Added
 - Headless Pass 1 zero-server static batch and single-submission triage CLI (`LeafFuzzBatchTriageRunner`: `java -jar LeafFuzz-0.1.1.jar triage (--input-dir <dir> | --jar <file.jar>) [--max-pass 200] [--threads <n>] [--out-json <f>] [--out-csv <f>] [--out-md <f>] [--fail-on-reject]`, alias `scan`) with `< 0.5%` empirical false-positive rate, composite delivery scoring, Folia/Fabric Jar-in-Jar causal tracing, constant-pool companion dependency inference (`Vault`, `PlaceholderAPI`, `WorldGuard`, `LuckPerms`), and deterministic `CONFIRMED_FOLIA_CLAIM_VIOLATION` / `CONFIRMED_MALICIOUS_BACKDOOR_SINK` rejection gates (`REQ-FUZZ-TRIAGE-001`..`004`).

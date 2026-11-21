@@ -47,18 +47,22 @@ java -jar LeafFuzz.jar extract-mineflayer --out ./bench-swarm.js
 
 # Pass 1 zero-server static batch triage (filter 2,000 submission JARs down to <= 200 with < 0.5% FPR)
 java -jar LeafFuzz.jar triage --input-dir ./submissions --max-pass 200 --out-json triage.json --out-csv triage.csv --out-md triage.md
+
+# Single-JAR static triage with CI exit-code gate (--fail-on-reject exits with code 3 if rejected)
+java -jar LeafFuzz.jar triage --jar ./MyPlugin.jar --fail-on-reject --out-md triage.md
 ```
 
 | CLI Flag | Default | Description |
 |---|---|---|
-| `triage` / `scan` | *(subcommand)* | Runs headless Pass 1 zero-server static bytecode batch triage across `--input-dir`, applying closed-world causal hard-reject checks (validated to `< 0.5%` empirical FPR on real-world corpora) and inferring constant-pool companion dependencies (`Vault`, `PlaceholderAPI`, `WorldGuard`, etc.) with zero penalty. |
-| `--input-dir <dir>` / `-i` | *(required for `triage`)* | Directory of candidate plugin/mod `.jar` submissions to scan off-thread. |
+| `triage` / `scan` | *(subcommand)* | Runs headless Pass 1 zero-server static bytecode batch triage across `--input-dir` (or single-file `--jar`), applying closed-world causal hard-reject checks (validated to `< 0.5%` empirical FPR on real-world corpora) and inferring constant-pool companion dependencies (`Vault`, `PlaceholderAPI`, `WorldGuard`, `LuckPerms`) with zero penalty. |
+| `--input-dir <dir>` / `-i` / `--jar <file.jar>` | *(required for `triage`)* | Directory of candidate plugin/mod `.jar` submissions or a single `.jar` file to scan off-thread. |
 | `--max-pass <n>` | `200` | Maximum number of top-ranked valid archives promoted to `SHORTLIST_PASS` (remaining valid archives are marked `DEFERRED_RANK`). |
 | `--threads <n>` / `-t` | `availableProcessors` | Parallel worker thread count (`1..64`) for `triage`. |
 | `--out-json <path>` | *(none)* | Writes the machine-readable JSON triage leaderboard and inferred dependency manifest for Pass 2 server provisioning. |
 | `--out-csv <path>` | *(none)* | Writes the RFC 4180 CSV triage leaderboard. |
 | `--out-md <path>` | *(none)* | Writes the human-readable Markdown triage leaderboard report. |
 | `--strict-s004-s005` / `--no-strict-s004-s005` | `true` | Controls whether `CONFIRMED (100%)` `S-004` (swallowed I/O exception) and `S-005` (async worker main-thread world mutation) proofs trigger immediate `REJECT`. |
+| `--fail-on-reject` | `false` | Returns exit code `3` when one or more scanned archives receive a `REJECT` verdict (for CI / pre-submission gating). |
 | `--host <host>` / `-H` | `127.0.0.1` | Target Minecraft server hostname or IP address. |
 | `--port <port>` / `-p` | `25565` | Target Minecraft server TCP port (`1..65535`). |
 | `--players <auto\|ramp\|1..500>` / `-n` | `100` (`auto`) | Target concurrent offline-mode TCP bot sockets dispersed across an Archimedean spiral. |

@@ -33,7 +33,7 @@
 - `/fuzz reset [scope=<all|faults|leaks|campaign>]` — Clear recorded fault signatures, post-GC leak checkpoints, or campaign state.
 - `/fuzz test` — Run `[FUZZ bit]` PBIT/CBIT/IBIT self-tests (`7` core checks + `3` live-server `FUZZ-LIVE-*` canaries).
 - `/fuzz reload` — Validate and hot-reload `config.yml`, `messages.yml`, and optional `personas.jsonl`.
-- `java -jar LeafFuzz.jar triage --input-dir ./submissions --max-pass 200 --out-json triage.json --out-csv triage.csv --out-md triage.md` — Headless Pass 1 zero-server static batch triage CLI (closed-world causal hard-reject gate validated to `< 0.5%` empirical FPR on real-world corpora, composite delivery ranking, and constant-pool companion dependency inference).
+- `java -jar LeafFuzz.jar triage (--input-dir ./submissions | --jar ./MyPlugin.jar) [--max-pass 200] [--threads <n>] [--out-json triage.json] [--out-csv triage.csv] [--out-md triage.md] [--fail-on-reject]` — Headless Pass 1 zero-server static batch and single-submission triage CLI (closed-world causal hard-reject gate validated to `< 0.5%` empirical FPR on real-world corpora, composite delivery ranking, and constant-pool companion dependency inference).
 - `java -jar LeafFuzz.jar swarm --host 127.0.0.1 --port 25565 --players auto` — Standalone CLI mode driving an external TCP protocol bot swarm and ramp-to-instability capacity check (`java -jar LeafFuzz.jar extract-mineflayer` extracts the bundled `bench-swarm.js` script).
 
 ---
