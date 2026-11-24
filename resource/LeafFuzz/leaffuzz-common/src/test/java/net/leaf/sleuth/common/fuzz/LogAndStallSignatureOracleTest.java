@@ -291,4 +291,32 @@ class LogAndStallSignatureOracleTest {
         assertEquals("hazard:task-creep:BadPlugin-1.0.jar.ScheduledTaskCreep", creep.get().signatureId());
         assertEquals(4L, oracle.totalHazardsRecorded());
     }
+
+    @Test
+    @DisplayName("Rule F-001 & S-002: recordThreadGrowthCheckpoint detects sustained thread leaks while rejecting transient spikes and sub-500ms noise")
+    void detectsSustainedThreadLeakAndRejectsTransientSpikes() {
+        LogAndStallSignatureOracle oracle = new LogAndStallSignatureOracle();
+
+        // 1. Sub-500ms rapid samples must not accumulate or trigger false positives
+        assertTrue(oracle.recordThreadGrowthCheckpoint("LeakyThreads.jar", 20, 4, 10, 1_000L).isEmpty());
+        assertTrue(oracle.recordThreadGrowthCheckpoint("LeakyThreads.jar", 25, 9, 20, 1_100L).isEmpty());
+        assertTrue(oracle.recordThreadGrowthCheckpoint("LeakyThreads.jar", 30, 14, 30, 1_200L).isEmpty());
+        assertTrue(oracle.recordThreadGrowthCheckpoint("LeakyThreads.jar", 35, 19, 40, 1_300L).isEmpty());
+
+        // 2. Sustained monotonic growth across >=4 time-separated checkpoints triggers hazard:thread-leak
+        assertTrue(oracle.recordThreadGrowthCheckpoint("LeakyThreads.jar", 24, 6, 20, 2_000L).isEmpty());
+        assertTrue(oracle.recordThreadGrowthCheckpoint("LeakyThreads.jar", 28, 9, 30, 3_000L).isEmpty());
+        Optional<FaultSignature> leak = oracle.recordThreadGrowthCheckpoint("LeakyThreads.jar", 34, 12, 40, 4_000L);
+        assertTrue(leak.isPresent(), "Expected sustained thread-leak hazard after 4 monotonic checkpoints");
+        assertEquals("hazard:thread-leak:LeakyThreads.jar.UnmanagedThreadLeak", leak.get().signatureId());
+        assertEquals("HAZARD", leak.get().kind());
+        assertEquals("LeakyThreads.jar", leak.get().suspectJar());
+
+        // 3. clear() resets checkpoints; transient spike that drops back must NOT trigger
+        oracle.clear();
+        assertTrue(oracle.recordThreadGrowthCheckpoint("StablePlugin.jar", 20, 4, 10, 10_000L).isEmpty());
+        assertTrue(oracle.recordThreadGrowthCheckpoint("StablePlugin.jar", 32, 10, 20, 11_000L).isEmpty());
+        assertTrue(oracle.recordThreadGrowthCheckpoint("StablePlugin.jar", 35, 11, 30, 12_000L).isEmpty());
+        assertTrue(oracle.recordThreadGrowthCheckpoint("StablePlugin.jar", 21, 4, 40, 13_000L).isEmpty());
+    }
 }

@@ -432,6 +432,10 @@ public final class SliceBitHarness implements BuiltInTestable {
                     invariants.add("S-002-RESOURCE-LEAK");
                     issues.add("S-002 unclosed Closeable/ChunkTicket leak in " + f.entryPointSymbol());
                 }
+                case CAUSAL_UNMANAGED_THREAD_SPAWN -> {
+                    invariants.add("F-001-UNMANAGED-THREAD-SPAWN");
+                    issues.add("F-001/S-002 unmanaged thread or executor spawn in " + f.entryPointSymbol());
+                }
                 case CAUSAL_SHARED_STATE_RACE -> {
                     invariants.add("CAUSAL-SHARED-STATE-RACE");
                     issues.add("CAUSAL-RACE shared-state concurrency hazard in " + f.entryPointSymbol());

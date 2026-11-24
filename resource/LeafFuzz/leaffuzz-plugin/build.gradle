@@ -77,6 +77,7 @@ shadowJar {
     exclude 'org/intellij/lang/annotations/**'
     exclude 'META-INF/maven/**'
     exclude 'META-INF/leaf-sdk/**'
+    exclude 'META-INF/services/io.github.dailystruggle.rtp.*'
     exclude 'META-INF/versions/*/module-info.class'
     exclude { details ->
         details.path.startsWith('io/github/dailystruggle/helpers/stresstestrtp/') &&

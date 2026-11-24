@@ -145,6 +145,9 @@ public final class LeafFuzzRuntime implements AutoCloseable, io.github.dailystru
     private final Map<String, int[]> obsCommandStats = new java.util.LinkedHashMap<>();
     private final Map<String, Double> obsCommandMaxDist = new java.util.LinkedHashMap<>();
     private final Map<String, CausalGraphReport> causalGraphCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int MAX_LIVE_RUNTIME_HAZARDS = 256;
+    private final java.util.concurrent.ConcurrentLinkedDeque<FuzzRuntimeHazardRecord> liveRuntimeHazards =
+            new java.util.concurrent.ConcurrentLinkedDeque<>();
     private volatile HttpTransport customLlmHttpTransport;
     private volatile List<SleuthServerFuzzer> activeTargetFuzzers = List.of();
 
@@ -590,6 +593,7 @@ public final class LeafFuzzRuntime implements AutoCloseable, io.github.dailystru
             this.obsCommandStats.clear();
             this.obsCommandMaxDist.clear();
         }
+        this.liveRuntimeHazards.clear();
     }
 
     private void sampleIdleWindowWithTelemetry(long durationMs) {
@@ -1127,10 +1131,61 @@ public final class LeafFuzzRuntime implements AutoCloseable, io.github.dailystru
         return List.copyOf(out);
     }
 
+    /**
+     * Records a live runtime tick-thread hazard (for example from GoldLeaf's {@code TickHazardMonitor}
+     * via {@code goldleaf-ADR-007} §2.2) into a bounded lock-free buffer surfaced by
+     * {@link #diagnosticFuzzRuntimeHazards()}.
+     */
+    public void recordRuntimeHazard(
+            String suspectArtifactOrClass,
+            String signatureId,
+            String kind,
+            String severity,
+            String trigger,
+            String detail
+    ) {
+        String resolvedArtifact = (suspectArtifactOrClass == null || suspectArtifactOrClass.isBlank())
+                ? "unknown"
+                : suspectArtifactOrClass.trim();
+        JarClassOwnershipIndex idx = this.ownershipIndex;
+        if (idx != null && resolvedArtifact.contains(".")) {
+            String owner = idx.ownerJarForClass(resolvedArtifact).orElse(null);
+            if (owner != null && !owner.isBlank()) {
+                resolvedArtifact = owner;
+            }
+        }
+        String safeSig = (signatureId == null || signatureId.isBlank()) ? "runtime-hazard" : signatureId.trim();
+        String safeKind = (kind == null || kind.isBlank()) ? "RUNTIME_HAZARD" : kind.trim();
+        String safeSeverity = (severity == null || severity.isBlank()) ? "WARN" : severity.trim();
+        String safeTrigger = trigger == null ? "" : trigger;
+        String safeDetail = detail == null ? "" : detail;
+        this.liveRuntimeHazards.addLast(new FuzzRuntimeHazardRecord(
+                resolvedArtifact,
+                safeSig,
+                safeKind,
+                safeSeverity,
+                safeTrigger,
+                safeDetail,
+                "config/goldleaf.yml",
+                ""
+        ));
+        while (this.liveRuntimeHazards.size() > MAX_LIVE_RUNTIME_HAZARDS) {
+            this.liveRuntimeHazards.pollFirst();
+        }
+    }
+
     @Override
     public List<FuzzRuntimeHazardRecord> diagnosticFuzzRuntimeHazards() {
         LeafFuzzScorecardReport sc = this.latestScorecard;
-        return sc != null ? sc.diagnosticFuzzRuntimeHazards() : List.of();
+        if (this.liveRuntimeHazards.isEmpty()) {
+            return sc != null ? sc.diagnosticFuzzRuntimeHazards() : List.of();
+        }
+        List<FuzzRuntimeHazardRecord> merged = new ArrayList<>();
+        if (sc != null) {
+            merged.addAll(sc.diagnosticFuzzRuntimeHazards());
+        }
+        merged.addAll(this.liveRuntimeHazards);
+        return List.copyOf(merged);
     }
 
     /**
@@ -1243,6 +1298,7 @@ public final class LeafFuzzRuntime implements AutoCloseable, io.github.dailystru
             case CAUSAL_SHARED_STATE_RACE -> "Concurrent State Race";
             case CAUSAL_SYNC_MAIN_THREAD_IO -> "Main-Thread Blocking I/O";
             case CAUSAL_UNCLOSED_RESOURCE_LEAK -> "Unreleased Memory / Resource";
+            case CAUSAL_UNMANAGED_THREAD_SPAWN -> "Unmanaged Thread Spawn";
             case CAUSAL_LLM_SEMANTIC_MISMATCH -> "Config Condition Mismatch";
         };
     }
@@ -1275,6 +1331,8 @@ public final class LeafFuzzRuntime implements AutoCloseable, io.github.dailystru
                     "Catches and ignores an operational exception without logging or notifying the player.";
             case "CAUSAL_UNCLOSED_RESOURCE_LEAK" ->
                     "Opens a file stream, chunk ticket, or player session entry without closing or cleaning it up.";
+            case "CAUSAL_UNMANAGED_THREAD_SPAWN" ->
+                    "Spawns raw threads, timers, or executor pools directly instead of using the server scheduler.";
             case "CAUSAL_SHARED_STATE_RACE" ->
                     "Reads and modifies shared plugin state across threads without consistent synchronization.";
             case "CAUSAL_ORPHANED_SUPPLIER" ->
@@ -1760,7 +1818,7 @@ public final class LeafFuzzRuntime implements AutoCloseable, io.github.dailystru
                 + "function trunc(s,n){var t=String(s==null?'':s);return t.length>n?t.substring(0,n-1)+'…':t;}"
                 + "var SINK_LABELS={STATE_MUTATION:'Updates Plugin State',MESSAGE_ONLY:'Sends Chat Message',MESSAGE_SEND:'Sends Chat Message',TELEPORT:'Teleports Player',STORAGE_IO:'Disk / Database I/O',CHUNK_IO:'Loads World Chunks',WORLD_MUTATION:'Modifies World Blocks',INVENTORY_MENU:'Opens GUI Menu',ECONOMY_TX:'Economy Transaction',SCHEDULER_TASK:'Schedules Server Task',ASYNC_SCHEDULER:'Runs Background Task',NETWORK_IO:'Network Request',PERMISSION_CHECK:'Checks Permission',CLEAN_EXECUTION:'No Lag Risks Found'};"
                 + "var SINK_SUBS={STATE_MUTATION:'Modifies in-memory plugin data',MESSAGE_ONLY:'Sends chat feedback to player',MESSAGE_SEND:'Sends chat feedback to player',TELEPORT:'Moves player in the world',STORAGE_IO:'Reads or writes disk/database',CHUNK_IO:'Loads or generates world chunks',WORLD_MUTATION:'Changes world blocks or entities',INVENTORY_MENU:'Opens inventory menu screen',ECONOMY_TX:'Updates player economy balance',SCHEDULER_TASK:'Queues task on server scheduler',ASYNC_SCHEDULER:'Runs task on background thread',NETWORK_IO:'Opens external network connection',PERMISSION_CHECK:'Verifies player permission'};"
-                + "var HZ_TITLES={CAUSAL_SYNC_MAIN_THREAD_IO:'Main-Thread Blocking I/O',CAUSAL_ASYNC_MAIN_THREAD_SINK:'Unsafe Off-Thread World Call',CAUSAL_SWALLOWED_FAILURE:'Silently Ignored Error',CAUSAL_UNCLOSED_RESOURCE_LEAK:'Unreleased Memory / Resource',CAUSAL_SHARED_STATE_RACE:'Concurrent State Race',CAUSAL_ORPHANED_SUPPLIER:'Dropped Async Result',CAUSAL_HOLLOW_COMMAND:'Chat-Only Command (No Action)',CAUSAL_DEAD_CONFIG_KEY:'Unused Config Setting',CAUSAL_UNREAD_CONFIG_FIELD:'Ignored Config Field',CAUSAL_UNIT_MISMATCH:'Time Unit Mismatch (s vs ms)',CAUSAL_UNREGISTERED_LISTENER:'Inactive Event Listener',CAUSAL_UNWIRED_COMMAND:'Unregistered Command','S-001':'Unsafe Teleport Destination','S-002':'Unreleased Memory / Resource','S-003':'Protected Claim Bypass','S-004':'Silently Ignored Error','S-005':'Main-Thread Blocking I/O','S-006':'Premature Startup API Call','S-007':'Missing Command Failure Feedback'};"
+                + "var HZ_TITLES={CAUSAL_SYNC_MAIN_THREAD_IO:'Main-Thread Blocking I/O',CAUSAL_ASYNC_MAIN_THREAD_SINK:'Unsafe Off-Thread World Call',CAUSAL_SWALLOWED_FAILURE:'Silently Ignored Error',CAUSAL_UNCLOSED_RESOURCE_LEAK:'Unreleased Memory / Resource',CAUSAL_UNMANAGED_THREAD_SPAWN:'Unmanaged Thread Spawn',CAUSAL_SHARED_STATE_RACE:'Concurrent State Race',CAUSAL_ORPHANED_SUPPLIER:'Dropped Async Result',CAUSAL_HOLLOW_COMMAND:'Chat-Only Command (No Action)',CAUSAL_DEAD_CONFIG_KEY:'Unused Config Setting',CAUSAL_UNREAD_CONFIG_FIELD:'Ignored Config Field',CAUSAL_UNIT_MISMATCH:'Time Unit Mismatch (s vs ms)',CAUSAL_UNREGISTERED_LISTENER:'Inactive Event Listener',CAUSAL_UNWIRED_COMMAND:'Unregistered Command','S-001':'Unsafe Teleport Destination','S-002':'Unreleased Memory / Resource','S-003':'Protected Claim Bypass','S-004':'Silently Ignored Error','S-005':'Main-Thread Blocking I/O','S-006':'Premature Startup API Call','S-007':'Missing Command Failure Feedback'};"
                 + "function humanizeStereotype(st){var m={COMMAND:'Command',EVENT_LISTENER:'Event Listener',ASYNC_WORKER:'Background Task',CONFIG_GUARD:'Config Setting',EFFECT_SINK:'Server Action',COMPONENT:'Plugin Component'};return m[st]||st||'Component';}"
                 + "function humanizeRegMode(rm,st,longForm){if(st==='COMMAND'&&(!rm||rm==='NOT_APPLICABLE'||rm==='ACTIVE'))return longForm?'Registered Command (Always Active)':'Always Active';var m={REGISTERED_UNCONDITIONAL:'Always Active',ACTIVE:'Always Active',REGISTERED_CONFIG_GATED:'Config-Gated',CONFIG_GATE:'Feature Toggle',CONFIG_KEY:'Read by Plugin',UNREGISTERED:'Inactive (Not Registered)',NOT_APPLICABLE:'Always Active'};return m[rm]||rm||'Always Active';}"
                 + "function humanizeCfgSub(sub){var s=String(sub||'');if(s==='CONFIG_GATE'||s==='GATES ENTRY')return 'Feature Toggle';if(s==='CONFIG_KEY'||s==='READ BY SLICE')return 'Read by Plugin';return s.replace(/DEAD_KEY/g,'Unused Setting').replace(/UNREAD_FIELD/g,'Ignored Field').replace(/HAZARD_GATE/g,'Controls Warning Path').replace(/WIRED/g,'Active Setting').replace(/HOT_RELOAD/g,'Live Reload').replace(/PLUGIN_RELOAD/g,'Plugin Reload').replace(/SERVER_RESTART/g,'Server Restart');}"
@@ -2516,6 +2574,7 @@ public final class LeafFuzzRuntime implements AutoCloseable, io.github.dailystru
                                 }
                             }
                             faultOracle.detectDeadlocksAndStuckWorkers(System.nanoTime());
+                            faultOracle.sampleLiveThreadGrowth(effTarget, executedEpisodes);
                             boolean shouldCaptureGc = (effEpisodes <= 60)
                                     || (b < 4)
                                     || ((b + 1) % 4 == 0)

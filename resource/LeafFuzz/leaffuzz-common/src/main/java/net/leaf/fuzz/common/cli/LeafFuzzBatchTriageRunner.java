@@ -709,7 +709,7 @@ public final class LeafFuzzBatchTriageRunner {
                 case CAUSAL_ASYNC_MAIN_THREAD_SINK -> 25.0;
                 case CAUSAL_SWALLOWED_FAILURE -> 18.0;
                 case CAUSAL_UNCLOSED_RESOURCE_LEAK -> 15.0;
-                case CAUSAL_SYNC_MAIN_THREAD_IO -> 12.0;
+                case CAUSAL_SYNC_MAIN_THREAD_IO, CAUSAL_UNMANAGED_THREAD_SPAWN -> 12.0;
                 case CAUSAL_HOLLOW_COMMAND -> 12.0;
                 case CAUSAL_SHARED_STATE_RACE, CAUSAL_ORPHANED_SUPPLIER -> 10.0;
                 case CAUSAL_UNWIRED_COMMAND, CAUSAL_UNREGISTERED_LISTENER -> 10.0;

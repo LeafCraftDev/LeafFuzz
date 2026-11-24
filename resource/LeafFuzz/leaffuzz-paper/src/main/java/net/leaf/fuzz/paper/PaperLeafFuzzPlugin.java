@@ -28,6 +28,7 @@ public final class PaperLeafFuzzPlugin extends JavaPlugin
     private BukkitPluginServerAccessor accessor;
     private LeafFuzzRuntime runtime;
     private PaperRestartCoordinator restartCoordinator;
+    private GoldLeafHazardBridge goldLeafHazardBridge;
 
     @Override
     public void onLoad() {
@@ -85,6 +86,7 @@ public final class PaperLeafFuzzPlugin extends JavaPlugin
                 )
         );
         registerWithLeafConfigWorkspaceIfPresent();
+        this.goldLeafHazardBridge = GoldLeafHazardBridge.tryBind(this.runtime, getLogger());
         getLogger().info("LeafFuzz (Paper/Folia) enabled. Run /fuzz check <PluginName|all> to run a 4-stage QC pass.");
     }
 
@@ -106,6 +108,10 @@ public final class PaperLeafFuzzPlugin extends JavaPlugin
 
     @Override
     public void onDisable() {
+        if (this.goldLeafHazardBridge != null) {
+            this.goldLeafHazardBridge.close();
+            this.goldLeafHazardBridge = null;
+        }
         if (this.runtime != null) {
             this.runtime.close();
         }
