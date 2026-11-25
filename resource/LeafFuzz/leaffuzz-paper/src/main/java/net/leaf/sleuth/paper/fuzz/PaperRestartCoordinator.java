@@ -31,7 +31,7 @@ import java.util.logging.Logger;
  *   <li>Explicit configuration override ({@code fuzz.restartStrategy}) when not {@code "AUTO"}.</li>
  *   <li>{@link RestartStrategy#SUPERVISOR_STOP} when Pterodactyl environment variables
  *       ({@code P_SERVER_UUID} or {@code PTERODACTYL_*}) are present.</li>
- *   <li>{@link RestartStrategy#NONE} when running on Folia ({@link ServerAccessor#isFolia()}),
+ *   <li>{@link RestartStrategy#NONE} when running on Folia ({@link #isFolia()}),
  *       where {@code Bukkit.spigot().restart()} throws {@link UnsupportedOperationException}.</li>
  *   <li>{@link RestartStrategy#SPIGOT_RESTART} on Paper/Spigot when {@code spigot.yml}
  *       {@code settings.restart-script} points to an existing file on disk.</li>

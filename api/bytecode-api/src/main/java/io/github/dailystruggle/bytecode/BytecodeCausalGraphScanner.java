@@ -251,7 +251,7 @@ public final class BytecodeCausalGraphScanner {
         CAUSAL_HOLLOW_COMMAND,
         /** Order 2: Shared mutable class field is accessed across methods/threads with mismatched locks or unsynchronized collection mutations ({@code CAUSAL-RACE}). */
         CAUSAL_SHARED_STATE_RACE,
-        /** Order 2: Synchronous command or non-async event handler reaches blocking chunk/disk/JDBC/Future.get I/O within k<=4 hops ({@code CAUSAL-MAIN-IO}, {@code S-005}). */
+        /** Order 2: Synchronous command or non-async event handler reaches blocking chunk/disk/JDBC/Future.get I/O within {@code k <= 4} hops ({@code CAUSAL-MAIN-IO}, {@code S-005}). */
         CAUSAL_SYNC_MAIN_THREAD_IO,
         /** Order 2: Intra-method Closeable/stream/ChunkTicket allocation lacks close()/release()/MemoryTracker across exit paths ({@code CAUSAL-LEAK}, {@code S-002}). */
         CAUSAL_UNCLOSED_RESOURCE_LEAK,

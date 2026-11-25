@@ -383,7 +383,7 @@ public final class ServerConfigAtlas {
 
     /**
      * Scans a server root directory (`server.properties`, `spigot.yml`, `paper-global.yml`,
-     * `plugins/*.jar`, and `plugins/<Plugin>/*.yml`) off-thread into a populated {@link ServerConfigAtlas}.
+     * `plugins/*.jar`, and {@code plugins/<Plugin>/*.yml}) off-thread into a populated {@link ServerConfigAtlas}.
      *
      * @param serverRoot server working directory
      * @return populated config atlas

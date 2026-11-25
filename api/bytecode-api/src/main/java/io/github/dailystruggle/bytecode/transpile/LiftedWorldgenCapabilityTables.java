@@ -2032,7 +2032,7 @@ public final class LiftedWorldgenCapabilityTables {
 
     /**
      * Evaluates Mojang's lifted {@code Aquifer$NoiseBasedAquifer#computeSubstance} 18-cell 3D Voronoi
-     * substance & curved pressure-barrier equation on a {@code dens <= 0.0f} voxel in FP32.
+     * substance &amp; curved pressure-barrier equation on a {@code dens <= 0.0f} voxel in FP32.
      */
     public static int evaluateNoiseBasedAquiferVoxel(
             AquiferCellSnapshot snap,

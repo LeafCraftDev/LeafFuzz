@@ -104,12 +104,7 @@ public final class BytecodeSsaLifter {
     }
 
     /**
-     * Optional caller-supplied hook for closed-world graph lifting:
-     * <ul>
-     *   <li>{@link #internObject(Object)} maps opaque immutable terminal objects to stable {@code int} IDs.</li>
-     *   <li>{@link #resolveContextGetter(int, String, String, String)} binds getter calls on a
-     *       read-only context parameter object to named scalar IR input parameters.</li>
-     * </ul>
+     * Descriptor binding a context-object method call to a target instance and coordinate parameter names.
      */
     public record ContextBoundMethodDelegate(
             Object targetInstance,
@@ -125,6 +120,14 @@ public final class BytecodeSsaLifter {
         }
     }
 
+    /**
+     * Optional caller-supplied hook for closed-world graph lifting:
+     * <ul>
+     *   <li>{@link #internObject(Object)} maps opaque immutable terminal objects to stable {@code int} IDs.</li>
+     *   <li>{@link #resolveContextGetter(int, String, String, String)} binds getter calls on a
+     *       read-only context parameter object to named scalar IR input parameters.</li>
+     * </ul>
+     */
     public interface ObjectInterner {
         ObjectInterner NONE = new ObjectInterner() {};
 
