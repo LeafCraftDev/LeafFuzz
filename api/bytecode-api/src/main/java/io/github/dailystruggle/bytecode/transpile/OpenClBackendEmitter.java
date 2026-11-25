@@ -236,6 +236,48 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
         public int[] spilledLutWords() {
             return java.util.Arrays.copyOf(spilledLutWords, spilledLutWords.length);
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DensityVolumeProgram other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.kernelName, other.kernelName)
+                    && java.util.Objects.equals(this.sourceCode, other.sourceCode)
+                    && java.util.Objects.equals(this.kernelDigestSha256, other.kernelDigestSha256)
+                    && java.util.Arrays.equals(this.spilledLutWords, other.spilledLutWords)
+                    && this.usedConstantBytes == other.usedConstantBytes
+                    && this.spilledLutCount == other.spilledLutCount
+                    && this.deduplicatedLutCount == other.deduplicatedLutCount;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.kernelName);
+            result = 31 * result + java.util.Objects.hashCode(this.sourceCode);
+            result = 31 * result + java.util.Objects.hashCode(this.kernelDigestSha256);
+            result = 31 * result + java.util.Arrays.hashCode(this.spilledLutWords);
+            result = 31 * result + this.usedConstantBytes;
+            result = 31 * result + this.spilledLutCount;
+            result = 31 * result + this.deduplicatedLutCount;
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "DensityVolumeProgram[kernelName=" + this.kernelName
+                    + ", sourceCode=" + this.sourceCode
+                    + ", kernelDigestSha256=" + this.kernelDigestSha256
+                    + ", spilledLutWords=" + java.util.Arrays.toString(this.spilledLutWords)
+                    + ", usedConstantBytes=" + this.usedConstantBytes
+                    + ", spilledLutCount=" + this.spilledLutCount
+                    + ", deduplicatedLutCount=" + this.deduplicatedLutCount
+                    + "]";
+        }
     }
 
     /**
@@ -505,6 +547,48 @@ public final class OpenClBackendEmitter implements ConceptBackendEmitter {
         @Override
         public int[] spilledLutWords() {
             return java.util.Arrays.copyOf(spilledLutWords, spilledLutWords.length);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof MultiModuleSectionProgram other)) {
+                return false;
+            }
+            return java.util.Objects.equals(this.primarySourceCode, other.primarySourceCode)
+                    && java.util.Objects.equals(this.auxiliaryHelpersSource, other.auxiliaryHelpersSource)
+                    && java.util.Objects.equals(this.auxEntryCallExprs, other.auxEntryCallExprs)
+                    && java.util.Arrays.equals(this.spilledLutWords, other.spilledLutWords)
+                    && this.usedConstantBytes == other.usedConstantBytes
+                    && this.spilledLutCount == other.spilledLutCount
+                    && this.deduplicatedLutCount == other.deduplicatedLutCount;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Objects.hashCode(this.primarySourceCode);
+            result = 31 * result + java.util.Objects.hashCode(this.auxiliaryHelpersSource);
+            result = 31 * result + java.util.Objects.hashCode(this.auxEntryCallExprs);
+            result = 31 * result + java.util.Arrays.hashCode(this.spilledLutWords);
+            result = 31 * result + this.usedConstantBytes;
+            result = 31 * result + this.spilledLutCount;
+            result = 31 * result + this.deduplicatedLutCount;
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "MultiModuleSectionProgram[primarySourceCode=" + this.primarySourceCode
+                    + ", auxiliaryHelpersSource=" + this.auxiliaryHelpersSource
+                    + ", auxEntryCallExprs=" + this.auxEntryCallExprs
+                    + ", spilledLutWords=" + java.util.Arrays.toString(this.spilledLutWords)
+                    + ", usedConstantBytes=" + this.usedConstantBytes
+                    + ", spilledLutCount=" + this.spilledLutCount
+                    + ", deduplicatedLutCount=" + this.deduplicatedLutCount
+                    + "]";
         }
     }
 

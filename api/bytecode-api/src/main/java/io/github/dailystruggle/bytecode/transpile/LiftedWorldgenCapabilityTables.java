@@ -1219,6 +1219,39 @@ public final class LiftedWorldgenCapabilityTables {
         public InterpolatedDensityPlan(DensityFieldEvaluator[] channels, InterpolatedCombiner combiner) {
             this(channels, combiner, null, null);
         }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof InterpolatedDensityPlan other)) {
+                return false;
+            }
+            return java.util.Arrays.equals(this.channels, other.channels)
+                    && java.util.Objects.equals(this.combiner, other.combiner)
+                    && java.util.Objects.equals(this.openClCombinerExprF32, other.openClCombinerExprF32)
+                    && java.util.Objects.equals(this.openClCombinerExprF64, other.openClCombinerExprF64);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Arrays.hashCode(this.channels);
+            result = 31 * result + java.util.Objects.hashCode(this.combiner);
+            result = 31 * result + java.util.Objects.hashCode(this.openClCombinerExprF32);
+            result = 31 * result + java.util.Objects.hashCode(this.openClCombinerExprF64);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "InterpolatedDensityPlan[channels=" + java.util.Arrays.toString(this.channels)
+                    + ", combiner=" + this.combiner
+                    + ", openClCombinerExprF32=" + this.openClCombinerExprF32
+                    + ", openClCombinerExprF64=" + this.openClCombinerExprF64
+                    + "]";
+        }
     }
 
     /**
@@ -1245,6 +1278,36 @@ public final class LiftedWorldgenCapabilityTables {
                 }
             }
             return true;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof InterpolatedDensityGpuPlan other)) {
+                return false;
+            }
+            return java.util.Arrays.equals(this.channelModules, other.channelModules)
+                    && java.util.Objects.equals(this.openClCombinerExprF32, other.openClCombinerExprF32)
+                    && java.util.Objects.equals(this.openClCombinerExprF64, other.openClCombinerExprF64);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            result = 31 * result + java.util.Arrays.hashCode(this.channelModules);
+            result = 31 * result + java.util.Objects.hashCode(this.openClCombinerExprF32);
+            result = 31 * result + java.util.Objects.hashCode(this.openClCombinerExprF64);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "InterpolatedDensityGpuPlan[channelModules=" + java.util.Arrays.toString(this.channelModules)
+                    + ", openClCombinerExprF32=" + this.openClCombinerExprF32
+                    + ", openClCombinerExprF64=" + this.openClCombinerExprF64
+                    + "]";
         }
     }
 

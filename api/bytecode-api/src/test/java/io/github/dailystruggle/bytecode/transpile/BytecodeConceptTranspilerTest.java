@@ -36,6 +36,7 @@ import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -2908,5 +2909,81 @@ class BytecodeConceptTranspilerTest {
                 deleteRecursively(tempDir);
             }
         }
+    }
+
+    @Test
+    @DisplayName("Array-backed OpenCL and worldgen interpolation records use array content semantics for equals, hashCode, and toString")
+    void arrayBackedRecordsUseContentSemanticsForEqualsHashCodeAndToString() {
+        OpenClBackendEmitter.DensityVolumeProgram dv1 = new OpenClBackendEmitter.DensityVolumeProgram(
+                "eval_k", "__kernel void eval_k() {}", "deadbeef", new int[] {1, 2, 3}, 12, 1, 0);
+        OpenClBackendEmitter.DensityVolumeProgram dv2 = new OpenClBackendEmitter.DensityVolumeProgram(
+                "eval_k", "__kernel void eval_k() {}", "deadbeef", new int[] {1, 2, 3}, 12, 1, 0);
+        OpenClBackendEmitter.DensityVolumeProgram dvDiff = new OpenClBackendEmitter.DensityVolumeProgram(
+                "eval_k", "__kernel void eval_k() {}", "deadbeef", new int[] {1, 2, 4}, 12, 1, 0);
+        assertEquals(dv1, dv2);
+        assertEquals(dv1.hashCode(), dv2.hashCode());
+        assertNotEquals(dv1, dvDiff);
+        assertTrue(dv1.toString().contains("[1, 2, 3]"), "toString must render array contents: " + dv1);
+
+        OpenClBackendEmitter.MultiModuleSectionProgram mm1 = new OpenClBackendEmitter.MultiModuleSectionProgram(
+                "primary", "aux", List.of("aux0()"), new int[] {7, 8}, 8, 1, 2);
+        OpenClBackendEmitter.MultiModuleSectionProgram mm2 = new OpenClBackendEmitter.MultiModuleSectionProgram(
+                "primary", "aux", List.of("aux0()"), new int[] {7, 8}, 8, 1, 2);
+        OpenClBackendEmitter.MultiModuleSectionProgram mmDiff = new OpenClBackendEmitter.MultiModuleSectionProgram(
+                "primary", "aux", List.of("aux0()"), new int[] {7, 9}, 8, 1, 2);
+        assertEquals(mm1, mm2);
+        assertEquals(mm1.hashCode(), mm2.hashCode());
+        assertNotEquals(mm1, mmDiff);
+        assertTrue(mm1.toString().contains("[7, 8]"), "toString must render array contents: " + mm1);
+
+        LiftedWorldgenCapabilityTables.DensityFieldEvaluator evalA = (x, y, z) -> 1.0f;
+        LiftedWorldgenCapabilityTables.DensityFieldEvaluator evalB = (x, y, z) -> 2.0f;
+        LiftedWorldgenCapabilityTables.InterpolatedCombiner combiner = (vals, x, y, z) -> vals[0];
+        LiftedWorldgenCapabilityTables.InterpolatedDensityPlan plan1 =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityPlan(
+                        new LiftedWorldgenCapabilityTables.DensityFieldEvaluator[] {evalA},
+                        combiner,
+                        "c0",
+                        "c0");
+        LiftedWorldgenCapabilityTables.InterpolatedDensityPlan plan2 =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityPlan(
+                        new LiftedWorldgenCapabilityTables.DensityFieldEvaluator[] {evalA},
+                        combiner,
+                        "c0",
+                        "c0");
+        LiftedWorldgenCapabilityTables.InterpolatedDensityPlan planDiff =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityPlan(
+                        new LiftedWorldgenCapabilityTables.DensityFieldEvaluator[] {evalB},
+                        combiner,
+                        "c0",
+                        "c0");
+        assertEquals(plan1, plan2);
+        assertEquals(plan1.hashCode(), plan2.hashCode());
+        assertNotEquals(plan1, planDiff);
+        assertTrue(plan1.toString().contains("[" + evalA + "]"), "toString must render array contents: " + plan1);
+
+        ConceptFunction fnA = new ConceptFunction(
+                "test/ModA", "sample", "()F", List.of(), BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(), List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.FloatConst(1.0f))), true);
+        ConceptFunction fnB = new ConceptFunction(
+                "test/ModB", "sample", "()F", List.of(), BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(), List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.FloatConst(2.0f))), true);
+        ConceptModule modA = new ConceptModule("modA", List.of(), List.of(), fnA, null, null, List.of());
+        ConceptModule modB = new ConceptModule("modB", List.of(), List.of(), fnB, null, null, List.of());
+        LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan gpu1 =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan(
+                        new ConceptModule[] {modA}, "c0", "c0");
+        LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan gpu2 =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan(
+                        new ConceptModule[] {modA}, "c0", "c0");
+        LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan gpuDiff =
+                new LiftedWorldgenCapabilityTables.InterpolatedDensityGpuPlan(
+                        new ConceptModule[] {modB}, "c0", "c0");
+        assertEquals(gpu1, gpu2);
+        assertEquals(gpu1.hashCode(), gpu2.hashCode());
+        assertNotEquals(gpu1, gpuDiff);
+        assertTrue(gpu1.toString().contains("[" + modA + "]"), "toString must render array contents: " + gpu1);
     }
 }
