@@ -407,6 +407,7 @@ if (!excludeNeoforge && !excludeJdk25) {
 
 
 
+include 'resource:LeafDesk'
 
 // LeafGen plugin modules unwired (superseded by GoldLeaf native :bytecode-api IR + OpenCL pipeline; goldleaf-ADR-004).
 // Retained on disk temporarily for reference until GoldLeaf GPU parity gates pass.

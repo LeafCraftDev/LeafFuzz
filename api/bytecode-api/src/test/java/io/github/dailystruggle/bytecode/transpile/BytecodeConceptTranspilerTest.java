@@ -2985,5 +2985,296 @@ class BytecodeConceptTranspilerTest {
         assertEquals(gpu1.hashCode(), gpu2.hashCode());
         assertNotEquals(gpu1, gpuDiff);
         assertTrue(gpu1.toString().contains("[" + modA + "]"), "toString must render array contents: " + gpu1);
+
+        OpenClBackendEmitter.MultiEntryHelpersProgram me1 = new OpenClBackendEmitter.MultiEntryHelpersProgram(
+                "helpers", List.of("e0()"), new int[] {3, 4}, 16, 1, 2);
+        OpenClBackendEmitter.MultiEntryHelpersProgram me2 = new OpenClBackendEmitter.MultiEntryHelpersProgram(
+                "helpers", List.of("e0()"), new int[] {3, 4}, 16, 1, 2);
+        OpenClBackendEmitter.MultiEntryHelpersProgram meDiff = new OpenClBackendEmitter.MultiEntryHelpersProgram(
+                "helpers", List.of("e0()"), new int[] {3, 5}, 16, 1, 2);
+        assertEquals(me1, me2);
+        assertEquals(me1.hashCode(), me2.hashCode());
+        assertNotEquals(me1, meDiff);
+        assertTrue(me1.toString().contains("[3, 4]"), "toString must render array contents: " + me1);
+    }
+
+    @Test
+    @DisplayName("emitMultiEntryHelpers emits one shared device helper across all entries and compiles cleanly on GPU")
+    void emitMultiEntryHelpersSharesSingleHelperAndCompilesOnGpu() throws Exception {
+        String owner = "test/SharedMultiEntry";
+        List<Number> permData = new java.util.ArrayList<>(512);
+        for (int i = 0; i < 512; i++) {
+            permData.add(i & 0xFF);
+        }
+        BytecodeConceptIr.ConceptLut lut = new BytecodeConceptIr.ConceptLut(
+                owner, "gl_perlin_padj_all", "gl_perlin_padj_all", BytecodeConceptIr.ConceptType.I32, permData);
+
+        BytecodeConceptIr.ConceptFunction sharedHelper = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "gl_perlin_3d",
+                "(IIII)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("off", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 1),
+                        new BytecodeConceptIr.ConceptParam("y", BytecodeConceptIr.ConceptType.I32, 2),
+                        new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 3)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.Cast(
+                                BytecodeConceptIr.ConceptType.F32,
+                                new BytecodeConceptIr.ConceptExpr.LutLoad(
+                                        "gl_perlin_padj_all",
+                                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                                BytecodeConceptIr.BinaryOperator.ADD,
+                                                new BytecodeConceptIr.ConceptExpr.Var("off", BytecodeConceptIr.ConceptType.I32),
+                                                new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                                        BytecodeConceptIr.BinaryOperator.BIT_AND,
+                                                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                                                BytecodeConceptIr.BinaryOperator.ADD,
+                                                                new BytecodeConceptIr.ConceptExpr.Var("x", BytecodeConceptIr.ConceptType.I32),
+                                                                new BytecodeConceptIr.ConceptExpr.Var("z", BytecodeConceptIr.ConceptType.I32),
+                                                                BytecodeConceptIr.ConceptType.I32),
+                                                        new BytecodeConceptIr.ConceptExpr.IntConst(255),
+                                                        BytecodeConceptIr.ConceptType.I32),
+                                                BytecodeConceptIr.ConceptType.I32),
+                                        BytecodeConceptIr.ConceptType.I32)))),
+                true);
+
+        List<BytecodeConceptIr.ConceptFunction> helpers = new java.util.ArrayList<>();
+        helpers.add(sharedHelper);
+        List<String> entryNames = new java.util.ArrayList<>();
+        BytecodeConceptIr.ConceptFunction primaryEntry = null;
+        for (int i = 0; i < 4; i++) {
+            String fnName = "eval_root_" + i;
+            entryNames.add(fnName);
+            BytecodeConceptIr.ConceptFunction entryFn = new BytecodeConceptIr.ConceptFunction(
+                    owner,
+                    fnName,
+                    "(III)F",
+                    List.of(
+                            new BytecodeConceptIr.ConceptParam("bx", BytecodeConceptIr.ConceptType.I32, 0),
+                            new BytecodeConceptIr.ConceptParam("by", BytecodeConceptIr.ConceptType.I32, 1),
+                            new BytecodeConceptIr.ConceptParam("bz", BytecodeConceptIr.ConceptType.I32, 2)),
+                    BytecodeConceptIr.ConceptType.F32,
+                    java.util.Map.of(),
+                    List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                            new BytecodeConceptIr.ConceptExpr.Call(
+                                    owner,
+                                    "gl_perlin_3d",
+                                    "(IIII)F",
+                                    List.of(
+                                            new BytecodeConceptIr.ConceptExpr.IntConst(i * 64),
+                                            new BytecodeConceptIr.ConceptExpr.Var("bx", BytecodeConceptIr.ConceptType.I32),
+                                            new BytecodeConceptIr.ConceptExpr.Var("by", BytecodeConceptIr.ConceptType.I32),
+                                            new BytecodeConceptIr.ConceptExpr.Var("bz", BytecodeConceptIr.ConceptType.I32)),
+                                    BytecodeConceptIr.ConceptType.F32))),
+                    true);
+            if (i == 0) {
+                primaryEntry = entryFn;
+            } else {
+                helpers.add(entryFn);
+            }
+        }
+
+        ConceptModule module = new ConceptModule(
+                "shared_multi_entry", List.of(lut), helpers, primaryEntry, null, null, List.of());
+        ConceptOptimizerPass.OptimizationConfig nonInline = new ConceptOptimizerPass.OptimizationConfig(
+                false, true, true, false);
+        ConceptModule opt = ConceptOptimizerPass.optimize(module, nonInline);
+
+        OpenClBackendEmitter emitter = new OpenClBackendEmitter();
+        ConceptBackendEmitter.EmitOptions opts = ConceptBackendEmitter.EmitOptions.of(
+                ConceptBackendEmitter.GpuExactArithmeticMode.INT64_Q32_FP32,
+                ConceptBackendEmitter.BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        OpenClBackendEmitter.MultiEntryHelpersProgram prog = emitter.emitMultiEntryHelpers(opt, entryNames, opts);
+
+        assertEquals(4, prog.entryCallExprs().size());
+        long helperDefCount = prog.helpersSource().lines()
+                .filter(l -> l.contains("m_gl_perlin_3d(") && l.trim().endsWith("{"))
+                .count();
+        assertEquals(1L, helperDefCount, "Expected exactly 1 shared gl_perlin_3d definition:\n" + prog.helpersSource());
+        for (int i = 0; i < 4; i++) {
+            assertTrue(prog.entryCallExprs().get(i).contains("m_eval_root_" + i + "(bx, by, bz, gl_lut_spill)"));
+        }
+
+        if (isRealOpenClGpuAvailable()) {
+            String fullKernel = prog.helpersSource()
+                    + "\n__kernel void test_multi(__global float* out, __global const int* gl_lut_spill) {\n"
+                    + "    int bx = (int)get_global_id(0), by = 0, bz = 1;\n"
+                    + "    out[bx] = " + prog.entryCallExprs().get(0) + " + " + prog.entryCallExprs().get(3) + ";\n"
+                    + "}\n";
+            Path tempDir = Files.createTempDirectory("multi-entry-cl-test");
+            try {
+                verifyOpenClCompilesOnGpu(tempDir.resolve("multi_entry.cl"), fullKernel);
+            } finally {
+                deleteRecursively(tempDir);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("emitFusedBiomeClimate6SharedModule preserves all 6 outputs through optimizer and compiles on GPU")
+    void emitFusedBiomeClimate6SharedModulePreservesAll6ChannelsThroughOptimizerAndCompilesOnGpu() throws Exception {
+        String owner = "test/SharedBiome6";
+        BytecodeConceptIr.ConceptFunction sharedNoise = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "shared_shift",
+                "(II)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 1)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                BytecodeConceptIr.BinaryOperator.MUL,
+                                new BytecodeConceptIr.ConceptExpr.Cast(
+                                        BytecodeConceptIr.ConceptType.F32,
+                                        new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                                BytecodeConceptIr.BinaryOperator.ADD,
+                                                new BytecodeConceptIr.ConceptExpr.Var("x", BytecodeConceptIr.ConceptType.I32),
+                                                new BytecodeConceptIr.ConceptExpr.Var("z", BytecodeConceptIr.ConceptType.I32),
+                                                BytecodeConceptIr.ConceptType.I32)),
+                                new BytecodeConceptIr.ConceptExpr.FloatConst(0.01f),
+                                BytecodeConceptIr.ConceptType.F32))),
+                true);
+
+        java.util.Map<String, BytecodeConceptIr.ConceptType> locals = new java.util.LinkedHashMap<>();
+        locals.put("shared_sx", BytecodeConceptIr.ConceptType.F32);
+        List<BytecodeConceptIr.ConceptStmt> body = new java.util.ArrayList<>();
+        body.add(new BytecodeConceptIr.ConceptStmt.Assign(
+                "shared_sx",
+                BytecodeConceptIr.ConceptType.F32,
+                new BytecodeConceptIr.ConceptExpr.Call(
+                        owner,
+                        "shared_shift",
+                        "(II)F",
+                        List.of(
+                                new BytecodeConceptIr.ConceptExpr.Var("bx", BytecodeConceptIr.ConceptType.I32),
+                                new BytecodeConceptIr.ConceptExpr.Var("bz", BytecodeConceptIr.ConceptType.I32)),
+                        BytecodeConceptIr.ConceptType.F32)));
+        for (int c = 0; c < 6; c++) {
+            body.add(new BytecodeConceptIr.ConceptStmt.Assign(
+                    "out_ch" + c,
+                    BytecodeConceptIr.ConceptType.F32,
+                    new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                            BytecodeConceptIr.BinaryOperator.ADD,
+                            new BytecodeConceptIr.ConceptExpr.Var("shared_sx", BytecodeConceptIr.ConceptType.F32),
+                            new BytecodeConceptIr.ConceptExpr.FloatConst((float) c * 0.25f),
+                            BytecodeConceptIr.ConceptType.F32)));
+        }
+
+        List<BytecodeConceptIr.ConceptParam> params = List.of(
+                new BytecodeConceptIr.ConceptParam("bx", BytecodeConceptIr.ConceptType.I32, 0),
+                new BytecodeConceptIr.ConceptParam("by", BytecodeConceptIr.ConceptType.I32, 1),
+                new BytecodeConceptIr.ConceptParam("bz", BytecodeConceptIr.ConceptType.I32, 2),
+                new BytecodeConceptIr.ConceptParam("out_ch0", BytecodeConceptIr.ConceptType.F32, 3),
+                new BytecodeConceptIr.ConceptParam("out_ch1", BytecodeConceptIr.ConceptType.F32, 4),
+                new BytecodeConceptIr.ConceptParam("out_ch2", BytecodeConceptIr.ConceptType.F32, 5),
+                new BytecodeConceptIr.ConceptParam("out_ch3", BytecodeConceptIr.ConceptType.F32, 6),
+                new BytecodeConceptIr.ConceptParam("out_ch4", BytecodeConceptIr.ConceptType.F32, 7),
+                new BytecodeConceptIr.ConceptParam("out_ch5", BytecodeConceptIr.ConceptType.F32, 8));
+
+        BytecodeConceptIr.ConceptFunction entry = new BytecodeConceptIr.ConceptFunction(
+                owner, "evalBiomeClimate6", "(IIIFFFFFF)V", params, BytecodeConceptIr.ConceptType.VOID, locals, body, true);
+        ConceptModule module = new ConceptModule(
+                "shared_biome_climate6", List.of(), List.of(sharedNoise), entry, null, null, List.of());
+
+        ConceptBackendEmitter.EmitOptions opts = ConceptBackendEmitter.EmitOptions.of(
+                ConceptBackendEmitter.GpuExactArithmeticMode.INT64_Q32_FP32,
+                ConceptBackendEmitter.BatchLayout.DENSITY_VOLUME_BATCH_F32);
+        ConceptModule optimized = ConceptOptimizerPass.optimize(module, opts);
+        OpenClBackendEmitter.DensityVolumeProgram prog =
+                new OpenClBackendEmitter().emitFusedBiomeClimate6SharedModule(optimized, opts);
+
+        assertEquals("eval_biome_climate6_batch", prog.kernelName());
+        assertTrue(prog.sourceCode().contains("static void gl_eval_biome_climate6("));
+        assertTrue(prog.sourceCode().contains("gl_eval_biome_climate6(bx, by, bz, gl_ch, gl_lut_spill);"));
+        for (int c = 0; c < 6; c++) {
+            assertTrue(prog.sourceCode().contains("gl_out6[" + c + "] = out_ch" + c + ";"));
+            assertTrue(prog.sourceCode().contains("out_values[out_base + " + c + "] = gl_ch[" + c + "];"));
+        }
+
+        if (isRealOpenClGpuAvailable()) {
+            Path tempDir = Files.createTempDirectory("shared-biome6-cl-test");
+            try {
+                verifyOpenClCompilesOnGpu(tempDir.resolve("shared_biome6.cl"), prog.sourceCode());
+            } finally {
+                deleteRecursively(tempDir);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("emitSectionFillWithAuxModules deduplicates structurally identical device helpers via #define")
+    void emitSectionFillWithAuxModulesDeduplicatesStructurallyIdenticalHelpers() {
+        String owner = "test/DedupAux";
+        BytecodeConceptIr.ConceptFunction helper = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "common_hash",
+                "(II)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("x", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("z", BytecodeConceptIr.ConceptType.I32, 1)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.Cast(
+                                BytecodeConceptIr.ConceptType.F32,
+                                new BytecodeConceptIr.ConceptExpr.BinaryOp(
+                                        BytecodeConceptIr.BinaryOperator.BIT_XOR,
+                                        new BytecodeConceptIr.ConceptExpr.Var("x", BytecodeConceptIr.ConceptType.I32),
+                                        new BytecodeConceptIr.ConceptExpr.Var("z", BytecodeConceptIr.ConceptType.I32),
+                                        BytecodeConceptIr.ConceptType.I32)))),
+                true);
+        BytecodeConceptIr.ConceptFunction primaryFn = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "evalPrimary",
+                "(III)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("bx", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("by", BytecodeConceptIr.ConceptType.I32, 1),
+                        new BytecodeConceptIr.ConceptParam("bz", BytecodeConceptIr.ConceptType.I32, 2)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(new BytecodeConceptIr.ConceptExpr.FloatConst(1.0f))),
+                true);
+        BytecodeConceptIr.ConceptFunction auxFn = new BytecodeConceptIr.ConceptFunction(
+                owner,
+                "evalAux",
+                "(III)F",
+                List.of(
+                        new BytecodeConceptIr.ConceptParam("bx", BytecodeConceptIr.ConceptType.I32, 0),
+                        new BytecodeConceptIr.ConceptParam("by", BytecodeConceptIr.ConceptType.I32, 1),
+                        new BytecodeConceptIr.ConceptParam("bz", BytecodeConceptIr.ConceptType.I32, 2)),
+                BytecodeConceptIr.ConceptType.F32,
+                java.util.Map.of(),
+                List.of(new BytecodeConceptIr.ConceptStmt.Return(
+                        new BytecodeConceptIr.ConceptExpr.Call(
+                                owner,
+                                "common_hash",
+                                "(II)F",
+                                List.of(
+                                        new BytecodeConceptIr.ConceptExpr.Var("bx", BytecodeConceptIr.ConceptType.I32),
+                                        new BytecodeConceptIr.ConceptExpr.Var("bz", BytecodeConceptIr.ConceptType.I32)),
+                                BytecodeConceptIr.ConceptType.F32))),
+                true);
+
+        ConceptModule primary = new ConceptModule("primary", List.of(), List.of(), primaryFn, null, null, List.of());
+        ConceptModule aux0 = new ConceptModule("aux0", List.of(), List.of(helper), auxFn, null, null, List.of());
+        ConceptModule aux1 = new ConceptModule("aux1", List.of(), List.of(helper), auxFn, null, null, List.of());
+
+        OpenClBackendEmitter.MultiModuleSectionProgram prog = new OpenClBackendEmitter().emitSectionFillWithAuxModules(
+                primary,
+                null,
+                List.of(aux0, aux1),
+                ConceptBackendEmitter.EmitOptions.of(
+                        ConceptBackendEmitter.GpuExactArithmeticMode.INT64_Q32_FP32,
+                        ConceptBackendEmitter.BatchLayout.SECTION_PALETTE_FILL_U2));
+
+        assertTrue(
+                prog.auxiliaryHelpersSource().contains("#define aux1_common_hash aux0_common_hash"),
+                "Expected aux1_common_hash to alias aux0_common_hash:\n" + prog.auxiliaryHelpersSource());
     }
 }

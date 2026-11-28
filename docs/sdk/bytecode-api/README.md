@@ -5,7 +5,8 @@ Zero-classloading JVM `.class` constant-pool, configuration-key, and causal-grap
 ## Coordinates
 
 - **Gradle project:** `:bytecode-api`
-- **Maven coordinate:** `io.github.dailystruggle:bytecode-api`
+- **Maven Central:** `io.github.leafcraftdev:bytecode-api:1.0.0`
+- **JitPack:** `com.github.LeafCraftDev.LeafSDK:bytecode-api:1.0.0`
 - **Package root:** `io.github.dailystruggle.bytecode`
 - **Java baseline:** Java 17 (classfile 61)
 - **Runtime dependencies:** `:yaml-api`, `:server-api`, `:config-bit-api` (zero `rtp-core`, `rtp-api`, or platform SDK dependencies)
